@@ -10,9 +10,7 @@ internal static class InteropEmitter
     public static void Emit(IReadOnlyList<IrRecord> records, string outputDirectory)
     {
         var declarations = records.OfType<DeclarationRecord>()
-            .Where(declaration => (declaration.Kind is "class" or "struct" or "union")
-                && !declaration.QualifiedName.Contains('<')
-                && !declaration.QualifiedName.Contains('>'))
+            .Where(declaration => declaration.Kind is "class" or "struct" or "union")
             .OrderBy(declaration => declaration.Id, StringComparer.Ordinal)
             .ToList();
 
@@ -58,7 +56,7 @@ internal static class InteropEmitter
                     }
 
                     lines.Add("");
-                    EmitMember(lines, member, memberNames[member.Id]);
+                    EmitMember(lines, member, memberNames[member.Id], name.ClassName);
                 }
             }
 
@@ -118,10 +116,10 @@ internal static class InteropEmitter
         DeclarationRecord declaration,
         HashSet<string> classNames)
     {
-        var parts = declaration.QualifiedName.Split("::", StringSplitOptions.RemoveEmptyEntries);
+        var parts = TypeNames.SplitQualifiedName(declaration.QualifiedName);
         var segments = new List<string>();
         var nativePrefix = "";
-        var parentCount = Math.Max(0, parts.Length - 1);
+        var parentCount = Math.Max(0, parts.Count - 1);
         for (var index = 0; index < parentCount; index++)
         {
             var part = parts[index];
@@ -146,7 +144,7 @@ internal static class InteropEmitter
         var candidates = members
             .Select(member => (
                 Member: member,
-                Name: TypeNames.Sanitize(member.Name),
+                Name: MemberBaseName(member),
                 Key: MemberKey(member)))
             .ToList();
 
@@ -167,20 +165,65 @@ internal static class InteropEmitter
 
     private static string MemberKey(MemberRecord member)
     {
-        if (member.Kind is "method" or "function" or "operator")
+        if (member.Kind is "method" or "function" or "operator" or "constructor" or "destructor")
         {
             var parameters = member.Signature?.Parameters
                 .Select(parameter => TypeNames.ToCSharpType(new TypeRef { Kind = "fundamental", Canonical = parameter.Type }))
                 ?? [];
-            return "method:" + string.Join(",", parameters);
+            return member.Kind + ":" + string.Join(",", parameters);
         }
 
         return "field";
     }
 
+    private static string MemberBaseName(MemberRecord member) => member.Kind switch
+    {
+        "constructor" => "Create",
+        "destructor" => "Destroy",
+        "operator" => OperatorName(member),
+        _ => TypeNames.Sanitize(member.Name),
+    };
+
+    private static string OperatorName(MemberRecord member)
+    {
+        return member.Name switch
+        {
+            "operator==" => "operator_equal",
+            "operator!=" => "operator_not_equal",
+            "operator<" => "operator_less",
+            "operator<=" => "operator_less_equal",
+            "operator>" => "operator_greater",
+            "operator>=" => "operator_greater_equal",
+            "operator<=>" => "operator_compare",
+            "operator+" => "operator_add",
+            "operator-" => "operator_subtract",
+            "operator*" => "operator_multiply",
+            "operator/" => "operator_divide",
+            "operator%" => "operator_modulo",
+            "operator[]" => "operator_index",
+            "operator()" => "operator_call",
+            "operator=" => "operator_assign",
+            _ => BuildConversionOperatorName(member),
+        };
+    }
+
+    private static string BuildConversionOperatorName(MemberRecord member)
+    {
+        var target = member.Name.StartsWith("operator ", StringComparison.Ordinal)
+            ? member.Name["operator ".Length..]
+            : member.Name;
+        var name = TypeNames.Sanitize(target).TrimStart('@');
+        if (name.Length > 60)
+        {
+            name = name[..60] + "_" + ShortHash(member.Id);
+        }
+
+        return "operator_" + name;
+    }
+
     private static string ShortHash(string value) => IrHash.Sha256Hex(value).Substring(0, 8);
 
-    private static void EmitMember(List<string> lines, MemberRecord member, string name)
+    private static void EmitMember(List<string> lines, MemberRecord member, string name, string className)
     {
         switch (member.Kind)
         {
@@ -197,20 +240,24 @@ internal static class InteropEmitter
                 break;
             }
 
+            case "constructor":
+                lines.Add($"    public static {className} {name}({CSharpParameters(member)}) =>");
+                lines.Add($"        throw new global::System.NotSupportedException(\"{StubReason}\");");
+                break;
+
+            case "destructor":
+                lines.Add($"    public void {name}() =>");
+                lines.Add($"        throw new global::System.NotSupportedException(\"{StubReason}\");");
+                break;
+
             case "method":
             case "function":
             case "operator":
             {
                 var returnCanonical = member.Signature?.ReturnType ?? member.Type?.Canonical ?? "void";
                 var returnType = TypeNames.ToCSharpType(new TypeRef { Kind = "fundamental", Canonical = returnCanonical });
-                var parameters = member.Signature is null
-                    ? ""
-                    : string.Join(
-                        ", ",
-                        member.Signature.Parameters.Select((parameter, index) =>
-                            $"{TypeNames.ToCSharpType(new TypeRef { Kind = "fundamental", Canonical = parameter.Type })} {TypeNames.Sanitize(string.IsNullOrWhiteSpace(parameter.Name) ? $"arg{index}" : parameter.Name)}"));
                 var modifier = member.Static ? "static " : "";
-                lines.Add($"    public {modifier}{returnType} {name}({parameters}) =>");
+                lines.Add($"    public {modifier}{returnType} {name}({CSharpParameters(member)}) =>");
                 lines.Add($"        throw new global::System.NotSupportedException(\"{StubReason}\");");
                 break;
             }
@@ -219,6 +266,16 @@ internal static class InteropEmitter
                 lines.Add($"    // member kind '{member.Kind}' is not emitted by the stub");
                 break;
         }
+    }
+
+    private static string CSharpParameters(MemberRecord member)
+    {
+        return member.Signature is null
+            ? ""
+            : string.Join(
+                ", ",
+                member.Signature.Parameters.Select((parameter, index) =>
+                    $"{TypeNames.ToCSharpType(new TypeRef { Kind = "fundamental", Canonical = parameter.Type })} {TypeNames.Sanitize(string.IsNullOrWhiteSpace(parameter.Name) ? $"arg{index}" : parameter.Name)}"));
     }
 
     private readonly record struct DeclarationName(string NamespaceName, string NamespacePath, string ClassName);

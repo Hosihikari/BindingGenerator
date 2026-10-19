@@ -58,16 +58,34 @@ $CompilerArgs += @(
     "-isystem", (Join-Path $SdkRoot "$($Sdk.Name)\um")
 )
 
+$SourceRoots = @("src", "src-server")
+$Headers = foreach ($root in $SourceRoots) {
+    $rootPath = Join-Path $LeviLaminaRoot $root
+    $headerRoot = Join-Path $rootPath $Module
+    if (Test-Path $headerRoot) {
+        Get-ChildItem $headerRoot -Recurse -Filter *.h | ForEach-Object {
+            [pscustomobject]@{ Header = $_; Root = $rootPath }
+        }
+    }
+}
+$Headers = $Headers | Sort-Object { $_.Header.FullName }
+
 $UmbrellaDir = Join-Path $GeneratorRoot "artifacts\llapi-umbrella"
 New-Item -ItemType Directory -Force -Path $UmbrellaDir | Out-Null
-$HeaderRoot = Join-Path $LeviLaminaRoot (Join-Path "src" $Module)
-$Headers = Get-ChildItem $HeaderRoot -Recurse -Filter *.h | Sort-Object FullName
 $Umbrella = Join-Path $UmbrellaDir ("umbrella_" + ($Module -replace '/', '_') + ".h")
-$Lines = foreach ($Header in $Headers) {
-    $Relative = $Header.FullName.Substring($LeviLaminaRoot.Length + 1).Replace('\', '/')
+$Lines = foreach ($item in $Headers) {
+    $Relative = $item.Header.FullName.Substring($item.Root.Length + 1).Replace('\', '/')
     "#include `"$Relative`""
 }
 Set-Content -Path $Umbrella -Value $Lines -Encoding utf8
+
+$FilterArgs = @()
+foreach ($root in $SourceRoots) {
+    $filterPath = Join-Path $LeviLaminaRoot (Join-Path $root $Module)
+    if (Test-Path $filterPath) {
+        $FilterArgs += @("--filter", $filterPath)
+    }
+}
 
 $Exe = Join-Path $GeneratorRoot "build\frontend\Release\hosihikari-ir-frontend.exe"
 $env:PATH = "$(Join-Path $LlvmRoot 'bin');$env:PATH"
@@ -77,8 +95,8 @@ try {
     & $Exe `
         --surface levilamina `
         --output $Output `
-        --root (Join-Path $LeviLaminaRoot "src") `
-        --filter (Join-Path $LeviLaminaRoot "src\ll\api") `
+        --root $LeviLaminaRoot `
+        @FilterArgs `
         --configuration win-x64-server `
         --module $Module `
         --source $Umbrella `

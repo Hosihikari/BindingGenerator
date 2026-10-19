@@ -23,7 +23,7 @@ internal static class CoverageEmitter
         var entries = new List<CoverageEntry>();
         foreach (var declaration in declarations)
         {
-            var isTemplate = declaration.QualifiedName.Contains('<') || declaration.QualifiedName.Contains('>');
+            var isTemplate = declaration.Kind == "template_declaration";
             foreach (var configuration in configurations)
             {
                 entries.Add(new CoverageEntry

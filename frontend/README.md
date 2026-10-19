@@ -33,6 +33,6 @@ cmake --build build/frontend --config Release
 
 ## Current state
 
-The frontend parses the full `src/ll/api` umbrella (209 declarations / 427 members in the current checkout) and the smaller `ll/api/event` module. It emits JSONL IR plus `ir-manifest.json` and validates the result through the .NET CLI. The visitor covers classes/structs/unions, fields, static fields, methods, enums, and namespace-scope functions; constructors, destructors, operators, template instantiations, and macro provenance are not emitted yet.
+The frontend parses the full `src/ll/api` umbrella plus the `src-server/ll/api` overlays (461 declarations / 1,394 members in the current checkout) and the smaller `ll/api/event` module. It emits JSONL IR plus `ir-manifest.json` and validates the result through the .NET CLI. The visitor covers classes/structs/unions, fields, static fields, methods, constructors, destructors, operators, enums, namespace-scope functions, and concrete template instantiations. Macro provenance is inferred from export/deprecated/nodiscard attributes; uninstantiated template declarations and partial specializations are skipped.
 
 The frontend is not part of the .NET CI job; it requires the pinned LLVM toolchain, zlib/zstd, and the MSVC/SDK headers. `build.ps1`, `run-local.ps1`, and `run-umbrella.ps1` cover the local Windows slice.

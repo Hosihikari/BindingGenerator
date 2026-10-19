@@ -33,7 +33,7 @@ dotnet run --project src/Hosihikari.Bindings.Generator/Hosihikari.Bindings.Gener
 
 ## Local LLAPI slice
 
-`frontend/run-local.ps1` parses `ll/api/event/Event.h`, writes IR under `artifacts/llapi-ir`, and validates it. `frontend/run-umbrella.ps1 -Module ll/api` parses the full `src/ll/api` umbrella and reuses the LeviLamina `compile_commands.json`. `emit` then writes the Interop, BindingShim and coverage stubs under `artifacts/`.
+`frontend/run-local.ps1` parses `ll/api/event/Event.h`, writes IR under `artifacts/llapi-ir`, and validates it. `frontend/run-umbrella.ps1 -Module ll/api` parses the full `src/ll/api` plus `src-server/ll/api` umbrella, reuses the LeviLamina `compile_commands.json`, and currently yields 461 declarations / 1,394 members. `emit` then writes the Interop, BindingShim and coverage stubs under `artifacts/`; the generated C# for this slice compiles.
 
 ## Licence
 

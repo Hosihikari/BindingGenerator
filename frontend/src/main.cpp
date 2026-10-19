@@ -34,7 +34,7 @@ struct Options {
     std::string Configuration = "win-x64-server";
     std::string Header = "ll/api/event/Event.h";
     std::string Source;
-    std::string Filter;
+    std::vector<std::string> Filters;
     std::string Module = "ll/api/event";
     std::vector<std::string> CompilerArgs;
 };
@@ -90,9 +90,11 @@ bool parseOptions(int argc, char** argv, Options& Opt) {
                 return false;
             }
         } else if (Arg == "--filter") {
-            if (!next(Opt.Filter)) {
+            std::string Filter;
+            if (!next(Filter)) {
                 return false;
             }
+            Opt.Filters.push_back(std::move(Filter));
         } else if (Arg == "--module") {
             if (!next(Opt.Module)) {
                 return false;
@@ -125,7 +127,7 @@ class IrVisitor : public RecursiveASTVisitor<IrVisitor> {
 public:
     IrVisitor(ASTContext& Ctx, const Options& Opt) : Ctx(Ctx), Opt(Opt) {}
 
-    bool shouldVisitTemplateInstantiations() const { return false; }
+    bool shouldVisitTemplateInstantiations() const { return true; }
 
     bool VisitCXXRecordDecl(CXXRecordDecl* Decl) {
         if (Decl->isImplicit() || Decl->isLambda() || Decl->isAnonymousStructOrUnion()) {
@@ -136,7 +138,6 @@ public:
         }
         if (Decl->isInvalidDecl() || Decl->isDependentContext()
             || Decl->getDescribedClassTemplate() != nullptr
-            || isa<ClassTemplateSpecializationDecl>(Decl)
             || isa<ClassTemplatePartialSpecializationDecl>(Decl)
             || isInStandardNamespace(Decl)
             || isInternalName(Decl)) {
@@ -168,12 +169,18 @@ public:
                     emitMember(Definition, DeclId, Variable, "static_field", true);
                 }
             } else if (auto* Method = dyn_cast<CXXMethodDecl>(Member)) {
-                if (Method->isImplicit() || Method->isDeleted() || Method->isOverloadedOperator()
-                    || isa<CXXConstructorDecl>(Method) || isa<CXXDestructorDecl>(Method)
-                    || isa<CXXConversionDecl>(Method)) {
+                if (Method->isImplicit() || Method->isDeleted()) {
                     continue;
                 }
-                emitMember(Definition, DeclId, Method, "method", false);
+                if (isa<CXXConstructorDecl>(Method)) {
+                    emitMember(Definition, DeclId, Method, "constructor", false);
+                } else if (isa<CXXDestructorDecl>(Method)) {
+                    emitMember(Definition, DeclId, Method, "destructor", false);
+                } else if (Method->isOverloadedOperator() || isa<CXXConversionDecl>(Method)) {
+                    emitMember(Definition, DeclId, Method, "operator", false);
+                } else {
+                    emitMember(Definition, DeclId, Method, "method", false);
+                }
             }
         }
 
@@ -274,12 +281,17 @@ private:
             return false;
         }
 
-        if (Opt.Filter.empty()) {
+        if (Opt.Filters.empty()) {
             return true;
         }
 
-        std::string Filter = normalizePath(Opt.Filter);
-        return Path.rfind(Filter, 0) == 0;
+        for (const auto& Filter : Opt.Filters) {
+            if (Path.rfind(normalizePath(Filter), 0) == 0) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     std::string idFor(const Decl* Decl, const std::string& ParentId) const {
@@ -378,6 +390,46 @@ private:
         return Signature;
     }
 
+    llvm::json::Array inferMacros(NamedDecl* Decl) const {
+        bool hasExport = false;
+        bool hasNodiscard = false;
+        bool hasDeprecated = false;
+        for (auto* Attribute : Decl->attrs()) {
+            llvm::StringRef Name = Attribute->getSpelling();
+            if (Name == "DLLExport" || Name == "DLLImport" || Name == "Visibility") {
+                hasExport = true;
+            } else if (Name == "WarnUnusedResult") {
+                hasNodiscard = true;
+            } else if (Name == "Deprecated") {
+                hasDeprecated = true;
+            }
+        }
+
+        llvm::json::Array Macros;
+        auto add = [&](llvm::StringRef Name) {
+            llvm::json::Object Item;
+            Item["name"] = Name;
+            Item["expansion"] = "attribute-inferred";
+            Macros.emplace_back(std::move(Item));
+        };
+
+        if (Opt.Surface == "levilamina") {
+            if (hasExport && hasNodiscard) {
+                add("LLNDAPI");
+            } else if (hasExport) {
+                add("LLAPI");
+            }
+        } else if (Opt.Surface == "bedrock") {
+            if (hasExport && hasDeprecated) {
+                add("MCNAPI");
+            } else if (hasExport) {
+                add("MCAPI");
+            }
+        }
+
+        return Macros;
+    }
+
     llvm::json::Object makeDeclaration(NamedDecl* Decl, const std::string& Id, const std::string& Kind) const {
         llvm::json::Object Object;
         Object["recordType"] = "declaration";
@@ -397,6 +449,11 @@ private:
         }
         if (!Attributes.empty()) {
             Object["attributes"] = std::move(Attributes);
+        }
+
+        auto Macros = inferMacros(Decl);
+        if (!Macros.empty()) {
+            Object["macros"] = std::move(Macros);
         }
 
         if (auto* Function = dyn_cast<FunctionDecl>(Decl)) {
@@ -458,6 +515,21 @@ private:
         Object["name"] = Member->getNameAsString();
         Object["access"] = accessString(Member->getAccess());
         Object["static"] = Static;
+
+        llvm::json::Array Attributes;
+        for (auto* Attribute : Member->attrs()) {
+            llvm::json::Object Item;
+            Item["name"] = Attribute->getSpelling();
+            Attributes.emplace_back(std::move(Item));
+        }
+        if (!Attributes.empty()) {
+            Object["attributes"] = std::move(Attributes);
+        }
+
+        auto Macros = inferMacros(Member);
+        if (!Macros.empty()) {
+            Object["macros"] = std::move(Macros);
+        }
 
         if (auto* Field = dyn_cast<FieldDecl>(Member)) {
             Object["type"] = makeType(Field->getType());

@@ -33,7 +33,7 @@ dotnet run --project src/Hosihikari.Bindings.Generator/Hosihikari.Bindings.Gener
 
 ## 本地 LLAPI 切片
 
-`frontend/run-local.ps1` 解析 `ll/api/event/Event.h`，把 IR 写到 `artifacts/llapi-ir` 并校验；`frontend/run-umbrella.ps1 -Module ll/api` 解析完整的 `src/ll/api` 伞头，并复用 LeviLamina 的 `compile_commands.json`。随后 `emit` 把 Interop、BindingShim 与覆盖 stub 写到 `artifacts/`。
+`frontend/run-local.ps1` 解析 `ll/api/event/Event.h`，把 IR 写到 `artifacts/llapi-ir` 并校验；`frontend/run-umbrella.ps1 -Module ll/api` 解析完整的 `src/ll/api` + `src-server/ll/api` 伞头，复用 LeviLamina 的 `compile_commands.json`，当前产出 461 声明 / 1,394 成员。随后 `emit` 把 Interop、BindingShim 与覆盖 stub 写到 `artifacts/`；该切片的生成 C# 可编译通过。
 
 ## 许可证
 

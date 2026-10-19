@@ -48,16 +48,44 @@ internal static class TypeNames
         return Escape(builder.ToString());
     }
 
+    public static IReadOnlyList<string> SplitQualifiedName(string name)
+    {
+        var parts = new List<string>();
+        var depth = 0;
+        var start = 0;
+        for (var index = 0; index < name.Length - 1; index++)
+        {
+            var character = name[index];
+            if (character == '<')
+            {
+                depth++;
+            }
+            else if (character == '>')
+            {
+                depth = Math.Max(0, depth - 1);
+            }
+            else if (depth == 0 && character == ':' && name[index + 1] == ':')
+            {
+                parts.Add(name[start..index]);
+                start = index + 2;
+                index++;
+            }
+        }
+
+        parts.Add(name[start..]);
+        return parts;
+    }
+
     public static string NativeNamespace(string qualifiedName)
     {
-        var separator = qualifiedName.LastIndexOf("::", StringComparison.Ordinal);
-        return separator < 0 ? "" : qualifiedName[..separator].Replace("::", ".", StringComparison.Ordinal);
+        var parts = SplitQualifiedName(qualifiedName);
+        return parts.Count > 1 ? string.Join(".", parts.Take(parts.Count - 1)) : "";
     }
 
     public static string NativeName(string qualifiedName)
     {
-        var separator = qualifiedName.LastIndexOf("::", StringComparison.Ordinal);
-        return separator < 0 ? qualifiedName : qualifiedName[(separator + 2)..];
+        var parts = SplitQualifiedName(qualifiedName);
+        return parts.Count == 0 ? qualifiedName : parts[^1];
     }
 
     public static string ToCSharpType(TypeRef? type)
