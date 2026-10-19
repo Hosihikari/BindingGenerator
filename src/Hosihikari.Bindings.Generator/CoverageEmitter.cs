@@ -5,7 +5,12 @@ namespace Hosihikari.Bindings.Generator;
 
 internal static class CoverageEmitter
 {
-    public static void Emit(IrManifest manifest, IReadOnlyList<IrRecord> records, string outputDirectory, string manifestHash)
+    public static void Emit(
+        IrManifest manifest,
+        IReadOnlyList<IrRecord> records,
+        string outputDirectory,
+        string manifestHash,
+        AbiPlan plan)
     {
         var declarations = records.OfType<DeclarationRecord>()
             .OrderBy(declaration => declaration.Id, StringComparer.Ordinal)
@@ -24,6 +29,7 @@ internal static class CoverageEmitter
         foreach (var declaration in declarations)
         {
             var isTemplate = declaration.Kind == "template_declaration";
+            var declarationHasShim = plan.FunctionsByDeclaration.ContainsKey(declaration.Id);
             foreach (var configuration in configurations)
             {
                 entries.Add(new CoverageEntry
@@ -35,7 +41,9 @@ internal static class CoverageEmitter
                     Kind = declaration.Kind,
                     QualifiedName = declaration.QualifiedName,
                     Status = isTemplate ? CoverageStatus.Excluded : CoverageStatus.Bound,
-                    Emitters = isTemplate ? [] : ["interop"],
+                    Emitters = isTemplate
+                        ? []
+                        : declarationHasShim ? ["interop", "shim"] : ["interop"],
                     Reason = isTemplate ? CoverageReason.TemplateDeclaration : (CoverageReason?)null,
                     Source = declaration.Source,
                 });
@@ -49,6 +57,10 @@ internal static class CoverageEmitter
                 {
                     var isPrivate = member.Access == "private";
                     var excluded = isTemplate || isPrivate;
+                    var memberHasShim = !excluded
+                        && (plan.HasMemberFunction(member.Id)
+                            || (member.Kind == "destructor"
+                                && plan.DestroyByDeclaration.ContainsKey(declaration.Id)));
                     CoverageReason? reason = isTemplate
                         ? CoverageReason.TemplateDeclaration
                         : isPrivate ? CoverageReason.Private : null;
@@ -61,7 +73,9 @@ internal static class CoverageEmitter
                         Kind = member.Kind,
                         QualifiedName = declaration.QualifiedName + "::" + member.Name,
                         Status = excluded ? CoverageStatus.Excluded : CoverageStatus.Bound,
-                        Emitters = excluded ? [] : ["interop"],
+                        Emitters = excluded
+                            ? []
+                            : memberHasShim ? ["interop", "shim"] : ["interop"],
                         Reason = reason,
                         Source = declaration.Source,
                     });

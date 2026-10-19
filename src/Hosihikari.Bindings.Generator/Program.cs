@@ -36,9 +36,10 @@ switch (args[0])
 
     case "emit":
     {
-        if (args.Length != 4)
+        if (args.Length is not (4 or 6)
+            || (args.Length == 6 && !string.Equals(args[4], "--native-root", StringComparison.Ordinal)))
         {
-            Console.Error.WriteLine("usage: emit <ir-manifest.json> <shard-directory> <output-directory>");
+            Console.Error.WriteLine("usage: emit <ir-manifest.json> <shard-directory> <output-directory> [--native-root <path>]");
             return 2;
         }
 
@@ -53,16 +54,19 @@ switch (args[0])
 
         var manifestHash = "sha256:" + IrHash.CanonicalJsonSha256(File.ReadAllText(args[1]));
         var output = Path.GetFullPath(args[3]);
+        var nativeRoot = args.Length == 6 ? Path.GetFullPath(args[5]) : null;
+        var plan = AbiPlan.Build(records, nativeRoot);
         foreach (var subdirectory in new[] { "interop", "shim", "coverage" })
         {
             DeleteDirectory(Path.Combine(output, subdirectory));
         }
 
         Directory.CreateDirectory(output);
-        InteropEmitter.Emit(records, output);
-        ShimEmitter.Emit(manifest, output, manifestHash);
-        CoverageEmitter.Emit(manifest, records, output, manifestHash);
-        Console.WriteLine($"emitted {records.Count} records to {output}");
+        InteropEmitter.Emit(records, output, plan);
+        ShimEmitter.Emit(manifest, records, output, manifestHash, plan);
+        CoverageEmitter.Emit(manifest, records, output, manifestHash, plan);
+        Console.WriteLine(
+            $"emitted {records.Count} records to {output} ({plan.Functions.Count} BindingShim functions)");
         return 0;
     }
 

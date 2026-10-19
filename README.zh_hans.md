@@ -29,11 +29,36 @@ dotnet run --project src/Hosihikari.Bindings.Generator/Hosihikari.Bindings.Gener
 
 `validate-ir` 读取 manifest 与分片目录下所有 `*.jsonl`，然后运行 IR 校验器。`validate-coverage` 对 `coverage/summary.json` + `coverage/manifest.jsonl` 做同样的事。
 
-`emit` 写出 `interop/`（C# stub）、`shim/`（C++ 函数表 stub）与 `coverage/`（manifest + summary）。stub 固定 IR→产物的契约；BindingShim 调用尚未接通。
+`emit` 写出 `interop/`（C#）、`shim/`（C++ BindingShim）与 `coverage/`（manifest + summary）。传入 `--native-root <path>` 会为 IR 的源文件发射真实 BindingShim：
+
+```shell
+dotnet run --project src/Hosihikari.Bindings.Generator/Hosihikari.Bindings.Generator.csproj -c Release -- emit `
+  artifacts/llapi-full-ir/ir-manifest.json artifacts/llapi-full-ir artifacts/llapi-real-shim `
+  --native-root C:/path/to/LeviLamina
+```
+
+不传 `--native-root` 时写出 fixture CI 使用的契约 stub。
+
+### 真实 BindingShim v1
+
+- C ABI 是每个 carrier surface 一份版本化的 `HosihikariBindingTableV1`。句柄为 `void*`；拥有句柄由构造函数工厂产生，由生成的释放器回收。字段字符串以借用 `HosihikariStringView` 返回，托管侧立即复制；字符串参数为 UTF-8 的 `(const char*, size_t)` 对。
+- 投影构造函数、析构函数、公共字段与受支持的方法。方法需为 inline、public、非变参、至多一个参数，且返回 `void`、基础类型或不透明指针。返回字符串的方法与字符串方法参数保留为 Interop stub，其生命周期契约不属于 v1。
+- 仅投影非模板、public、源文件存在于 native root、且 link-safe 的类：所有方法 inline，所有基类也 link-safe。这样 shim 对 header-only 类可独立链接，不把 carrier 符号引入 ABI。抽象类与含借用字符串构造函数的类不生成工厂。
+- 每个表函数都是 C++ function-try-block。原生异常被捕获到由 `hosihikari_get_last_error` 暴露的线程局部消息中，C++ 异常不会跨越托管边界。工厂失败返回空句柄，生成的 `Create` 抛出带该消息的 `InvalidOperationException`。
+- `NativeMethods.Load(path)` 在使用前校验导出的表版本与 `sizeof(Table)`；表的前两个字段是 `version` 与 `size`。
+
+`frontend/build-shim.ps1` 用 clang-cl 与 `/MD` 针对 LeviLamina 的 include 环境编译生成的 shim。`frontend/smoke-shim.ps1` 发射、构建并针对当前 IR 运行 `tests/BindingShimSmoke` 的端到端 smoke test。
 
 ## 本地 LLAPI 切片
 
-`frontend/run-local.ps1` 解析 `ll/api/event/Event.h`，把 IR 写到 `artifacts/llapi-ir` 并校验；`frontend/run-umbrella.ps1 -Module ll/api` 解析完整的 `src/ll/api` + `src-server/ll/api` 伞头，复用 LeviLamina 的 `compile_commands.json`，当前产出 461 声明 / 1,394 成员。随后 `emit` 把 Interop、BindingShim 与覆盖 stub 写到 `artifacts/`；该切片的生成 C# 可编译通过。
+`frontend/run-local.ps1` 解析 `ll/api/event/Event.h`，把 IR 写到 `artifacts/llapi-ir` 并校验；`frontend/run-umbrella.ps1 -Module ll/api` 解析完整的 `src/ll/api` + `src-server/ll/api` 伞头，复用 LeviLamina 的 `compile_commands.json`，当前产出 461 声明 / 1,394 成员。IR 为每个方法记录 `inline`/`defined`，BindingShim 规划器据此判断 link-safe。
+
+```shell
+powershell -File frontend/run-umbrella.ps1 -Module ll/api -Output artifacts/llapi-full-ir
+powershell -File frontend/smoke-shim.ps1 -IrDirectory artifacts/llapi-full-ir
+```
+
+完整 LLAPI 伞头当前选出 159 个真实 BindingShim 函数，覆盖 `ll::event::EventId`、`ll::event::EventIdView`、`ll::hash_utils::HashedIdBase`、`ll::hash_utils::HashCombiner` 以及切片内其他 link-safe 类。Smoke test 从托管字符串创建原生 `EventId`，读取名称与哈希，比较两个 `HashedIdBase` 视图，并通过函数表调用 `HashCombiner::hash()`。其余成员保留 Interop stub，并在覆盖清单中只记录 `interop` 发射器。
 
 ## 许可证
 

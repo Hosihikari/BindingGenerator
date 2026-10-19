@@ -541,6 +541,8 @@ private:
         } else if (auto* Method = dyn_cast<CXXMethodDecl>(Member)) {
             Object["virtual"] = Method->isVirtual();
             Object["pure"] = Method->isPureVirtual();
+            Object["inline"] = Method->isInlined();
+            Object["defined"] = Method->hasBody();
             Object["signature"] = makeSignature(Method);
             if (Method->begin_overridden_methods() != Method->end_overridden_methods()) {
                 Object["overrideOf"] = (*Method->begin_overridden_methods())->getQualifiedNameAsString();
@@ -617,7 +619,7 @@ int main(int argc, char** argv) {
 
     llvm::json::Object Manifest;
     Manifest["schema"] = "hosihikari.bindings.ir/1";
-    Manifest["irVersion"] = "1.0.0";
+    Manifest["irVersion"] = "1.1.0";
 
     llvm::json::Object Frontend;
     Frontend["name"] = "libtooling";
