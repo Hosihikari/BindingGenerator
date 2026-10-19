@@ -232,14 +232,125 @@ internal static class ShimEmitter
         IReadOnlyList<AbiFunction> functions,
         IReadOnlyDictionary<string, DeclarationRecord> declarations)
     {
-        return functions
-            .Select(function => function.DeclarationId)
-            .Distinct(StringComparer.Ordinal)
-            .Select(id => declarations.TryGetValue(id, out var declaration) ? declaration.Source?.File : null)
-            .Where(file => !string.IsNullOrWhiteSpace(file))
-            .Select(file => NormalizeInclude(file!))
+        var declarationsByQualifiedName = declarations.Values
+            .GroupBy(declaration => declaration.QualifiedName, StringComparer.Ordinal)
+            .ToDictionary(group => group.Key, group => group.First(), StringComparer.Ordinal);
+        var includes = new HashSet<string>(StringComparer.Ordinal);
+
+        foreach (var id in functions.Select(function => function.DeclarationId).Distinct(StringComparer.Ordinal))
+        {
+            if (!declarations.TryGetValue(id, out var declaration))
+            {
+                continue;
+            }
+
+            if (!string.IsNullOrWhiteSpace(declaration.Source?.File))
+            {
+                includes.Add(declaration.Source!.File);
+            }
+
+            if (declaration.Template is null)
+            {
+                continue;
+            }
+
+            var visited = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var argument in declaration.Template.Arguments)
+            {
+                if (string.Equals(argument.Kind, "pack", StringComparison.Ordinal))
+                {
+                    foreach (var part in AbiPlan.PackArgumentParts(argument.Value))
+                    {
+                        CollectTemplateDependencyIncludes(
+                            part,
+                            declarationsByQualifiedName,
+                            includes,
+                            visited);
+                    }
+                }
+                else if (string.Equals(argument.Kind, "type", StringComparison.Ordinal))
+                {
+                    CollectTemplateDependencyIncludes(
+                        argument.Value,
+                        declarationsByQualifiedName,
+                        includes,
+                        visited);
+                }
+            }
+        }
+
+        return includes
+            .Select(NormalizeInclude)
             .Distinct(StringComparer.Ordinal)
             .OrderBy(file => file, StringComparer.Ordinal);
+    }
+
+    private static void CollectTemplateDependencyIncludes(
+        string value,
+        IReadOnlyDictionary<string, DeclarationRecord> declarationsByQualifiedName,
+        HashSet<string> includes,
+        HashSet<string> visited)
+    {
+        var type = AbiPlan.NormalizeTemplateTypeName(value);
+        if (string.IsNullOrWhiteSpace(type)
+            || AbiPlan.IsFundamentalTemplateArgument(type)
+            || AbiPlan.IsLiteralTemplateArgument(type)
+            || !visited.Add(type))
+        {
+            return;
+        }
+
+        if (declarationsByQualifiedName.TryGetValue(type, out var declaration))
+        {
+            if (!string.IsNullOrWhiteSpace(declaration.Source?.File))
+            {
+                includes.Add(declaration.Source!.File);
+            }
+
+            if (declaration.Template is not null)
+            {
+                foreach (var argument in declaration.Template.Arguments)
+                {
+                    if (string.Equals(argument.Kind, "pack", StringComparison.Ordinal))
+                    {
+                        foreach (var part in AbiPlan.PackArgumentParts(argument.Value))
+                        {
+                            CollectTemplateDependencyIncludes(
+                                part,
+                                declarationsByQualifiedName,
+                                includes,
+                                visited);
+                        }
+                    }
+                    else if (string.Equals(argument.Kind, "type", StringComparison.Ordinal))
+                    {
+                        CollectTemplateDependencyIncludes(
+                            argument.Value,
+                            declarationsByQualifiedName,
+                            includes,
+                            visited);
+                    }
+                }
+            }
+
+            return;
+        }
+
+        if (!AbiPlan.IsStandardOrThirdPartyType(type))
+        {
+            return;
+        }
+
+        var inner = AbiPlan.ExtractTemplateArguments(type);
+        if (inner is null)
+        {
+            return;
+        }
+
+        foreach (var part in AbiPlan.SplitTemplateArguments(inner))
+        {
+            CollectTemplateDependencyIncludes(part, declarationsByQualifiedName, includes, visited);
+        }
     }
 
     private static string NormalizeInclude(string sourceFile)
@@ -341,7 +452,10 @@ internal static class ShimEmitter
                 }
                 else if (function.ReturnKind == AbiKind.Opaque)
                 {
-                    yield return $"    return const_cast<void*>(static_cast<void const*>({target}));";
+                    var address = AbiPlan.IsReferenceType(function.NativeReturnType)
+                        ? "&" + target
+                        : target;
+                    yield return $"    return const_cast<void*>(static_cast<void const*>({address}));";
                 }
                 else
                 {
@@ -394,9 +508,9 @@ internal static class ShimEmitter
         }
 
         yield return "}";
-        yield return "catch (std::exception const& e)";
+        yield return "catch (std::exception const& hs_error)";
         yield return "{";
-        yield return "    setLastError(e.what());";
+        yield return "    setLastError(hs_error.what());";
         yield return "    " + DefaultReturn(function.ReturnKind);
         yield return "}";
         yield return "catch (...)";

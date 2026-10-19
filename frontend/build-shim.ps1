@@ -7,7 +7,8 @@ param(
     [string]$LeviLaminaRoot = "C:\Users\root\source\repos\hosihikari\LeviLamina",
     [string[]]$AdditionalIncludePath = @(),
     [string[]]$AdditionalLinkLibrary = @(),
-    [string[]]$DelayLoadLibrary = @()
+    [string[]]$DelayLoadLibrary = @(),
+    [switch]$CompileOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -56,10 +57,14 @@ $CompilerArgs += @(
     "-imsvc", (Join-Path $SdkRoot "$($Sdk.Name)\ucrt"),
     "-imsvc", (Join-Path $SdkRoot "$($Sdk.Name)\shared"),
     "-imsvc", (Join-Path $SdkRoot "$($Sdk.Name)\um"),
-    "-MD",
-    "-LD",
-    "-Fe:$OutputDll"
+    "-MD"
 )
+
+if ($CompileOnly) {
+    $CompilerArgs += @("/c", "/Fo:$OutputDll")
+} else {
+    $CompilerArgs += @("-LD", "-Fe:$OutputDll")
+}
 
 foreach ($include in $AdditionalIncludePath) {
     $CompilerArgs += @("-I", (Resolve-Path $include).Path)
@@ -70,7 +75,7 @@ foreach ($library in $AdditionalLinkLibrary) {
 }
 
 $LinkArgs = @()
-if ($DelayLoadLibrary.Count -gt 0) {
+if (-not $CompileOnly -and $DelayLoadLibrary.Count -gt 0) {
     $LinkArgs += "/link"
     foreach ($library in $DelayLoadLibrary) {
         $LinkArgs += "/DELAYLOAD:$library"

@@ -116,20 +116,32 @@ internal sealed class AbiPlan
             return Empty;
         }
 
-        var declarations = records.OfType<DeclarationRecord>()
+        var allClassDeclarations = records.OfType<DeclarationRecord>()
             .Where(declaration => declaration.Kind is "class" or "struct" or "union")
-            .Where(declaration => declaration.Template is null)
-            .Where(declaration => declaration.Access == "public")
-            .Where(declaration => IsValidCppQualifiedName(declaration.QualifiedName))
-            .Where(declaration => declaration.Source is not null)
-            .Where(declaration => IsNativeSourceAvailable(nativeRoot, declaration.Source!.File))
             .OrderBy(declaration => declaration.Id, StringComparer.Ordinal)
             .ToList();
-
-        var declarationNames = CSharpNaming.BuildDeclarationNames(declarations);
-        var declarationsByQualifiedName = declarations
+        var declarationNames = CSharpNaming.BuildDeclarationNames(allClassDeclarations);
+        var publicDeclarationsByQualifiedName = allClassDeclarations
+            .Where(declaration => declaration.Access == "public")
             .GroupBy(declaration => declaration.QualifiedName, StringComparer.Ordinal)
             .ToDictionary(group => group.Key, group => group.First(), StringComparer.Ordinal);
+        var allDeclarationsByQualifiedName = records.OfType<DeclarationRecord>()
+            .GroupBy(declaration => declaration.QualifiedName, StringComparer.Ordinal)
+            .ToDictionary(group => group.Key, group => group.First(), StringComparer.Ordinal);
+        var abstractDeclarationIds = records.OfType<MemberRecord>()
+            .Where(member => member.Pure)
+            .Select(member => member.DeclarationId)
+            .ToHashSet(StringComparer.Ordinal);
+
+        var declarations = allClassDeclarations
+            .Where(declaration => declaration.Access == "public")
+            .Where(declaration => linkCarrier || declaration.Template is null)
+            .Where(declaration => IsValidCppQualifiedName(declaration.QualifiedName))
+            .Where(declaration => declaration.Template is null
+                || AreTemplateArgumentsUsable(declaration, allDeclarationsByQualifiedName))
+            .Where(declaration => declaration.Source is not null)
+            .Where(declaration => IsNativeSourceAvailable(nativeRoot, declaration.Source!.File))
+            .ToList();
 
         var membersByDeclaration = records.OfType<MemberRecord>()
             .GroupBy(member => member.DeclarationId, StringComparer.Ordinal)
@@ -263,6 +275,8 @@ internal sealed class AbiPlan
                 && destructor.Access == "public"
                 && (linkCarrier ? HasExportedSymbol(declaration, destructor) : destructor.Inline && !hasOutOfLineMethod);
             var isAbstract = declarationMembers.Any(member => member.Pure);
+            var hasAbstractTemplateArgument = declaration.Template is not null
+                && HasAbstractTemplateArgument(declaration, allDeclarationsByQualifiedName, abstractDeclarationIds);
             var created = false;
 
             foreach (var constructor in declarationMembers.Where(member =>
@@ -271,12 +285,12 @@ internal sealed class AbiPlan
                          && (linkCarrier ? HasExportedSymbol(declaration, member) : member.Inline)
                          && !member.Pure))
             {
-                if (ownsBorrowedString || !destructorAccessible || isAbstract)
+                if (ownsBorrowedString || !destructorAccessible || isAbstract || hasAbstractTemplateArgument)
                 {
                     continue;
                 }
 
-                if (!TryBuildCreate(declaration, constructor, declarationsByQualifiedName, declarationNames, out var create))
+                if (!TryBuildCreate(declaration, constructor, publicDeclarationsByQualifiedName, declarationNames, out var create))
                 {
                     continue;
                 }
@@ -295,7 +309,7 @@ internal sealed class AbiPlan
                          && member.Access == "public"
                          && member.Type is not null))
             {
-                if (!TryBuildField(declaration, field, declarationsByQualifiedName, declarationNames, out var getter, out var setter))
+                if (!TryBuildField(declaration, field, publicDeclarationsByQualifiedName, declarationNames, out var getter, out var setter))
                 {
                     continue;
                 }
@@ -318,7 +332,7 @@ internal sealed class AbiPlan
                          && (linkCarrier ? HasExportedSymbol(declaration, member) : member.Inline)
                          && !member.Pure))
             {
-                if (!TryBuildMethod(declaration, method, declarationsByQualifiedName, declarationNames, out var function))
+                if (!TryBuildMethod(declaration, method, publicDeclarationsByQualifiedName, declarationNames, out var function))
                 {
                     continue;
                 }
@@ -425,6 +439,11 @@ internal sealed class AbiPlan
             return false;
         }
 
+        if (StripTopLevelQualifiers(canonical).EndsWith("*", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
         var normalized = NormalizeTypeName(canonical);
         return string.Equals(normalized, "std::basic_string_view<char>", StringComparison.Ordinal)
             || string.Equals(normalized, "std::string_view", StringComparison.Ordinal);
@@ -432,6 +451,11 @@ internal sealed class AbiPlan
 
     private static bool IsStringType(string canonical)
     {
+        if (StripTopLevelQualifiers(canonical).EndsWith("*", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
         var normalized = NormalizeTypeName(canonical);
         return string.Equals(normalized, "std::basic_string<char>", StringComparison.Ordinal)
             || string.Equals(normalized, "std::string", StringComparison.Ordinal);
@@ -498,9 +522,303 @@ internal sealed class AbiPlan
     private static bool HasExportMacro(IEnumerable<MacroUseInfo> macros) =>
         macros.Any(macro => macro.Name is "LLAPI" or "LLNDAPI" or "LLCAPI" or "MCAPI" or "MCNAPI" or "ENDSTONE_EVENT");
 
+    internal static string NormalizeTemplateTypeName(string value) => NormalizeTypeName(value);
+
+    internal static bool IsFundamentalTemplateArgument(string type) =>
+        TryMapFundamental(type, out _) || IsScalarAliasType(type);
+
+    internal static bool IsStandardOrThirdPartyType(string type) =>
+        type.StartsWith("std::", StringComparison.Ordinal)
+        || type.StartsWith("gsl::", StringComparison.Ordinal)
+        || type.StartsWith("fmt::", StringComparison.Ordinal)
+        || type.StartsWith("entt::", StringComparison.Ordinal)
+        || type.StartsWith("nonstd::", StringComparison.Ordinal)
+        || type.StartsWith("expected_lite::", StringComparison.Ordinal)
+        || type.StartsWith("boost::", StringComparison.Ordinal)
+        || type.StartsWith("cereal::", StringComparison.Ordinal)
+        || type.StartsWith("phmap::", StringComparison.Ordinal)
+        || type.StartsWith("magic_enum::", StringComparison.Ordinal)
+        || type.StartsWith("type_safe::", StringComparison.Ordinal);
+
+    internal static bool IsLiteralTemplateArgument(string text)
+    {
+        var value = text.Trim();
+        if (value is "true" or "false" or "nullptr" or "NULL")
+        {
+            return true;
+        }
+
+        value = value.TrimStart('-', '+');
+        if (value.Length == 0)
+        {
+            return false;
+        }
+
+        if (value.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
+        {
+            return value.Length > 2 && value.Skip(2).All(Uri.IsHexDigit);
+        }
+
+        return value.All(current =>
+            char.IsDigit(current) || current is '.' or 'U' or 'u' or 'L' or 'l' or 'F' or 'f');
+    }
+
+    internal static string? ExtractTemplateArguments(string type)
+    {
+        var open = type.IndexOf('<');
+        if (open < 0)
+        {
+            return null;
+        }
+
+        var depth = 0;
+        for (var index = open; index < type.Length; index++)
+        {
+            if (type[index] == '<')
+            {
+                depth++;
+            }
+            else if (type[index] == '>')
+            {
+                depth--;
+                if (depth == 0)
+                {
+                    return index == type.Length - 1 ? type[(open + 1)..index] : null;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    internal static IEnumerable<string> SplitTemplateArguments(string inner)
+    {
+        if (inner.Length == 0)
+        {
+            yield break;
+        }
+
+        var depth = 0;
+        var start = 0;
+        for (var index = 0; index < inner.Length; index++)
+        {
+            var current = inner[index];
+            if (current == '<')
+            {
+                depth++;
+            }
+            else if (current == '>')
+            {
+                depth--;
+            }
+            else if (current == ',' && depth == 0)
+            {
+                yield return inner[start..index].Trim();
+                start = index + 1;
+            }
+        }
+
+        yield return inner[start..].Trim();
+    }
+
+    private static bool IsScalarAliasType(string type) => type is
+        "uint8" or "uint16" or "uint32" or "uint64"
+        or "int8" or "int16" or "int32" or "int64"
+        or "uchar" or "ushort" or "uint" or "ulong" or "ulonglong"
+        or "schar" or "ssize_t" or "intptr_t" or "uintptr_t"
+        or "wchar_t" or "char8_t" or "char16_t" or "char32_t";
+
+    private static bool HasAbstractTemplateArgument(
+        DeclarationRecord declaration,
+        IReadOnlyDictionary<string, DeclarationRecord> declarationsByQualifiedName,
+        HashSet<string> abstractDeclarationIds)
+    {
+        if (declaration.Template is null)
+        {
+            return false;
+        }
+
+        var visited = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var argument in declaration.Template.Arguments)
+        {
+            if (string.Equals(argument.Kind, "pack", StringComparison.Ordinal))
+            {
+                foreach (var part in PackArgumentParts(argument.Value))
+                {
+                    if (IsAbstractTemplateType(part, declarationsByQualifiedName, abstractDeclarationIds, visited))
+                    {
+                        return true;
+                    }
+                }
+            }
+            else if (string.Equals(argument.Kind, "type", StringComparison.Ordinal)
+                && IsAbstractTemplateType(argument.Value, declarationsByQualifiedName, abstractDeclarationIds, visited))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool IsAbstractTemplateType(
+        string value,
+        IReadOnlyDictionary<string, DeclarationRecord> declarationsByQualifiedName,
+        HashSet<string> abstractDeclarationIds,
+        HashSet<string> visited)
+    {
+        var type = NormalizeTypeName(value);
+        if (string.IsNullOrWhiteSpace(type) || !visited.Add(type))
+        {
+            return false;
+        }
+
+        if (declarationsByQualifiedName.TryGetValue(type, out var declaration))
+        {
+            if (abstractDeclarationIds.Contains(declaration.Id))
+            {
+                return true;
+            }
+
+            if (declaration.Template is not null)
+            {
+                foreach (var argument in declaration.Template.Arguments)
+                {
+                    if (string.Equals(argument.Kind, "type", StringComparison.Ordinal)
+                        && IsAbstractTemplateType(
+                            argument.Value,
+                            declarationsByQualifiedName,
+                            abstractDeclarationIds,
+                            visited))
+                    {
+                        return true;
+                    }
+                }
+            }
+
+            return false;
+        }
+
+        if (!IsStandardOrThirdPartyType(type))
+        {
+            return false;
+        }
+
+        var inner = ExtractTemplateArguments(type);
+        if (inner is null)
+        {
+            return false;
+        }
+
+        return SplitTemplateArguments(inner).Any(part =>
+            IsAbstractTemplateType(part, declarationsByQualifiedName, abstractDeclarationIds, visited));
+    }
+
+    private static bool AreTemplateArgumentsUsable(
+        DeclarationRecord declaration,
+        IReadOnlyDictionary<string, DeclarationRecord> declarationsByQualifiedName)
+    {
+        if (declaration.Template is null)
+        {
+            return true;
+        }
+
+        var visited = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var argument in declaration.Template.Arguments)
+        {
+            if (string.Equals(argument.Kind, "pack", StringComparison.Ordinal))
+            {
+                foreach (var part in PackArgumentParts(argument.Value))
+                {
+                    if (!IsUsableTemplateType(part, declarationsByQualifiedName, visited))
+                    {
+                        return false;
+                    }
+                }
+            }
+            else if (string.Equals(argument.Kind, "type", StringComparison.Ordinal)
+                && !IsUsableTemplateType(argument.Value, declarationsByQualifiedName, visited))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    internal static IEnumerable<string> PackArgumentParts(string value)
+    {
+        var inner = ExtractTemplateArguments(value);
+        return inner is null ? [value] : SplitTemplateArguments(inner);
+    }
+
+    private static bool IsUsableTemplateType(
+        string value,
+        IReadOnlyDictionary<string, DeclarationRecord> declarationsByQualifiedName,
+        HashSet<string> visited)
+    {
+        var type = NormalizeTypeName(value);
+        if (string.IsNullOrWhiteSpace(type))
+        {
+            return false;
+        }
+
+        if (IsFundamentalTemplateArgument(type) || IsLiteralTemplateArgument(type))
+        {
+            return true;
+        }
+
+        if (!visited.Add(type))
+        {
+            return true;
+        }
+
+        if (declarationsByQualifiedName.TryGetValue(type, out var declaration))
+        {
+            if (declaration.Template is not null)
+            {
+                foreach (var argument in declaration.Template.Arguments)
+                {
+                    if (string.Equals(argument.Kind, "type", StringComparison.Ordinal)
+                        && !IsUsableTemplateType(argument.Value, declarationsByQualifiedName, visited))
+                    {
+                        return false;
+                    }
+                }
+            }
+
+            return true;
+        }
+
+        if (IsStandardOrThirdPartyType(type))
+        {
+            var inner = ExtractTemplateArguments(type);
+            if (inner is null)
+            {
+                return true;
+            }
+
+            foreach (var part in SplitTemplateArguments(inner))
+            {
+                if (!IsUsableTemplateType(part, declarationsByQualifiedName, visited))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        return false;
+    }
+
     private static bool IsValidCppQualifiedName(string qualifiedName)
     {
-        if (string.IsNullOrWhiteSpace(qualifiedName))
+        if (string.IsNullOrWhiteSpace(qualifiedName)
+            || qualifiedName.Contains("...", StringComparison.Ordinal)
+            || qualifiedName.Contains("decltype", StringComparison.Ordinal)
+            || qualifiedName.Contains("auto", StringComparison.Ordinal)
+            || qualifiedName.Contains("__attribute", StringComparison.Ordinal))
         {
             return false;
         }
@@ -513,18 +831,87 @@ internal sealed class AbiPlan
 
         foreach (var part in parts)
         {
-            if (part.Length == 0 || (part[0] != '_' && !char.IsLetter(part[0])))
+            if (!IsValidCppNamePart(part))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static bool IsValidCppNamePart(string part)
+    {
+        var index = 0;
+        if (!ReadCppIdentifier(part, ref index))
+        {
+            return false;
+        }
+
+        if (index == part.Length)
+        {
+            return true;
+        }
+
+        if (part[index] != '<')
+        {
+            return false;
+        }
+
+        var depth = 0;
+        for (; index < part.Length; index++)
+        {
+            var current = part[index];
+            if (current == '<')
+            {
+                depth++;
+                continue;
+            }
+
+            if (current == '>')
+            {
+                if (depth == 0)
+                {
+                    return false;
+                }
+
+                depth--;
+                continue;
+            }
+
+            if (depth == 0)
             {
                 return false;
             }
 
-            for (var index = 1; index < part.Length; index++)
+            if (current is '(' or ')' or '{' or '}' or '[' or ']' or '"' or '\''
+                or ';' or '=' or '@' or '\\' or '#' or '?' or '!' or '%' or '^'
+                or '|' or '~' or '`')
             {
-                if (part[index] != '_' && !char.IsLetterOrDigit(part[index]))
-                {
-                    return false;
-                }
+                return false;
             }
+
+            if (!(char.IsLetterOrDigit(current)
+                  || current is '_' or ':' or ',' or ' ' or '*' or '&' or '-' or '+' or '.'))
+            {
+                return false;
+            }
+        }
+
+        return depth == 0;
+    }
+
+    private static bool ReadCppIdentifier(string text, ref int index)
+    {
+        if (index >= text.Length || (text[index] != '_' && !char.IsLetter(text[index])))
+        {
+            return false;
+        }
+
+        index++;
+        while (index < text.Length && (text[index] == '_' || char.IsLetterOrDigit(text[index])))
+        {
+            index++;
         }
 
         return true;
@@ -920,7 +1307,7 @@ internal sealed class AbiPlan
             || text.EndsWith("*", StringComparison.Ordinal);
     }
 
-    private static bool IsReferenceType(string canonical) =>
+    internal static bool IsReferenceType(string canonical) =>
         StripTopLevelQualifiers(canonical).EndsWith("&", StringComparison.Ordinal);
 
     private static bool IsNonConstLValueReference(string canonical)

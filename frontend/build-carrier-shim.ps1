@@ -1,0 +1,121 @@
+param(
+    [Parameter(Mandatory = $true)]
+    [string]$ShimDirectory,
+    [Parameter(Mandatory = $true)]
+    [string]$OutputDll,
+    [string]$LeviLaminaRoot = "C:\Users\root\source\repos\hosihikari\LeviLamina",
+    [string]$LlvmRoot = "$env:LOCALAPPDATA\Temp\hosihikari-llvm\clang+llvm-23.1.3-x86_64-pc-windows-msvc",
+    [string]$CarrierImportLibrary = "",
+    [string]$FmtLib = "",
+    [string]$BedrockRuntimeData = "",
+    [string]$PrelinkExe = "",
+    [string]$Target = "server-windows-x64",
+    [string[]]$AdditionalIncludePath = @(),
+    [string[]]$AdditionalLinkLibrary = @(),
+    [switch]$DelayLoad
+)
+
+$ErrorActionPreference = "Stop"
+
+$ShimDirectory = (Resolve-Path $ShimDirectory).Path
+$OutputDll = [System.IO.Path]::GetFullPath($OutputDll)
+$LeviLaminaRoot = (Resolve-Path $LeviLaminaRoot).Path
+$OutputDirectory = Split-Path $OutputDll -Parent
+New-Item -ItemType Directory -Force -Path $OutputDirectory | Out-Null
+$Object = [System.IO.Path]::ChangeExtension($OutputDll, ".obj")
+
+if ([string]::IsNullOrWhiteSpace($CarrierImportLibrary)) {
+    $CarrierImportLibrary = Join-Path $LeviLaminaRoot "build\windows\x64\release\LeviLamina.lib"
+}
+$CarrierImportLibrary = (Resolve-Path $CarrierImportLibrary).Path
+
+if ([string]::IsNullOrWhiteSpace($FmtLib)) {
+    $Fmt = Get-ChildItem "$env:LOCALAPPDATA\.xmake\packages\f\fmt" -Recurse -Filter fmt.lib -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if (-not $Fmt) {
+        throw "fmt.lib was not found; pass -FmtLib explicitly."
+    }
+
+    $FmtLib = $Fmt.FullName
+} else {
+    $FmtLib = (Resolve-Path $FmtLib).Path
+}
+
+if ([string]::IsNullOrWhiteSpace($BedrockRuntimeData)) {
+    $DataCandidates = Get-ChildItem "$env:LOCALAPPDATA\.xmake\packages\b\bedrockdata" -Recurse -Filter bedrock_runtime_data -ErrorAction SilentlyContinue
+    $Data = $DataCandidates |
+        Where-Object { $_.FullName -match '-server\.(\d+)' } |
+        Sort-Object { [int]($_.FullName -replace '.*-server\.(\d+).*', '$1') } -Descending |
+        Select-Object -First 1
+    if (-not $Data) {
+        $Data = $DataCandidates | Select-Object -First 1
+    }
+    if (-not $Data) {
+        throw "bedrock_runtime_data was not found; pass -BedrockRuntimeData explicitly."
+    }
+
+    $BedrockRuntimeData = $Data.FullName
+} else {
+    $BedrockRuntimeData = (Resolve-Path $BedrockRuntimeData).Path
+}
+
+if ([string]::IsNullOrWhiteSpace($PrelinkExe)) {
+    $Prelink = Get-ChildItem "$env:LOCALAPPDATA\.xmake\packages\p\prelink" -Recurse -Filter prelink.exe -ErrorAction SilentlyContinue |
+        Sort-Object FullName -Descending |
+        Select-Object -First 1
+    if (-not $Prelink) {
+        throw "prelink.exe was not found; pass -PrelinkExe explicitly."
+    }
+
+    $PrelinkExe = $Prelink.FullName
+} else {
+    $PrelinkExe = (Resolve-Path $PrelinkExe).Path
+}
+
+& (Join-Path $PSScriptRoot "build-shim.ps1") `
+    -ShimDirectory $ShimDirectory `
+    -OutputDll $Object `
+    -LlvmRoot $LlvmRoot `
+    -LeviLaminaRoot $LeviLaminaRoot `
+    -AdditionalIncludePath $AdditionalIncludePath `
+    -CompileOnly
+
+$PrelinkDirectory = Join-Path $OutputDirectory "prelink"
+if (Test-Path $PrelinkDirectory) {
+    Remove-Item $PrelinkDirectory -Recurse -Force
+}
+$PrelinkLibDirectory = Join-Path $PrelinkDirectory "lib"
+New-Item -ItemType Directory -Force -Path $PrelinkLibDirectory | Out-Null
+
+$PrelinkInputs = @($Object, $CarrierImportLibrary, $FmtLib) + $AdditionalLinkLibrary
+& $PrelinkExe $Target $PrelinkDirectory $BedrockRuntimeData @PrelinkInputs
+if ($LASTEXITCODE -ne 0) {
+    throw "prelink exited with $LASTEXITCODE"
+}
+
+$BedrockRuntimeLibrary = Join-Path $PrelinkLibDirectory "bedrock_runtime_api.lib"
+if (-not (Test-Path $BedrockRuntimeLibrary)) {
+    throw "prelink did not produce $BedrockRuntimeLibrary."
+}
+
+$ClangCl = Join-Path $LlvmRoot "bin\clang-cl.exe"
+$LinkArgs = @()
+if ($DelayLoad) {
+    $LinkArgs += "/link"
+    $LinkArgs += "/DELAYLOAD:LeviLamina.dll"
+    $LinkArgs += "/DELAYLOAD:bedrock_runtime.dll"
+    $LinkArgs += "delayimp.lib"
+}
+
+$Libraries = @($CarrierImportLibrary, $FmtLib, $BedrockRuntimeLibrary) + $AdditionalLinkLibrary
+& $ClangCl /LD /MD $Object @Libraries "/Fe:$OutputDll" @LinkArgs
+if ($LASTEXITCODE -ne 0) {
+    throw "clang-cl exited with $LASTEXITCODE"
+}
+
+if (-not (Test-Path $OutputDll)) {
+    throw "The carrier BindingShim DLL was not produced at $OutputDll."
+}
+
+Remove-Item $Object -Force -ErrorAction SilentlyContinue
+Write-Output "Built $OutputDll"

@@ -303,6 +303,17 @@ private:
                 Policy.SuppressTagKeyword = true;
                 bool First = true;
                 for (const auto& Argument : Spec->getTemplateArgs().asArray()) {
+                    if (Argument.getKind() == TemplateArgument::Pack) {
+                        for (const auto& Element : Argument.pack_elements()) {
+                            if (!First) {
+                                OS << ", ";
+                            }
+                            First = false;
+                            Element.print(Policy, OS, true);
+                        }
+                        continue;
+                    }
+
                     if (!First) {
                         OS << ", ";
                     }

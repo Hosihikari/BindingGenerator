@@ -39,19 +39,9 @@ if (-not $ShimSource) {
     throw "No levilamina binding_table.cpp was emitted under $Output."
 }
 
-$LinkLibraries = @($AdditionalLinkLibrary)
 $FmtLib = Get-ChildItem "$env:LOCALAPPDATA\.xmake\packages\f\fmt" -Recurse -Filter fmt.lib -ErrorAction SilentlyContinue |
     Select-Object -First 1
-if ($FmtLib) {
-    $LinkLibraries += $FmtLib.FullName
-}
 
-$BuildArgs = @{
-    ShimDirectory = $ShimSource.Directory.FullName
-    OutputDll = $Dll
-    LlvmRoot = $LlvmRoot
-    LeviLaminaRoot = $LeviLaminaRoot
-}
 if ($LinkCarrier) {
     if ([string]::IsNullOrWhiteSpace($CarrierImportLibrary)) {
         $CarrierImportLibrary = Join-Path $LeviLaminaRoot "build\windows\x64\release\LeviLamina.lib"
@@ -61,15 +51,38 @@ if ($LinkCarrier) {
         throw "The carrier import library was not found at $CarrierImportLibrary."
     }
 
-    $LinkLibraries += $CarrierImportLibrary
-    $BuildArgs.DelayLoadLibrary = @("LeviLamina.dll")
-}
+    $CarrierArgs = @{
+        ShimDirectory = $ShimSource.Directory.FullName
+        OutputDll = $Dll
+        LlvmRoot = $LlvmRoot
+        LeviLaminaRoot = $LeviLaminaRoot
+        CarrierImportLibrary = $CarrierImportLibrary
+        AdditionalLinkLibrary = $AdditionalLinkLibrary
+        DelayLoad = $true
+    }
+    if ($FmtLib) {
+        $CarrierArgs.FmtLib = $FmtLib.FullName
+    }
 
-if ($LinkLibraries.Count -gt 0) {
-    $BuildArgs.AdditionalLinkLibrary = $LinkLibraries
-}
+    & (Join-Path $PSScriptRoot "build-carrier-shim.ps1") @CarrierArgs
+} else {
+    $LinkLibraries = @($AdditionalLinkLibrary)
+    if ($FmtLib) {
+        $LinkLibraries += $FmtLib.FullName
+    }
 
-& (Join-Path $PSScriptRoot "build-shim.ps1") @BuildArgs
+    $BuildArgs = @{
+        ShimDirectory = $ShimSource.Directory.FullName
+        OutputDll = $Dll
+        LlvmRoot = $LlvmRoot
+        LeviLaminaRoot = $LeviLaminaRoot
+    }
+    if ($LinkLibraries.Count -gt 0) {
+        $BuildArgs.AdditionalLinkLibrary = $LinkLibraries
+    }
+
+    & (Join-Path $PSScriptRoot "build-shim.ps1") @BuildArgs
+}
 
 if ($SkipRun) {
     Write-Output "Built $Dll (smoke run skipped)."
