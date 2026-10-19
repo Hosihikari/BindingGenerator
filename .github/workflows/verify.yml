@@ -1,0 +1,33 @@
+name: verify
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  cli:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generator
+        uses: actions/checkout@v4
+        with:
+          path: Generator
+
+      - name: IR contract
+        uses: actions/checkout@v4
+        with:
+          repository: Hosihikari/Bindings.Ir
+          path: Ir
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Version
+        working-directory: Generator
+        run: dotnet run --project src/Hosihikari.Bindings.Generator/Hosihikari.Bindings.Generator.csproj -c Release -- version
+
+      - name: Validate fixture IR
+        working-directory: Generator
+        run: dotnet run --project src/Hosihikari.Bindings.Generator/Hosihikari.Bindings.Generator.csproj -c Release -- validate-ir tests/fixtures/basic/ir-manifest.json tests/fixtures/basic

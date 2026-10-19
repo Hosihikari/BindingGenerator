@@ -1,0 +1,3 @@
+{"recordType":"declaration","id":"bedrock:c:@S@Player","surface":"bedrock","kind":"class","qualifiedName":"mc::Player","access":"public","linkage":"external"}
+{"recordType":"variant","declarationId":"bedrock:c:@S@Player","configuration":"win-x64-server","availability":"present"}
+{"recordType":"member","id":"bedrock:c:@S@Player@F@health","declarationId":"bedrock:c:@S@Player","configuration":"win-x64-server","kind":"field","name":"health","access":"protected","type":{"kind":"fundamental","canonical":"int"}}
