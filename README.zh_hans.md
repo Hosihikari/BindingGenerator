@@ -31,6 +31,10 @@ dotnet run --project src/Hosihikari.Bindings.Generator/Hosihikari.Bindings.Gener
 
 `emit` 写出 `interop/`（C# stub）、`shim/`（C++ 函数表 stub）与 `coverage/`（manifest + summary）。stub 固定 IR→产物的契约；BindingShim 调用尚未接通。
 
+## 本地 LLAPI 切片
+
+`frontend/run-local.ps1` 解析 `ll/api/event/Event.h`，把 IR 写到 `artifacts/llapi-ir` 并校验；随后 `emit` 把 Interop、BindingShim 与覆盖 stub 写到 `artifacts/llapi-emitted`。
+
 ## 许可证
 
 GPL-3.0-or-later，见 `LICENSE.md`。

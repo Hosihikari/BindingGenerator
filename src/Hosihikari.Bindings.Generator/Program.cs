@@ -55,11 +55,7 @@ switch (args[0])
         var output = Path.GetFullPath(args[3]);
         foreach (var subdirectory in new[] { "interop", "shim", "coverage" })
         {
-            var path = Path.Combine(output, subdirectory);
-            if (Directory.Exists(path))
-            {
-                Directory.Delete(path, recursive: true);
-            }
+            DeleteDirectory(Path.Combine(output, subdirectory));
         }
 
         Directory.CreateDirectory(output);
@@ -116,6 +112,30 @@ static List<IrRecord> ReadRecords(string directory)
     }
 
     return records;
+}
+
+static void DeleteDirectory(string path)
+{
+    for (var attempt = 0; attempt < 3; attempt++)
+    {
+        try
+        {
+            if (Directory.Exists(path))
+            {
+                Directory.Delete(path, recursive: true);
+            }
+
+            return;
+        }
+        catch (IOException) when (attempt < 2)
+        {
+            Thread.Sleep(100);
+        }
+        catch (UnauthorizedAccessException) when (attempt < 2)
+        {
+            Thread.Sleep(100);
+        }
+    }
 }
 
 static void PrintErrors(IrValidationResult result)

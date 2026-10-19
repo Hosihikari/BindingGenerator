@@ -45,6 +45,7 @@ internal static class CoverageEmitter
 
                 foreach (var member in declarationMembers)
                 {
+                    var isPrivate = member.Access == "private";
                     entries.Add(new CoverageEntry
                     {
                         Id = member.Id,
@@ -53,8 +54,9 @@ internal static class CoverageEmitter
                         Configuration = configuration.Id,
                         Kind = member.Kind,
                         QualifiedName = declaration.QualifiedName + "::" + member.Name,
-                        Status = CoverageStatus.Bound,
-                        Emitters = ["interop"],
+                        Status = isPrivate ? CoverageStatus.Excluded : CoverageStatus.Bound,
+                        Emitters = isPrivate ? [] : ["interop"],
+                        Reason = isPrivate ? CoverageReason.Private : null,
                         Source = declaration.Source,
                     });
                 }

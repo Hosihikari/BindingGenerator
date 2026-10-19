@@ -31,6 +31,10 @@ dotnet run --project src/Hosihikari.Bindings.Generator/Hosihikari.Bindings.Gener
 
 `emit` writes `interop/` (C# stubs), `shim/` (C++ binding-table stubs), and `coverage/` (manifest + summary). The stubs establish the IR-to-output contract; the BindingShim calls are not wired yet.
 
+## Local LLAPI slice
+
+`frontend/run-local.ps1` parses `ll/api/event/Event.h`, writes IR under `artifacts/llapi-ir`, and validates it. `emit` then writes the Interop, BindingShim and coverage stubs under `artifacts/llapi-emitted`.
+
 ## Licence
 
 GPL-3.0-or-later, see `LICENSE.md`.

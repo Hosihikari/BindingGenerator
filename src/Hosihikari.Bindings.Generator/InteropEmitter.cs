@@ -34,7 +34,10 @@ internal static class InteropEmitter
             var namespaceName = $"Hosihikari.Bindings.{TypeNames.SurfaceNamespace(declaration.Surface)}.Interop";
             if (nativeNamespace.Length > 0)
             {
-                namespaceName += "." + nativeNamespace;
+                var escapedSegments = nativeNamespace
+                    .Split('.', StringSplitOptions.RemoveEmptyEntries)
+                    .Select(TypeNames.Escape);
+                namespaceName += "." + string.Join(".", escapedSegments);
             }
 
             var className = TypeNames.Escape(TypeNames.NativeName(declaration.QualifiedName));
@@ -58,6 +61,11 @@ internal static class InteropEmitter
             {
                 foreach (var member in declarationMembers)
                 {
+                    if (member.Access == "private")
+                    {
+                        continue;
+                    }
+
                     lines.Add("");
                     EmitMember(lines, member);
                 }
@@ -104,8 +112,8 @@ internal static class InteropEmitter
                     ? ""
                     : string.Join(
                         ", ",
-                        member.Signature.Parameters.Select(parameter =>
-                            $"{TypeNames.ToCSharpType(new TypeRef { Kind = "fundamental", Canonical = parameter.Type })} {TypeNames.Escape(parameter.Name)}"));
+                        member.Signature.Parameters.Select((parameter, index) =>
+                            $"{TypeNames.ToCSharpType(new TypeRef { Kind = "fundamental", Canonical = parameter.Type })} {TypeNames.Escape(string.IsNullOrWhiteSpace(parameter.Name) ? $"arg{index}" : parameter.Name)}"));
                 var modifier = member.Static ? "static " : "";
                 lines.Add($"    public {modifier}{returnType} {name}({parameters}) =>");
                 lines.Add($"        throw new global::System.NotSupportedException(\"{StubReason}\");");

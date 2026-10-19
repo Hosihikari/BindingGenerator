@@ -11,13 +11,27 @@ Pin LLVM/Clang **23.1.3**.
 
 ## Build
 
-```shell
-cmake -S . -B ../../build/frontend -DCMAKE_PREFIX_PATH=<llvm-root>
-cmake --build ../../build/frontend --config Release
+```powershell
+./frontend/build.ps1 -LlvmRoot <llvm-root>
 ```
+
+The script expects the extracted `clang+llvm-23.1.3-x86_64-pc-windows-msvc` tree and uses the Visual Studio 18 generator. A manual CMake invocation works too:
+
+```shell
+cmake -S frontend -B build/frontend -G "Visual Studio 18 2026" -A x64 -DCMAKE_PREFIX_PATH=<llvm-root>
+cmake --build build/frontend --config Release
+```
+
+## Run
+
+```powershell
+./frontend/run-local.ps1 -LlvmRoot <llvm-root> -LeviLaminaRoot <checkout>
+```
+
+The script locates MSVC and the Windows SDK, runs the frontend on `ll/api/event/Event.h`, and validates the produced IR with the .NET CLI.
 
 ## Current state
 
-`src/main.cpp` is a scaffold: it proves the CMake/libTooling link shape and prints a diagnostic. The next step is to add an `ASTFrontendAction` + `ASTConsumer` + `RecursiveASTVisitor` with `shouldVisitTemplateInstantiations()` and a `PPCallbacks`/`MacroExpansionContext` sidecar, then write JSONL shards.
+The frontend parses `ll/api/event/Event.h`, emits JSONL IR plus `ir-manifest.json`, and validates the result through the .NET CLI. The visitor covers classes/structs/unions, fields, static fields, methods, enums, and namespace-scope functions; constructors, destructors, operators, template instantiations, macro provenance, and the full umbrella are not emitted yet.
 
-The frontend is not part of the .NET CI job yet; it requires the pinned LLVM toolchain and the upstream header checkouts.
+The frontend is not part of the .NET CI job; it requires the pinned LLVM toolchain, zlib/zstd, and the MSVC/SDK headers. `build.ps1` and `run-local.ps1` cover the local Windows slice.
