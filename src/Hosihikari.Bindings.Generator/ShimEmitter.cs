@@ -173,6 +173,7 @@ internal static class ShimEmitter
         source.Add("namespace {");
         source.Add("");
         source.Add("thread_local std::string g_lastError;");
+        source.Add("thread_local std::string g_stringResult;");
         source.Add("");
         source.Add("void setLastError(char const* message) noexcept");
         source.Add("{");
@@ -369,6 +370,12 @@ internal static class ShimEmitter
                 if (function.ReturnKind == AbiKind.Void)
                 {
                     yield return $"    {call};";
+                }
+                else if (function.ReturnKind == AbiKind.StringView)
+                {
+                    yield return $"    auto result = {call};";
+                    yield return "    g_stringResult.assign(result.data(), result.size());";
+                    yield return "    return HosihikariStringView{g_stringResult.data(), g_stringResult.size()};";
                 }
                 else if (function.ReturnKind == AbiKind.Opaque)
                 {

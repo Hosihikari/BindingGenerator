@@ -2,6 +2,7 @@ using System.Text;
 using Hosihikari.Bindings.LeviLamina.Interop;
 using Hosihikari.Bindings.LeviLamina.Interop.ll.@event;
 using Hosihikari.Bindings.LeviLamina.Interop.ll.hash_utils;
+using LlVersion = Hosihikari.Bindings.LeviLamina.Interop.ll.data.Version;
 
 if (args.Length != 1)
 {
@@ -39,6 +40,26 @@ if (combiner.Handle == 0)
 if (combiner.hash() != 123 || combiner.operator_unsigned_long_long() != 123)
 {
     throw new InvalidOperationException("HashCombiner method calls returned an unexpected seed.");
+}
+
+using var version = LlVersion.Create("1.2.3");
+if (version.to_string() != "1.2.3"
+    || version.major != 1
+    || version.minor != 2
+    || version.patch != 3)
+{
+    throw new InvalidOperationException("Version round-trip returned unexpected values.");
+}
+
+if (!version.valid("1.2.3"))
+{
+    throw new InvalidOperationException("Version::valid rejected a valid version.");
+}
+
+using var sameVersion = LlVersion.Create("1.2.3");
+if (!version.isIdenticalTo(sameVersion))
+{
+    throw new InvalidOperationException("Version::isIdenticalTo rejected equal versions.");
 }
 
 Console.WriteLine($"name={id.name} hash=0x{baseView.hash:x16} expected=0x{expected:x16}");

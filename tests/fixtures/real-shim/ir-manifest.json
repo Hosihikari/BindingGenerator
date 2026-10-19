@@ -23,9 +23,9 @@
       "path": "shard.jsonl",
       "sha256": "sha256:fixture",
       "sha256Compressed": "sha256:fixture",
-      "records": 6
+      "records": 11
     }
   ],
   "diagnostics": { "errors": 0, "warnings": 0, "shardsWithErrors": [] },
-  "counts": { "declarations": 1, "variants": 1, "members": 4 }
+  "counts": { "declarations": 2, "variants": 2, "members": 7 }
 }

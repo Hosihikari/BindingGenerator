@@ -17,7 +17,9 @@ The generator turns the versioned IR into the C ABI **BindingShim** and the nati
 |---|---|
 | `src/Hosihikari.Bindings.Generator` | .NET CLI: version, IR validation, coverage validation |
 | `frontend/` | libTooling CMake target (LLVM 23.1.3) |
-| `tests/fixtures/` | Minimal IR fixture used by the CLI contract job |
+| `tests/fixtures/` | Minimal IR fixtures used by the CLI contract and real-shim jobs |
+| `tests/BindingShimSmoke` | End-to-end Windows smoke for the LLAPI slice |
+| `tests/RealShimSmoke` | CI smoke for the link-carrier fixture |
 
 ## Commands
 
@@ -42,12 +44,12 @@ Without `--native-root`, `emit` writes the contract stubs used by the fixture CI
 ### Real BindingShim v1
 
 - The C ABI is one versioned `HosihikariBindingTableV1` per carrier surface. Handles are `void*`; owned handles come from constructor factories and are released by the generated disposer. Field strings are returned as borrowed `HosihikariStringView` values that the managed side copies immediately; string parameters are `(const char*, size_t)` UTF-8 pairs.
-- Constructors, destructors, public fields, and supported methods are projected. A method is eligible when it is inline, public, non-variadic, has at most one parameter, and returns `void`, a fundamental, or an opaque pointer. String-returning methods and string method parameters stay in the Interop stub set because their lifetime contract is not part of v1.
-- Classes are projected only when they are non-template, public, complete in the IR source root, and link-safe: every method is inline and every base is link-safe. This keeps the shim linkable for header-only classes without pulling carrier symbols into the ABI. Abstract classes and classes with borrowed-string constructors do not receive factories.
+- Constructors, destructors, public fields, and supported methods are projected. Constructors and methods accept multiple parameters. A method may return `void`, a fundamental, an opaque pointer, or a string; string results are copied into a thread-local shim buffer and the managed wrapper copies them immediately. At most one string parameter is pinned per call.
+- Classes are projected only when they are non-template, public, and complete in the IR source root. The default mode additionally requires link-safe classes: every method is inline and every base is link-safe. `--link-carrier` instead links the carrier import library and admits out-of-line members that carry `dllexport`/`dllimport` or the `LLAPI` class macro; bases must resolve inside the IR. Abstract classes and classes with borrowed-string constructors do not receive factories.
 - Every table function is a C++ function-try-block. Native exceptions are captured into a thread-local message exposed by `hosihikari_get_last_error`; no C++ exception crosses into managed code. Factory failures return a null handle and the generated `Create` methods throw `InvalidOperationException` with that message.
 - `NativeMethods.Load(path)` validates the exported table version and `sizeof(Table)` before use. The table's `version` and `size` are the first two fields.
 
-`frontend/build-shim.ps1` compiles the generated shim with clang-cl and `/MD` against the LeviLamina include environment. `frontend/smoke-shim.ps1` emits, builds, and runs the end-to-end smoke test in `tests/BindingShimSmoke` against the current IR.
+`frontend/build-shim.ps1` compiles the generated shim with clang-cl and `/MD` against the LeviLamina include environment. Pass `-AdditionalLinkLibrary` for carrier/package libs and `-DelayLoadLibrary LeviLamina.dll` for a standalone smoke build. `frontend/smoke-shim.ps1` emits, builds, and runs the end-to-end smoke test in `tests/BindingShimSmoke`; add `-LinkCarrier` to build against the carrier import library with delay-loading.
 
 ## Local LLAPI slice
 
@@ -56,9 +58,10 @@ Without `--native-root`, `emit` writes the contract stubs used by the fixture CI
 ```shell
 powershell -File frontend/run-umbrella.ps1 -Module ll/api -Output artifacts/llapi-full-ir
 powershell -File frontend/smoke-shim.ps1 -IrDirectory artifacts/llapi-full-ir
+powershell -File frontend/smoke-shim.ps1 -IrDirectory artifacts/llapi-full-ir -LinkCarrier
 ```
 
-The complete LLAPI umbrella currently selects 159 real BindingShim functions. It covers `ll::event::EventId`, `ll::event::EventIdView`, `ll::hash_utils::HashedIdBase`, `ll::hash_utils::HashCombiner`, and the other link-safe classes in the slice. The smoke test creates a native `EventId` from a managed string, reads its name and hash, compares two `HashedIdBase` views, and calls `HashCombiner::hash()` through the table. The remaining members keep their Interop stubs and are recorded in the coverage manifest with the `interop` emitter only.
+The complete LLAPI umbrella currently selects 167 link-safe functions, or 396 functions when built with `--link-carrier` against `LeviLamina.lib`. The slice covers `ll::event::EventId`, `ll::event::EventIdView`, `ll::hash_utils::HashedIdBase`, `ll::hash_utils::HashCombiner`, `ll::data::Version`, and the other eligible classes. The smoke test creates a native `EventId` from a managed string, reads its name and hash, compares two `HashedIdBase` views, calls `HashCombiner::hash()`, and round-trips `ll::data::Version` through string construction, `to_string()`, field getters, `valid(string)`, and `isIdenticalTo(Version)`. The remaining members keep their Interop stubs and are recorded in the coverage manifest with the `interop` emitter only.
 
 ## Licence
 

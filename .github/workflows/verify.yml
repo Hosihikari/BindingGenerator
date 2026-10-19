@@ -59,3 +59,18 @@ jobs:
       - name: Compile real-shim Interop
         working-directory: Generator
         run: dotnet build tests/RealShimCheck/RealShimCheck.csproj -c Release -p:InteropDirectory=${{ github.workspace }}/Generator/artifacts/emitted-real/interop
+
+      - name: Emit link-carrier fixture
+        working-directory: Generator
+        run: dotnet run --project src/Hosihikari.Bindings.Generator/Hosihikari.Bindings.Generator.csproj -c Release -- emit tests/fixtures/real-shim/ir-manifest.json tests/fixtures/real-shim artifacts/emitted-linked --native-root tests/fixtures/real-shim/native --link-carrier
+
+      - name: Link carrier BindingShim
+        working-directory: Generator
+        run: |
+          g++ -std=c++20 -fPIC -I tests/fixtures/real-shim/native -c artifacts/emitted-linked/shim/linux-x64-server/levilamina/binding_table.cpp -o artifacts/linked-binding_table.o
+          g++ -std=c++20 -fPIC -I tests/fixtures/real-shim/native -c tests/fixtures/real-shim/native/carrier.cpp -o artifacts/carrier.o
+          g++ -shared -o artifacts/liblinked-shim.so artifacts/linked-binding_table.o artifacts/carrier.o
+
+      - name: Run link-carrier smoke
+        working-directory: Generator
+        run: dotnet run --project tests/RealShimSmoke/RealShimSmoke.csproj -c Release -p:InteropDirectory=${{ github.workspace }}/Generator/artifacts/emitted-linked/interop -- ${{ github.workspace }}/Generator/artifacts/liblinked-shim.so

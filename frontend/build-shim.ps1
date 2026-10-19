@@ -5,7 +5,9 @@ param(
     [string]$OutputDll,
     [string]$LlvmRoot = "$env:LOCALAPPDATA\Temp\hosihikari-llvm\clang+llvm-23.1.3-x86_64-pc-windows-msvc",
     [string]$LeviLaminaRoot = "C:\Users\root\source\repos\hosihikari\LeviLamina",
-    [string[]]$AdditionalIncludePath = @()
+    [string[]]$AdditionalIncludePath = @(),
+    [string[]]$AdditionalLinkLibrary = @(),
+    [string[]]$DelayLoadLibrary = @()
 )
 
 $ErrorActionPreference = "Stop"
@@ -63,6 +65,20 @@ foreach ($include in $AdditionalIncludePath) {
     $CompilerArgs += @("-I", (Resolve-Path $include).Path)
 }
 
+foreach ($library in $AdditionalLinkLibrary) {
+    $CompilerArgs += (Resolve-Path $library).Path
+}
+
+$LinkArgs = @()
+if ($DelayLoadLibrary.Count -gt 0) {
+    $LinkArgs += "/link"
+    foreach ($library in $DelayLoadLibrary) {
+        $LinkArgs += "/DELAYLOAD:$library"
+    }
+
+    $LinkArgs += "delayimp.lib"
+}
+
 $ClangCl = Join-Path $LlvmRoot "bin\clang-cl.exe"
 if (-not (Test-Path $ClangCl)) {
     throw "clang-cl was not found at $ClangCl."
@@ -70,7 +86,7 @@ if (-not (Test-Path $ClangCl)) {
 
 Push-Location $LeviLaminaRoot
 try {
-    & $ClangCl @CompilerArgs $Source
+    & $ClangCl @CompilerArgs $Source @LinkArgs
     if ($LASTEXITCODE -ne 0) {
         throw "clang-cl exited with $LASTEXITCODE"
     }

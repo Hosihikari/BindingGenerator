@@ -109,7 +109,7 @@ internal sealed class AbiPlan
         || SetByMember.ContainsKey(memberId)
         || MethodByMember.ContainsKey(memberId);
 
-    public static AbiPlan Build(IReadOnlyList<IrRecord> records, string? nativeRoot)
+    public static AbiPlan Build(IReadOnlyList<IrRecord> records, string? nativeRoot, bool linkCarrier = false)
     {
         if (string.IsNullOrWhiteSpace(nativeRoot) || !Directory.Exists(nativeRoot))
         {
@@ -155,6 +155,30 @@ internal sealed class AbiPlan
                     .ToList(),
                 StringComparer.Ordinal);
         var linkSafeMemo = new Dictionary<string, bool>(StringComparer.Ordinal);
+        var basesResolvableMemo = new Dictionary<string, bool>(StringComparer.Ordinal);
+
+        bool AreBasesResolvable(string declarationId)
+        {
+            if (basesResolvableMemo.TryGetValue(declarationId, out var cached))
+            {
+                return cached;
+            }
+
+            basesResolvableMemo[declarationId] = false;
+            if (basesByDeclaration.TryGetValue(declarationId, out var baseIds))
+            {
+                foreach (var baseId in baseIds)
+                {
+                    if (!allDeclarationsById.ContainsKey(baseId) || !AreBasesResolvable(baseId))
+                    {
+                        return false;
+                    }
+                }
+            }
+
+            basesResolvableMemo[declarationId] = true;
+            return true;
+        }
 
         bool IsLinkSafe(string declarationId)
         {
@@ -225,23 +249,26 @@ internal sealed class AbiPlan
             var hasOutOfLineMethod = declarationMembers.Any(member =>
                 (member.Kind is "method" or "operator" or "constructor" or "destructor")
                 && !member.Inline);
-            var linkSafe = IsLinkSafe(declaration.Id);
-            var destructorAccessible = linkSafe
-                && (destructor is null
+            var basesResolvable = AreBasesResolvable(declaration.Id);
+            var linkSafe = linkCarrier ? basesResolvable : IsLinkSafe(declaration.Id);
+            var destructorUsable = linkCarrier
+                ? destructor is null
+                    || (destructor.Access == "public" && HasExportedSymbol(declaration, destructor))
+                : destructor is null
                     ? !hasOutOfLineMethod
-                    : destructor.Access == "public" && destructor.Inline && !hasOutOfLineMethod);
+                    : destructor.Access == "public" && destructor.Inline && !hasOutOfLineMethod;
+            var destructorAccessible = linkSafe && destructorUsable;
             var hasPublicDestructor = linkSafe
                 && destructor is not null
                 && destructor.Access == "public"
-                && destructor.Inline
-                && !hasOutOfLineMethod;
+                && (linkCarrier ? HasExportedSymbol(declaration, destructor) : destructor.Inline && !hasOutOfLineMethod);
             var isAbstract = declarationMembers.Any(member => member.Pure);
             var created = false;
 
             foreach (var constructor in declarationMembers.Where(member =>
                          member.Kind == "constructor"
                          && member.Access == "public"
-                         && member.Inline
+                         && (linkCarrier ? HasExportedSymbol(declaration, member) : member.Inline)
                          && !member.Pure))
             {
                 if (ownsBorrowedString || !destructorAccessible || isAbstract)
@@ -288,7 +315,7 @@ internal sealed class AbiPlan
             foreach (var method in declarationMembers.Where(member =>
                          member.Kind is "method" or "operator"
                          && member.Access == "public"
-                         && member.Inline
+                         && (linkCarrier ? HasExportedSymbol(declaration, member) : member.Inline)
                          && !member.Pure))
             {
                 if (!TryBuildMethod(declaration, method, declarationsByQualifiedName, declarationNames, out var function))
@@ -412,24 +439,64 @@ internal sealed class AbiPlan
 
     private static string NormalizeTypeName(string canonical)
     {
-        var text = canonical.Trim();
+        var text = StripTopLevelQualifiers(canonical);
         while (text.EndsWith("&", StringComparison.Ordinal) || text.EndsWith("*", StringComparison.Ordinal))
         {
-            text = text[..^1].TrimEnd();
-        }
-
-        if (text.StartsWith("const ", StringComparison.Ordinal))
-        {
-            text = text["const ".Length..].TrimStart();
-        }
-
-        if (text.EndsWith(" const", StringComparison.Ordinal))
-        {
-            text = text[..^" const".Length].TrimEnd();
+            text = StripTopLevelQualifiers(text[..^1].TrimEnd());
         }
 
         return text;
     }
+
+    private static string StripTopLevelQualifiers(string canonical)
+    {
+        var text = canonical.Trim();
+        var changed = true;
+        while (changed)
+        {
+            changed = false;
+            if (text.StartsWith("const ", StringComparison.Ordinal))
+            {
+                text = text["const ".Length..].TrimStart();
+                changed = true;
+            }
+
+            if (text.StartsWith("volatile ", StringComparison.Ordinal))
+            {
+                text = text["volatile ".Length..].TrimStart();
+                changed = true;
+            }
+
+            if (text.EndsWith(" const", StringComparison.Ordinal))
+            {
+                text = text[..^" const".Length].TrimEnd();
+                changed = true;
+            }
+
+            if (text.EndsWith(" volatile", StringComparison.Ordinal))
+            {
+                text = text[..^" volatile".Length].TrimEnd();
+                changed = true;
+            }
+        }
+
+        return text;
+    }
+
+    private static bool HasExportedSymbol(DeclarationRecord declaration, MemberRecord member) =>
+        member.Inline
+        || HasExportAttribute(declaration.Attributes)
+        || HasExportAttribute(member.Attributes)
+        || HasExportMacro(declaration.Macros)
+        || HasExportMacro(member.Macros);
+
+    private static bool HasExportAttribute(IEnumerable<AttributeInfo> attributes) =>
+        attributes.Any(attribute =>
+            attribute.Name.Equals("dllexport", StringComparison.OrdinalIgnoreCase)
+            || attribute.Name.Equals("dllimport", StringComparison.OrdinalIgnoreCase));
+
+    private static bool HasExportMacro(IEnumerable<MacroUseInfo> macros) =>
+        macros.Any(macro => macro.Name is "LLAPI" or "LLNDAPI" or "LLCAPI" or "MCAPI" or "MCNAPI" or "ENDSTONE_EVENT");
 
     private static bool IsValidCppQualifiedName(string qualifiedName)
     {
@@ -489,14 +556,9 @@ internal sealed class AbiPlan
         }
 
         var parameters = new List<AbiParameter>();
-        if (constructor.Signature.Parameters.Count > 1)
+        var stringParameters = 0;
+        foreach (var parameter in constructor.Signature.Parameters)
         {
-            return false;
-        }
-
-        if (constructor.Signature.Parameters.Count == 1)
-        {
-            var parameter = constructor.Signature.Parameters[0];
             if (!TryMapParameter(
                     parameter.Name,
                     parameter.Type,
@@ -507,12 +569,15 @@ internal sealed class AbiPlan
                 return false;
             }
 
-            if (abiParameter.Kind == AbiKind.StringView
-                && IsNonConstLValueReference(parameter.Type))
+            if (abiParameter.Kind == AbiKind.StringView)
             {
-                // The shim would have to bind a temporary string to a mutable reference;
-                // the native constructor could retain or modify it.
-                return false;
+                stringParameters++;
+                if (stringParameters > 1 || IsNonConstLValueReference(parameter.Type))
+                {
+                    // The shim would have to bind a temporary string to a mutable reference,
+                    // and v1 pins at most one string buffer per call.
+                    return false;
+                }
             }
 
             if (abiParameter.Kind == AbiKind.Opaque
@@ -568,7 +633,9 @@ internal sealed class AbiPlan
         out AbiFunction function)
     {
         function = null!;
-        if (method.Signature is null || method.Signature.Variadic)
+        if (method.Signature is null
+            || method.Signature.Variadic
+            || string.Equals(method.Name, "operator=", StringComparison.Ordinal))
         {
             return false;
         }
@@ -579,14 +646,9 @@ internal sealed class AbiPlan
         }
 
         var parameters = new List<AbiParameter>();
-        if (method.Signature.Parameters.Count > 1)
+        var stringParameters = 0;
+        foreach (var parameter in method.Signature.Parameters)
         {
-            return false;
-        }
-
-        if (method.Signature.Parameters.Count == 1)
-        {
-            var parameter = method.Signature.Parameters[0];
             if (!TryMapParameter(
                     parameter.Name,
                     parameter.Type,
@@ -597,11 +659,13 @@ internal sealed class AbiPlan
                 return false;
             }
 
-            // A method may retain a borrowed string; keep string parameters out of the
-            // first method ABI until an owned/borrowed contract exists.
             if (abiParameter.Kind == AbiKind.StringView)
             {
-                return false;
+                stringParameters++;
+                if (stringParameters > 1 || IsNonConstLValueReference(parameter.Type))
+                {
+                    return false;
+                }
             }
 
             parameters.Add(abiParameter);
@@ -635,10 +699,10 @@ internal sealed class AbiPlan
             return false;
         }
 
-        // A returned view into a temporary or into an unknown owner cannot cross the ABI.
         if (IsStringViewType(nativeType) || IsStringType(nativeType))
         {
-            return false;
+            kind = AbiKind.StringView;
+            return true;
         }
 
         if (TryMapFundamental(nativeType, out kind))
@@ -851,15 +915,13 @@ internal sealed class AbiPlan
 
     private static bool IsPointerOrReferenceType(string canonical)
     {
-        var text = canonical.Trim();
+        var text = StripTopLevelQualifiers(canonical);
         return text.EndsWith("&", StringComparison.Ordinal)
-            || text.EndsWith("*", StringComparison.Ordinal)
-            || text.Contains("&", StringComparison.Ordinal)
-            || text.Contains("*", StringComparison.Ordinal);
+            || text.EndsWith("*", StringComparison.Ordinal);
     }
 
     private static bool IsReferenceType(string canonical) =>
-        canonical.TrimEnd().EndsWith("&", StringComparison.Ordinal);
+        StripTopLevelQualifiers(canonical).EndsWith("&", StringComparison.Ordinal);
 
     private static bool IsNonConstLValueReference(string canonical)
     {
@@ -879,20 +941,10 @@ internal sealed class AbiPlan
 
     private static string ExtractPointee(string canonical)
     {
-        var text = canonical.Trim();
+        var text = StripTopLevelQualifiers(canonical);
         while (text.EndsWith("&", StringComparison.Ordinal) || text.EndsWith("*", StringComparison.Ordinal))
         {
-            text = text[..^1].TrimEnd();
-        }
-
-        if (text.StartsWith("const ", StringComparison.Ordinal))
-        {
-            text = text["const ".Length..].TrimStart();
-        }
-
-        if (text.EndsWith(" const", StringComparison.Ordinal))
-        {
-            text = text[..^" const".Length].TrimEnd();
+            text = StripTopLevelQualifiers(text[..^1].TrimEnd());
         }
 
         return text;

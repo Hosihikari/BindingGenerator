@@ -432,85 +432,105 @@ internal static class InteropEmitter
 
     private static void EmitCreate(List<string> lines, string className, string name, AbiFunction create)
     {
-        var parameter = create.Parameters.SingleOrDefault();
-        if (parameter is null)
+        var declarations = ParameterDeclarations(create.Parameters);
+        var stringIndex = FindStringParameter(create.Parameters);
+        var stringName = stringIndex >= 0
+            ? CSharpParameterName(create.Parameters[stringIndex], stringIndex)
+            : null;
+        var arguments = string.Join(
+            ", ",
+            BuildCallArgumentList(create.Parameters, stringIndex >= 0 ? "__hs_stringData" : null));
+        lines.Add($"    public static {className} {name}({declarations})");
+        lines.Add("    {");
+        if (stringIndex >= 0)
         {
-            lines.Add($"    public static {className} {name}()");
-            lines.Add("    {");
-            lines.Add($"        var handle = NativeMethods.TablePtr->{create.TableField}();");
-            EmitHandleCheck(lines);
-            lines.Add($"        return new {className}((nint)handle);");
-            lines.Add("    }");
-            return;
-        }
-
-        var parameterName = string.IsNullOrWhiteSpace(parameter.Name)
-            ? "arg0"
-            : TypeNames.Sanitize(parameter.Name);
-        var parameterType = AbiPlan.CSharpParameterType(parameter);
-        if (parameter.Kind == AbiKind.StringView)
-        {
-            lines.Add($"    public static {className} {name}(string {parameterName})");
-            lines.Add("    {");
-            lines.Add($"        var bytes = global::System.Text.Encoding.UTF8.GetBytes({parameterName});");
-            lines.Add("        fixed (byte* data = bytes)");
+            lines.Add($"        var __hs_stringBytes = global::System.Text.Encoding.UTF8.GetBytes({stringName});");
+            lines.Add("        fixed (byte* __hs_stringData = __hs_stringBytes)");
             lines.Add("        {");
-            lines.Add($"            var handle = NativeMethods.TablePtr->{create.TableField}(data, (nuint)bytes.Length);");
-            lines.Add("            if (handle == null)");
-            lines.Add("            {");
-            lines.Add("                throw new global::System.InvalidOperationException(NativeMethods.GetLastError() ?? \"BindingShim create call failed.\");");
-            lines.Add("            }");
-            lines.Add("");
+            lines.Add($"            var handle = NativeMethods.TablePtr->{create.TableField}({arguments});");
+            EmitHandleCheck(lines, "            ");
             lines.Add($"            return new {className}((nint)handle);");
             lines.Add("        }");
-            lines.Add("    }");
-            return;
+        }
+        else
+        {
+            lines.Add($"        var handle = NativeMethods.TablePtr->{create.TableField}({arguments});");
+            EmitHandleCheck(lines);
+            lines.Add($"        return new {className}((nint)handle);");
         }
 
-        var argument = parameter.Kind switch
-        {
-            AbiKind.Opaque when parameter.WrapperType is not null => $"(void*){parameterName}.Handle",
-            AbiKind.Opaque => $"(void*){parameterName}",
-            _ => parameterName,
-        };
-        lines.Add($"    public static {className} {name}({parameterType} {parameterName})");
-        lines.Add("    {");
-        lines.Add($"        var handle = NativeMethods.TablePtr->{create.TableField}({argument});");
-        EmitHandleCheck(lines);
-        lines.Add($"        return new {className}((nint)handle);");
         lines.Add("    }");
     }
 
-    private static void EmitHandleCheck(List<string> lines)
+    private static void EmitHandleCheck(List<string> lines, string indent = "        ")
     {
-        lines.Add("        if (handle == null)");
-        lines.Add("        {");
-        lines.Add("            throw new global::System.InvalidOperationException(NativeMethods.GetLastError() ?? \"BindingShim create call failed.\");");
-        lines.Add("        }");
+        lines.Add(indent + "if (handle == null)");
+        lines.Add(indent + "{");
+        lines.Add(indent + "    throw new global::System.InvalidOperationException(NativeMethods.GetLastError() ?? \"BindingShim create call failed.\");");
+        lines.Add(indent + "}");
         lines.Add("");
     }
 
     private static void EmitMethod(List<string> lines, string name, AbiFunction method)
     {
         var modifier = method.Static ? "static " : "";
-        var parameters = string.Join(
-            ", ",
-            method.Parameters.Select((parameter, index) =>
-                $"{AbiPlan.CSharpParameterType(parameter)} {CSharpParameterName(parameter, index)}"));
-        var arguments = BuildCallArguments(method, "_handle");
-        var call = $"NativeMethods.TablePtr->{method.TableField}({arguments})";
-        if (method.ReturnKind == AbiKind.Void)
+        var declarations = ParameterDeclarations(method.Parameters);
+        var stringIndex = FindStringParameter(method.Parameters);
+        var stringName = stringIndex >= 0
+            ? CSharpParameterName(method.Parameters[stringIndex], stringIndex)
+            : null;
+        var callArguments = new List<string>();
+        if (!method.Static)
         {
-            lines.Add($"    public {modifier}void {name}({parameters}) => {call};");
+            callArguments.Add("(void*)_handle");
         }
-        else if (method.ReturnKind == AbiKind.Opaque)
+
+        callArguments.AddRange(BuildCallArgumentList(
+            method.Parameters,
+            stringIndex >= 0 ? "__hs_stringData" : null));
+        var call = $"NativeMethods.TablePtr->{method.TableField}({string.Join(", ", callArguments)})";
+        var returnType = method.ReturnKind switch
         {
-            lines.Add($"    public {modifier}nint {name}({parameters}) => (nint){call};");
+            AbiKind.Void => "void",
+            AbiKind.Opaque => "nint",
+            _ => AbiPlan.CSharpType(method.ReturnKind),
+        };
+
+        lines.Add($"    public {modifier}{returnType} {name}({declarations})");
+        lines.Add("    {");
+        if (stringIndex >= 0)
+        {
+            lines.Add($"        var __hs_stringBytes = global::System.Text.Encoding.UTF8.GetBytes({stringName});");
+            lines.Add("        fixed (byte* __hs_stringData = __hs_stringBytes)");
+            lines.Add("        {");
+            EmitMethodBody(lines, method.ReturnKind, call, "            ");
+            lines.Add("        }");
         }
         else
         {
-            lines.Add(
-                $"    public {modifier}{AbiPlan.CSharpType(method.ReturnKind)} {name}({parameters}) => {call};");
+            EmitMethodBody(lines, method.ReturnKind, call, "        ");
+        }
+
+        lines.Add("    }");
+    }
+
+    private static void EmitMethodBody(List<string> lines, AbiKind returnKind, string call, string indent)
+    {
+        switch (returnKind)
+        {
+            case AbiKind.Void:
+                lines.Add(indent + call + ";");
+                break;
+            case AbiKind.StringView:
+                lines.Add(indent + $"var __hs_view = {call};");
+                lines.Add(indent + "return global::System.Text.Encoding.UTF8.GetString(__hs_view.Data, checked((int)__hs_view.Size));");
+                break;
+            case AbiKind.Opaque:
+                lines.Add(indent + $"return (nint){call};");
+                break;
+            default:
+                lines.Add(indent + $"return {call};");
+                break;
         }
     }
 
@@ -523,24 +543,51 @@ internal static class InteropEmitter
         lines.Add($"        throw new global::System.NotSupportedException(\"{StubReason}\");");
     }
 
-    private static string BuildCallArguments(AbiFunction function, string selfExpression)
+    private static string ParameterDeclarations(IReadOnlyList<AbiParameter> parameters)
     {
-        var arguments = new List<string>();
-        if (!function.Static && function.Kind != AbiFunctionKind.Create)
+        return string.Join(
+            ", ",
+            parameters.Select((parameter, index) =>
+                $"{AbiPlan.CSharpParameterType(parameter)} {CSharpParameterName(parameter, index)}"));
+    }
+
+    private static int FindStringParameter(IReadOnlyList<AbiParameter> parameters)
+    {
+        for (var index = 0; index < parameters.Count; index++)
         {
-            arguments.Add($"(void*){selfExpression}");
+            if (parameters[index].Kind == AbiKind.StringView)
+            {
+                return index;
+            }
         }
 
-        for (var index = 0; index < function.Parameters.Count; index++)
+        return -1;
+    }
+
+    private static IEnumerable<string> BuildCallArgumentList(
+        IReadOnlyList<AbiParameter> parameters,
+        string? stringDataName)
+    {
+        for (var index = 0; index < parameters.Count; index++)
         {
-            var parameter = function.Parameters[index];
+            var parameter = parameters[index];
             var name = CSharpParameterName(parameter, index);
-            arguments.Add(parameter.Kind == AbiKind.Opaque
-                ? parameter.WrapperType is not null ? $"(void*){name}.Handle" : $"(void*){name}"
-                : name);
+            switch (parameter.Kind)
+            {
+                case AbiKind.StringView:
+                    yield return stringDataName ?? name;
+                    yield return "(nuint)__hs_stringBytes.Length";
+                    break;
+                case AbiKind.Opaque:
+                    yield return parameter.WrapperType is not null
+                        ? $"(void*){name}.Handle"
+                        : $"(void*){name}";
+                    break;
+                default:
+                    yield return name;
+                    break;
+            }
         }
-
-        return string.Join(", ", arguments);
     }
 
     private static string CSharpParameterName(AbiParameter parameter, int index)

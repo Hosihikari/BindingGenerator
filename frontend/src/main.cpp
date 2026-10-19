@@ -396,11 +396,12 @@ private:
         bool hasDeprecated = false;
         for (auto* Attribute : Decl->attrs()) {
             llvm::StringRef Name = Attribute->getSpelling();
-            if (Name == "DLLExport" || Name == "DLLImport" || Name == "Visibility") {
+            if (Name == "DLLExport" || Name == "DLLImport" || Name == "Visibility"
+                || Name == "dllexport" || Name == "dllimport" || Name == "visibility") {
                 hasExport = true;
-            } else if (Name == "WarnUnusedResult") {
+            } else if (Name == "WarnUnusedResult" || Name == "warn_unused_result" || Name == "nodiscard") {
                 hasNodiscard = true;
-            } else if (Name == "Deprecated") {
+            } else if (Name == "Deprecated" || Name == "deprecated") {
                 hasDeprecated = true;
             }
         }
