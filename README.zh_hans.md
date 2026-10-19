@@ -61,7 +61,7 @@ powershell -File frontend/smoke-shim.ps1 -IrDirectory artifacts/llapi-full-ir
 powershell -File frontend/smoke-shim.ps1 -IrDirectory artifacts/llapi-full-ir -LinkCarrier
 ```
 
-完整 LLAPI 伞头当前选出 167 个 link-safe 函数；用 `--link-carrier` 链接 `LeviLamina.lib` 时为 396 个函数。切片覆盖 `ll::event::EventId`、`ll::event::EventIdView`、`ll::hash_utils::HashedIdBase`、`ll::hash_utils::HashCombiner`、`ll::data::Version` 以及其他符合条件的类。Smoke test 从托管字符串创建原生 `EventId`，读取名称与哈希，比较两个 `HashedIdBase` 视图，调用 `HashCombiner::hash()`，并让 `ll::data::Version` 经过字符串构造、`to_string()`、字段读取、`valid(string)` 与 `isIdenticalTo(Version)` 往返。其余成员保留 Interop stub，并在覆盖清单中只记录 `interop` 发射器。
+完整 LLAPI 伞头当前选出 169 个 link-safe 函数；用 `--link-carrier` 链接 `LeviLamina.lib` 时为 426 个函数。切片覆盖 `ll::event::EventId`、`ll::event::EventIdView`、`ll::hash_utils::HashedIdBase`、`ll::hash_utils::HashCombiner`、`ll::data::Version` 以及其他符合条件的类。Smoke test 从托管字符串创建原生 `EventId`，读取名称与哈希，比较两个 `HashedIdBase` 视图，调用 `HashCombiner::hash()`，并让 `ll::data::Version` 经过字符串构造、`to_string()`、字段读取、`valid(string)` 与 `isIdenticalTo(Version)` 往返。其余成员保留 Interop stub，并在覆盖清单中只记录 `interop` 发射器。
 
 ## 许可证
 

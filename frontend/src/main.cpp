@@ -144,7 +144,7 @@ public:
             return true;
         }
 
-        auto* Definition = Decl->getDefinition();
+        auto* Definition = Decl;
         if (Definition == nullptr) {
             return true;
         }
@@ -294,9 +294,32 @@ private:
         return false;
     }
 
+    std::string qualifiedNameFor(const NamedDecl* Decl) const {
+        if (auto* Spec = dyn_cast<ClassTemplateSpecializationDecl>(Decl)) {
+            if (auto* Template = Spec->getSpecializedTemplate()) {
+                std::string Arguments;
+                llvm::raw_string_ostream OS(Arguments);
+                PrintingPolicy Policy(Ctx.getLangOpts());
+                Policy.SuppressTagKeyword = true;
+                bool First = true;
+                for (const auto& Argument : Spec->getTemplateArgs().asArray()) {
+                    if (!First) {
+                        OS << ", ";
+                    }
+                    First = false;
+                    Argument.print(Policy, OS, true);
+                }
+                OS.flush();
+                return Template->getQualifiedNameAsString() + "<" + Arguments + ">";
+            }
+        }
+
+        return Decl->getQualifiedNameAsString();
+    }
+
     std::string idFor(const Decl* Decl, const std::string& ParentId) const {
         const auto* Named = dyn_cast<NamedDecl>(Decl);
-        std::string Qualified = Named ? Named->getQualifiedNameAsString() : Decl->getDeclKindName();
+        std::string Qualified = Named ? qualifiedNameFor(Named) : Decl->getDeclKindName();
         std::string Suffix;
         if (auto* Function = dyn_cast<FunctionDecl>(Decl)) {
             std::string Signature = typeString(Function->getReturnType()) + "(";
@@ -431,13 +454,63 @@ private:
         return Macros;
     }
 
+    std::string templateArgumentString(const TemplateArgument& Argument) const {
+        std::string Text;
+        llvm::raw_string_ostream OS(Text);
+        PrintingPolicy Policy(Ctx.getLangOpts());
+        Policy.SuppressTagKeyword = true;
+        Argument.print(Policy, OS, true);
+        OS.flush();
+        return Text;
+    }
+
+    std::string templateArgumentKind(const TemplateArgument& Argument) const {
+        switch (Argument.getKind()) {
+        case TemplateArgument::Null:
+            return "null";
+        case TemplateArgument::Type:
+            return "type";
+        case TemplateArgument::Declaration:
+            return "declaration";
+        case TemplateArgument::NullPtr:
+            return "nullptr";
+        case TemplateArgument::Integral:
+            return "integral";
+        case TemplateArgument::Template:
+            return "template";
+        case TemplateArgument::TemplateExpansion:
+            return "template_expansion";
+        case TemplateArgument::Expression:
+            return "expression";
+        case TemplateArgument::Pack:
+            return "pack";
+        }
+        return "unknown";
+    }
+
+    std::string specializationKind(const ClassTemplateSpecializationDecl* Spec) const {
+        switch (Spec->getSpecializationKind()) {
+        case TSK_Undeclared:
+            return "undeclared";
+        case TSK_ImplicitInstantiation:
+            return "implicit";
+        case TSK_ExplicitSpecialization:
+            return "explicit";
+        case TSK_ExplicitInstantiationDeclaration:
+            return "explicit_instantiation_declaration";
+        case TSK_ExplicitInstantiationDefinition:
+            return "explicit_instantiation_definition";
+        }
+        return "unknown";
+    }
+
     llvm::json::Object makeDeclaration(NamedDecl* Decl, const std::string& Id, const std::string& Kind) const {
         llvm::json::Object Object;
         Object["recordType"] = "declaration";
         Object["id"] = Id;
         Object["surface"] = Opt.Surface;
         Object["kind"] = Kind;
-        Object["qualifiedName"] = Decl->getQualifiedNameAsString();
+        Object["qualifiedName"] = qualifiedNameFor(Decl);
         Object["access"] = accessString(Decl->getAccess());
         Object["linkage"] = Decl->isExternallyVisible() ? "external" : "internal";
         Object["source"] = makeSource(Decl->getLocation());
@@ -455,6 +528,21 @@ private:
         auto Macros = inferMacros(Decl);
         if (!Macros.empty()) {
             Object["macros"] = std::move(Macros);
+        }
+
+        if (auto* Spec = dyn_cast<ClassTemplateSpecializationDecl>(Decl)) {
+            llvm::json::Object Template;
+            Template["specializationKind"] = specializationKind(Spec);
+            Template["instantiationKind"] = Spec->isExplicitSpecialization() ? "explicit" : "implicit";
+            llvm::json::Array Arguments;
+            for (const auto& Argument : Spec->getTemplateArgs().asArray()) {
+                llvm::json::Object Item;
+                Item["kind"] = templateArgumentKind(Argument);
+                Item["value"] = templateArgumentString(Argument);
+                Arguments.emplace_back(std::move(Item));
+            }
+            Template["arguments"] = std::move(Arguments);
+            Object["template"] = std::move(Template);
         }
 
         if (auto* Function = dyn_cast<FunctionDecl>(Decl)) {

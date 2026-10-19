@@ -74,14 +74,8 @@ internal static class InteropEmitter
 
             lines.Add("}");
 
-            var pathSegments = new List<string> { "interop", declaration.Surface };
-            if (name.NamespacePath.Length > 0)
-            {
-                pathSegments.AddRange(name.NamespacePath.Split('.', StringSplitOptions.RemoveEmptyEntries));
-            }
-
-            pathSegments.Add(name.ClassName + ".g.cs");
-            var path = Path.Combine(outputDirectory, Path.Combine(pathSegments.ToArray()));
+            var fileName = name.ClassName + "_" + CSharpNaming.ShortHash(declaration.Id) + ".g.cs";
+            var path = Path.Combine(outputDirectory, "interop", declaration.Surface, fileName);
             Directory.CreateDirectory(Path.GetDirectoryName(path)!);
             File.WriteAllText(path, string.Join("\n", lines) + "\n", new UTF8Encoding(false));
         }

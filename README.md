@@ -61,7 +61,7 @@ powershell -File frontend/smoke-shim.ps1 -IrDirectory artifacts/llapi-full-ir
 powershell -File frontend/smoke-shim.ps1 -IrDirectory artifacts/llapi-full-ir -LinkCarrier
 ```
 
-The complete LLAPI umbrella currently selects 167 link-safe functions, or 396 functions when built with `--link-carrier` against `LeviLamina.lib`. The slice covers `ll::event::EventId`, `ll::event::EventIdView`, `ll::hash_utils::HashedIdBase`, `ll::hash_utils::HashCombiner`, `ll::data::Version`, and the other eligible classes. The smoke test creates a native `EventId` from a managed string, reads its name and hash, compares two `HashedIdBase` views, calls `HashCombiner::hash()`, and round-trips `ll::data::Version` through string construction, `to_string()`, field getters, `valid(string)`, and `isIdenticalTo(Version)`. The remaining members keep their Interop stubs and are recorded in the coverage manifest with the `interop` emitter only.
+The complete LLAPI umbrella currently selects 169 link-safe functions, or 426 functions when built with `--link-carrier` against `LeviLamina.lib`. The slice covers `ll::event::EventId`, `ll::event::EventIdView`, `ll::hash_utils::HashedIdBase`, `ll::hash_utils::HashCombiner`, `ll::data::Version`, and the other eligible classes. The smoke test creates a native `EventId` from a managed string, reads its name and hash, compares two `HashedIdBase` views, calls `HashCombiner::hash()`, and round-trips `ll::data::Version` through string construction, `to_string()`, field getters, `valid(string)`, and `isIdenticalTo(Version)`. The remaining members keep their Interop stubs and are recorded in the coverage manifest with the `interop` emitter only.
 
 ## Licence
 

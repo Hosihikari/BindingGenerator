@@ -21,7 +21,10 @@ internal static class CSharpNaming
                     Declaration: declaration,
                     NamespaceName: namespaceName,
                     NamespacePath: namespacePath,
-                    Class: TypeNames.Sanitize(TypeNames.NativeName(declaration.QualifiedName)));
+                    Class: LimitName(
+                        TypeNames.Sanitize(TypeNames.NativeName(declaration.QualifiedName)),
+                        declaration.Id,
+                        96));
             })
             .ToList();
 
@@ -45,6 +48,16 @@ internal static class CSharpNaming
 
     public static string ShortHash(string value) => IrHash.Sha256Hex(value).Substring(0, 8);
 
+    private static string LimitName(string name, string key, int maxLength)
+    {
+        if (name.Length <= maxLength)
+        {
+            return name;
+        }
+
+        return name[..maxLength] + "_" + ShortHash(key);
+    }
+
     private static (string NamespaceName, string NamespacePath) BuildNamespace(
         DeclarationRecord declaration,
         HashSet<string> classNames)
@@ -60,7 +73,11 @@ internal static class CSharpNaming
             var segment = TypeNames.Sanitize(part);
             if (classNames.Contains(nativePrefix))
             {
-                segment += "_Nested";
+                segment = LimitName(segment + "_Nested", nativePrefix + ":nested", 72);
+            }
+            else
+            {
+                segment = LimitName(segment, nativePrefix, 64);
             }
 
             segments.Add(segment);
