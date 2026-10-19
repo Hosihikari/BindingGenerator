@@ -1,3 +1,4 @@
+using Hosihikari.Bindings.Generator;
 using Hosihikari.Bindings.Ir;
 
 if (args.Length == 0 || args[0] is "-h" or "--help" or "help")
@@ -30,6 +31,42 @@ switch (args[0])
         }
 
         Console.WriteLine($"IR valid: {records.Count} records");
+        return 0;
+    }
+
+    case "emit":
+    {
+        if (args.Length != 4)
+        {
+            Console.Error.WriteLine("usage: emit <ir-manifest.json> <shard-directory> <output-directory>");
+            return 2;
+        }
+
+        var manifest = ReadManifest(args[1]);
+        var records = ReadRecords(args[2]);
+        var validation = IrValidator.Validate(manifest, records);
+        if (!validation.IsValid)
+        {
+            PrintErrors(validation);
+            return 1;
+        }
+
+        var manifestHash = "sha256:" + IrHash.CanonicalJsonSha256(File.ReadAllText(args[1]));
+        var output = Path.GetFullPath(args[3]);
+        foreach (var subdirectory in new[] { "interop", "shim", "coverage" })
+        {
+            var path = Path.Combine(output, subdirectory);
+            if (Directory.Exists(path))
+            {
+                Directory.Delete(path, recursive: true);
+            }
+        }
+
+        Directory.CreateDirectory(output);
+        InteropEmitter.Emit(records, output);
+        ShimEmitter.Emit(manifest, output, manifestHash);
+        CoverageEmitter.Emit(manifest, records, output, manifestHash);
+        Console.WriteLine($"emitted {records.Count} records to {output}");
         return 0;
     }
 
@@ -100,9 +137,7 @@ static void PrintHelp()
           version
           validate-ir <ir-manifest.json> <shard-directory>
           validate-coverage <coverage-summary.json> <coverage-manifest.jsonl>
-
-        The libTooling frontend and the C++/C# emitters are scaffolded under frontend/ and
-        will be wired in after the first LeviLamina slice.
+          emit <ir-manifest.json> <shard-directory> <output-directory>
         """
     );
 }

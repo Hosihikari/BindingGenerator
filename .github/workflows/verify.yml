@@ -31,3 +31,15 @@ jobs:
       - name: Validate fixture IR
         working-directory: Generator
         run: dotnet run --project src/Hosihikari.Bindings.Generator/Hosihikari.Bindings.Generator.csproj -c Release -- validate-ir tests/fixtures/basic/ir-manifest.json tests/fixtures/basic
+
+      - name: Emit fixture
+        working-directory: Generator
+        run: dotnet run --project src/Hosihikari.Bindings.Generator/Hosihikari.Bindings.Generator.csproj -c Release -- emit tests/fixtures/basic/ir-manifest.json tests/fixtures/basic artifacts/emitted
+
+      - name: Validate emitted coverage
+        working-directory: Generator
+        run: dotnet run --project src/Hosihikari.Bindings.Generator/Hosihikari.Bindings.Generator.csproj -c Release -- validate-coverage artifacts/emitted/coverage/summary.json artifacts/emitted/coverage/manifest.jsonl
+
+      - name: Compile shim stub
+        working-directory: Generator
+        run: g++ -std=c++20 -c artifacts/emitted/shim/win-x64-server/binding_table.cpp -o artifacts/binding_table.o

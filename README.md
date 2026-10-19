@@ -24,9 +24,12 @@ The generator turns the versioned IR into the C ABI **BindingShim** and the nati
 ```shell
 dotnet run --project src/Hosihikari.Bindings.Generator/Hosihikari.Bindings.Generator.csproj -c Release -- version
 dotnet run --project src/Hosihikari.Bindings.Generator/Hosihikari.Bindings.Generator.csproj -c Release -- validate-ir tests/fixtures/basic/ir-manifest.json tests/fixtures/basic
+dotnet run --project src/Hosihikari.Bindings.Generator/Hosihikari.Bindings.Generator.csproj -c Release -- emit tests/fixtures/basic/ir-manifest.json tests/fixtures/basic artifacts/emitted
 ```
 
 `validate-ir` reads the manifest and every `*.jsonl` under the shard directory, then runs the IR validator. `validate-coverage` does the same for `coverage/summary.json` + `coverage/manifest.jsonl`.
+
+`emit` writes `interop/` (C# stubs), `shim/` (C++ binding-table stubs), and `coverage/` (manifest + summary). The stubs establish the IR-to-output contract; the BindingShim calls are not wired yet.
 
 ## Licence
 
