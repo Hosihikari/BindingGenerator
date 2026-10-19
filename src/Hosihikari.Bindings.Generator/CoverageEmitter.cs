@@ -34,7 +34,7 @@ internal static class CoverageEmitter
                     Kind = declaration.Kind,
                     QualifiedName = declaration.QualifiedName,
                     Status = CoverageStatus.Bound,
-                    Emitters = ["interop", "shim"],
+                    Emitters = ["interop"],
                     Source = declaration.Source,
                 });
 
@@ -54,7 +54,7 @@ internal static class CoverageEmitter
                         Kind = member.Kind,
                         QualifiedName = declaration.QualifiedName + "::" + member.Name,
                         Status = CoverageStatus.Bound,
-                        Emitters = ["interop", "shim"],
+                        Emitters = ["interop"],
                         Source = declaration.Source,
                     });
                 }
