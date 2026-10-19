@@ -26,12 +26,13 @@ cmake --build build/frontend --config Release
 
 ```powershell
 ./frontend/run-local.ps1 -LlvmRoot <llvm-root> -LeviLaminaRoot <checkout>
+./frontend/run-umbrella.ps1 -LlvmRoot <llvm-root> -LeviLaminaRoot <checkout> -Module ll/api
 ```
 
-The script locates MSVC and the Windows SDK, runs the frontend on `ll/api/event/Event.h`, and validates the produced IR with the .NET CLI.
+`run-local.ps1` runs the frontend on `ll/api/event/Event.h`. `run-umbrella.ps1` builds an umbrella from the module's headers, reuses the include paths and defines from the LeviLamina `compile_commands.json`, and validates the produced IR with the .NET CLI.
 
 ## Current state
 
-The frontend parses `ll/api/event/Event.h`, emits JSONL IR plus `ir-manifest.json`, and validates the result through the .NET CLI. The visitor covers classes/structs/unions, fields, static fields, methods, enums, and namespace-scope functions; constructors, destructors, operators, template instantiations, macro provenance, and the full umbrella are not emitted yet.
+The frontend parses the full `src/ll/api` umbrella (209 declarations / 427 members in the current checkout) and the smaller `ll/api/event` module. It emits JSONL IR plus `ir-manifest.json` and validates the result through the .NET CLI. The visitor covers classes/structs/unions, fields, static fields, methods, enums, and namespace-scope functions; constructors, destructors, operators, template instantiations, and macro provenance are not emitted yet.
 
-The frontend is not part of the .NET CI job; it requires the pinned LLVM toolchain, zlib/zstd, and the MSVC/SDK headers. `build.ps1` and `run-local.ps1` cover the local Windows slice.
+The frontend is not part of the .NET CI job; it requires the pinned LLVM toolchain, zlib/zstd, and the MSVC/SDK headers. `build.ps1`, `run-local.ps1`, and `run-umbrella.ps1` cover the local Windows slice.

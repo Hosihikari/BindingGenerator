@@ -23,6 +23,7 @@ internal static class CoverageEmitter
         var entries = new List<CoverageEntry>();
         foreach (var declaration in declarations)
         {
+            var isTemplate = declaration.QualifiedName.Contains('<') || declaration.QualifiedName.Contains('>');
             foreach (var configuration in configurations)
             {
                 entries.Add(new CoverageEntry
@@ -33,8 +34,9 @@ internal static class CoverageEmitter
                     Configuration = configuration.Id,
                     Kind = declaration.Kind,
                     QualifiedName = declaration.QualifiedName,
-                    Status = CoverageStatus.Bound,
-                    Emitters = ["interop"],
+                    Status = isTemplate ? CoverageStatus.Excluded : CoverageStatus.Bound,
+                    Emitters = isTemplate ? [] : ["interop"],
+                    Reason = isTemplate ? CoverageReason.TemplateDeclaration : (CoverageReason?)null,
                     Source = declaration.Source,
                 });
 
@@ -46,6 +48,10 @@ internal static class CoverageEmitter
                 foreach (var member in declarationMembers)
                 {
                     var isPrivate = member.Access == "private";
+                    var excluded = isTemplate || isPrivate;
+                    CoverageReason? reason = isTemplate
+                        ? CoverageReason.TemplateDeclaration
+                        : isPrivate ? CoverageReason.Private : null;
                     entries.Add(new CoverageEntry
                     {
                         Id = member.Id,
@@ -54,9 +60,9 @@ internal static class CoverageEmitter
                         Configuration = configuration.Id,
                         Kind = member.Kind,
                         QualifiedName = declaration.QualifiedName + "::" + member.Name,
-                        Status = isPrivate ? CoverageStatus.Excluded : CoverageStatus.Bound,
-                        Emitters = isPrivate ? [] : ["interop"],
-                        Reason = isPrivate ? CoverageReason.Private : null,
+                        Status = excluded ? CoverageStatus.Excluded : CoverageStatus.Bound,
+                        Emitters = excluded ? [] : ["interop"],
+                        Reason = reason,
                         Source = declaration.Source,
                     });
                 }

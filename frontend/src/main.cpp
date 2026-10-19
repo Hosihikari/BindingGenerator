@@ -33,6 +33,8 @@ struct Options {
     std::string Root;
     std::string Configuration = "win-x64-server";
     std::string Header = "ll/api/event/Event.h";
+    std::string Source;
+    std::string Filter;
     std::string Module = "ll/api/event";
     std::vector<std::string> CompilerArgs;
 };
@@ -81,6 +83,14 @@ bool parseOptions(int argc, char** argv, Options& Opt) {
             }
         } else if (Arg == "--header") {
             if (!next(Opt.Header)) {
+                return false;
+            }
+        } else if (Arg == "--source") {
+            if (!next(Opt.Source)) {
+                return false;
+            }
+        } else if (Arg == "--filter") {
+            if (!next(Opt.Filter)) {
                 return false;
             }
         } else if (Arg == "--module") {
@@ -253,9 +263,23 @@ private:
             return false;
         }
 
-        std::string Path = normalizePath(File.str());
+        llvm::SmallString<256> Absolute(File);
+        if (llvm::sys::fs::make_absolute(Absolute)) {
+            return false;
+        }
+
+        std::string Path = normalizePath(Absolute.str().str());
         std::string Root = normalizePath(Opt.Root);
-        return Path.rfind(Root, 0) == 0;
+        if (Path.rfind(Root, 0) != 0) {
+            return false;
+        }
+
+        if (Opt.Filter.empty()) {
+            return true;
+        }
+
+        std::string Filter = normalizePath(Opt.Filter);
+        return Path.rfind(Filter, 0) == 0;
     }
 
     std::string idFor(const Decl* Decl, const std::string& ParentId) const {
@@ -462,11 +486,22 @@ int main(int argc, char** argv) {
     Options Opt;
     if (!parseOptions(argc, argv, Opt)) {
         llvm::errs() << "usage: hosihikari-ir-frontend --surface <surface> --output <dir> --root <include-root> "
-                        "--configuration <id> [--header <header>] [--module <module>] -- <clang args>\n";
+                        "--configuration <id> [--header <header>] [--source <file>] [--filter <path>] "
+                        "[--module <module>] -- <clang args>\n";
         return 2;
     }
 
-    std::string Code = "#include \"" + Opt.Header + "\"\n";
+    std::string Code;
+    if (!Opt.Source.empty()) {
+        auto Buffer = llvm::MemoryBuffer::getFile(Opt.Source);
+        if (!Buffer) {
+            llvm::errs() << "cannot read source: " << Opt.Source << "\n";
+            return 1;
+        }
+        Code = (*Buffer)->getBuffer().str();
+    } else {
+        Code = "#include \"" + Opt.Header + "\"\n";
+    }
     std::vector<std::string> Args = Opt.CompilerArgs;
     Args.emplace_back("-I" + Opt.Root);
     Args.emplace_back("-std=c++20");

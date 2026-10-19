@@ -37,6 +37,7 @@ try {
         --surface levilamina `
         --output $Output `
         --root (Join-Path $LeviLaminaRoot "src") `
+        --filter (Join-Path $LeviLaminaRoot "src\ll\api") `
         --configuration win-x64-server `
         --header ll/api/event/Event.h `
         --module ll/api/event `

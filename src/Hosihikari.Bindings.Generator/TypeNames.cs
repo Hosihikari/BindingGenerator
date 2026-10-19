@@ -27,6 +27,27 @@ internal static class TypeNames
 
     public static string Escape(string name) => Keywords.Contains(name) ? "@" + name : name;
 
+    public static string Sanitize(string name)
+    {
+        var builder = new System.Text.StringBuilder(name.Length);
+        foreach (var character in name)
+        {
+            builder.Append(char.IsLetterOrDigit(character) || character == '_' ? character : '_');
+        }
+
+        if (builder.Length == 0)
+        {
+            builder.Append('_');
+        }
+
+        if (char.IsDigit(builder[0]))
+        {
+            builder.Insert(0, '_');
+        }
+
+        return Escape(builder.ToString());
+    }
+
     public static string NativeNamespace(string qualifiedName)
     {
         var separator = qualifiedName.LastIndexOf("::", StringComparison.Ordinal);
