@@ -1,5 +1,7 @@
 # Hosihikari.Bindings.Generator
 
+[English](README.md) | [简体中文](README.zh_hans.md)
+
 The generator turns the versioned IR into the C ABI **BindingShim** and the native-style C# **Interop**. It does not produce the hand-written .NET Idiomatic layer.
 
 ## Boundary
@@ -8,7 +10,7 @@ The generator turns the versioned IR into the C ABI **BindingShim** and the nati
 - **Output**: generated C++ (BindingShim) and C# (Interop) sources. Both are committed in the binding repositories and verified by a CI diff.
 - **Not here**: the hand-written Idiomatic wrappers, the HostingShim, or any CLR hosting.
 - The IR library is a sibling checkout (`../Ir`); in CI it is pulled with `actions/checkout` using a pinned `repository`/`path`, following `HosihikariFramework/PluginManager/.github/workflows/verify.yml`.
-- Design rationale: `Hosihikari/Design`, ADRs 0001/0003/0004/0008/0013.
+- Design rationale: the internal `Hosihikari/Design` repository (private), ADRs 0001/0003/0004/0008/0013.
 
 ## Projects
 
