@@ -677,7 +677,11 @@ internal static class InteropEmitter
                 : method.ReturnOptional ? "nint?" : "nint",
             AbiKind.ArrayView => method.ArrayElementKind == AbiKind.StringView
                 ? "string[]"
-                : AbiPlan.CSharpType(method.ArrayElementKind) + "[]",
+                : method.ArrayElementOwnership != ArrayElementOwnership.None
+                    ? method.ArrayElementWrapperType + (method.ArrayElementOwnership == ArrayElementOwnership.OptionalRecordCopy ? "?[]" : "[]")
+                    : method.ArrayElementKind == AbiKind.Shared
+                        ? "global::Hosihikari.Bindings.Abi.SharedHandle[]"
+                        : AbiPlan.CSharpType(method.ArrayElementKind) + "[]",
             AbiKind.Shared => "global::Hosihikari.Bindings.Abi.SharedHandle?",
             _ => AbiPlan.CSharpType(method.ReturnKind) + (method.ReturnOptional ? "?" : ""),
         };
@@ -743,6 +747,37 @@ internal static class InteropEmitter
                     lines.Add(indent + "for (var __hs_i = 0; __hs_i < __hs_result.Length; __hs_i++)");
                     lines.Add(indent + "{");
                     lines.Add(indent + "    __hs_result[__hs_i] = global::System.Text.Encoding.UTF8.GetString(__hs_items[__hs_i].Data, checked((int)__hs_items[__hs_i].Size));");
+                    lines.Add(indent + "}");
+                    lines.Add(indent + "return __hs_result;");
+                }
+                else if (method.ArrayElementKind == AbiKind.Shared)
+                {
+                    lines.Add(indent + "var __hs_items = (global::Hosihikari.Bindings.Abi.SharedHandleData*)__hs_view.Data;");
+                    lines.Add(indent + "var __hs_result = new global::Hosihikari.Bindings.Abi.SharedHandle[checked((int)__hs_view.Size)];");
+                    lines.Add(indent + "for (var __hs_i = 0; __hs_i < __hs_result.Length; __hs_i++)");
+                    lines.Add(indent + "{");
+                    lines.Add(indent + "    __hs_result[__hs_i] = global::Hosihikari.Bindings.Abi.SharedHandle.FromNative(__hs_items[__hs_i])!;");
+                    lines.Add(indent + "}");
+                    lines.Add(indent + "return __hs_result;");
+                }
+                else if (method.ArrayElementOwnership != ArrayElementOwnership.None)
+                {
+                    var nullableElement = method.ArrayElementOwnership == ArrayElementOwnership.OptionalRecordCopy;
+                    var wrapper = method.ArrayElementWrapperType!;
+                    lines.Add(indent + "var __hs_items = (void**)__hs_view.Data;");
+                    lines.Add(indent + $"var __hs_result = new {wrapper}{(nullableElement ? "?" : "")}[checked((int)__hs_view.Size)];");
+                    lines.Add(indent + "for (var __hs_i = 0; __hs_i < __hs_result.Length; __hs_i++)");
+                    lines.Add(indent + "{");
+                    if (nullableElement)
+                    {
+                        lines.Add(indent + "    var __hs_element = __hs_items[__hs_i];");
+                        lines.Add(indent + $"    __hs_result[__hs_i] = __hs_element == null ? null : new {wrapper}((nint)__hs_element);");
+                    }
+                    else
+                    {
+                        lines.Add(indent + $"    __hs_result[__hs_i] = new {wrapper}((nint)__hs_items[__hs_i]);");
+                    }
+
                     lines.Add(indent + "}");
                     lines.Add(indent + "return __hs_result;");
                 }

@@ -659,7 +659,10 @@ internal static class ShimEmitter
                 }
                 else if (function.ReturnKind == AbiKind.Shared)
                 {
-                    yield return $"    return hs_make_shared_handle({target});";
+                    var sharedExpression = function.SharedWrapper is SharedWrapperKind.NotNull or SharedWrapperKind.Nullable
+                        ? $"({target}).get()"
+                        : target;
+                    yield return $"    return hs_make_shared_handle({sharedExpression});";
                 }
                 else if (function.ReturnKind == AbiKind.Opaque)
                 {
@@ -774,6 +777,18 @@ internal static class ShimEmitter
                         yield return "    for (auto const& item : hs_arrayStrings) { hs_arrayViews.push_back(HosihikariStringView{item.data(), item.size()}); }";
                         yield return "    return HosihikariArrayView{hs_arrayViews.data(), hs_arrayViews.size()};";
                     }
+                    else if (function.ArrayElementKind == AbiKind.Shared)
+                    {
+                        yield return "    thread_local std::vector<HosihikariSharedHandle> hs_arrayShared;";
+                        yield return $"    auto result = {call};";
+                        yield return "    hs_arrayShared.clear();";
+                        yield return "    hs_arrayShared.reserve(result.size());";
+                        var sharedExpression = function.ArrayElementSharedWrapper is SharedWrapperKind.NotNull or SharedWrapperKind.Nullable
+                            ? "item.get()"
+                            : "item";
+                        yield return $"    for (auto const& item : result) {{ hs_arrayShared.push_back(hs_make_shared_handle({sharedExpression})); }}";
+                        yield return "    return HosihikariArrayView{hs_arrayShared.data(), hs_arrayShared.size()};";
+                    }
                     else
                     {
                         var elementType = AbiPlan.CppType(function.ArrayElementKind);
@@ -781,9 +796,24 @@ internal static class ShimEmitter
                         yield return $"    auto result = {call};";
                         yield return "    hs_arrayResult.clear();";
                         yield return "    hs_arrayResult.reserve(result.size());";
-                        if (function.ArrayElementKind == AbiKind.Opaque)
+                        if (function.ArrayElementKind == AbiKind.Opaque
+                            && function.ArrayElementOwnership == ArrayElementOwnership.None)
                         {
                             yield return "    for (auto const& item : result) { hs_arrayResult.push_back(const_cast<void*>(static_cast<void const*>(item))); }";
+                        }
+                        else if (function.ArrayElementOwnership == ArrayElementOwnership.UniquePtr)
+                        {
+                            yield return "    for (auto& item : result) { hs_arrayResult.push_back(static_cast<void*>(item.release())); }";
+                        }
+                        else if (function.ArrayElementOwnership == ArrayElementOwnership.RecordCopy)
+                        {
+                            var recordType = function.ArrayElementNativeType ?? "void";
+                            yield return $"    for (auto const& item : result) {{ hs_arrayResult.push_back(static_cast<void*>(new {recordType}(item))); }}";
+                        }
+                        else if (function.ArrayElementOwnership == ArrayElementOwnership.OptionalRecordCopy)
+                        {
+                            var recordType = function.ArrayElementNativeType ?? "void";
+                            yield return $"    for (auto const& item : result) {{ hs_arrayResult.push_back(item ? static_cast<void*>(new {recordType}(*item)) : nullptr); }}";
                         }
                         else
                         {
@@ -795,7 +825,10 @@ internal static class ShimEmitter
                 }
                 else if (function.ReturnKind == AbiKind.Shared)
                 {
-                    yield return $"    return hs_make_shared_handle({call});";
+                    var sharedExpression = function.SharedWrapper is SharedWrapperKind.NotNull or SharedWrapperKind.Nullable
+                        ? $"({call}).get()"
+                        : call;
+                    yield return $"    return hs_make_shared_handle({sharedExpression});";
                 }
                 else if (function.ReturnKind == AbiKind.Opaque)
                 {

@@ -114,6 +114,22 @@ internal sealed class AbiCallbackArgument
     public bool IsPointer { get; init; }
 }
 
+internal enum SharedWrapperKind
+{
+    None,
+    SharedPtr,
+    NotNull,
+    Nullable,
+}
+
+internal enum ArrayElementOwnership
+{
+    None,
+    UniquePtr,
+    RecordCopy,
+    OptionalRecordCopy,
+}
+
 internal sealed class AbiFunction
 {
     public int Index { get; set; }
@@ -136,6 +152,11 @@ internal sealed class AbiFunction
     public bool ReturnArray { get; init; }
     public AbiKind ArrayElementKind { get; init; }
     public string? ArrayElementType { get; init; }
+    public SharedWrapperKind ArrayElementSharedWrapper { get; init; }
+    public ArrayElementOwnership ArrayElementOwnership { get; init; }
+    public string? ArrayElementWrapperType { get; init; }
+    public string? ArrayElementNativeType { get; init; }
+    public SharedWrapperKind SharedWrapper { get; init; }
     public bool ReturnNullable { get; init; }
     public bool ReturnExpected { get; init; }
     public string? ExpectedErrorType { get; init; }
@@ -423,9 +444,28 @@ internal sealed class AbiPlan
         var uniquePtrOwnedDeclarationIds = new HashSet<string>(StringComparer.Ordinal);
         foreach (var member in records.OfType<MemberRecord>())
         {
-            if (member.Signature is null
-                || !TryParseUniquePtr(member.Signature.ReturnType, out var uniquePointee)
-                || !allDeclarationsByQualifiedName.TryGetValue(uniquePointee, out var uniqueDeclaration)
+            if (member.Signature is null)
+            {
+                continue;
+            }
+
+            var returnType = member.Signature.ReturnType;
+            string uniquePointee;
+            if (TryParseUniquePtr(returnType, out var directPointee))
+            {
+                uniquePointee = directPointee;
+            }
+            else if (TryParseVector(returnType, out var vectorElement)
+                && TryParseUniquePtr(vectorElement, out var nestedPointee))
+            {
+                uniquePointee = nestedPointee;
+            }
+            else
+            {
+                continue;
+            }
+
+            if (!allDeclarationsByQualifiedName.TryGetValue(uniquePointee, out var uniqueDeclaration)
                 || uniqueDeclaration.Access != "public")
             {
                 continue;
@@ -1472,6 +1512,11 @@ internal sealed class AbiPlan
                 out var returnArray,
                 out var arrayElementKind,
                 out var arrayElementType,
+                out var arrayElementSharedWrapper,
+                out var arrayElementOwnership,
+                out var arrayElementWrapperType,
+                out var arrayElementNativeType,
+                out var sharedWrapper,
                 out var returnNullable,
                 out var returnExpected,
                 out var expectedErrorType,
@@ -1542,6 +1587,11 @@ internal sealed class AbiPlan
             ReturnArray = returnArray,
             ArrayElementKind = arrayElementKind,
             ArrayElementType = arrayElementType,
+            ArrayElementSharedWrapper = arrayElementSharedWrapper,
+            ArrayElementOwnership = arrayElementOwnership,
+            ArrayElementWrapperType = arrayElementWrapperType,
+            ArrayElementNativeType = arrayElementNativeType,
+            SharedWrapper = sharedWrapper,
             ReturnNullable = returnNullable,
             ReturnExpected = returnExpected,
             ExpectedErrorType = expectedErrorType,
@@ -1570,6 +1620,11 @@ internal sealed class AbiPlan
         out bool array,
         out AbiKind arrayElementKind,
         out string? arrayElementType,
+        out SharedWrapperKind arrayElementSharedWrapper,
+        out ArrayElementOwnership arrayElementOwnership,
+        out string? arrayElementWrapperType,
+        out string? arrayElementNativeType,
+        out SharedWrapperKind sharedWrapper,
         out bool nullable,
         out bool returnExpected,
         out string? expectedErrorType,
@@ -1585,6 +1640,11 @@ internal sealed class AbiPlan
         array = false;
         arrayElementKind = AbiKind.Void;
         arrayElementType = null;
+        arrayElementSharedWrapper = SharedWrapperKind.None;
+        arrayElementOwnership = ArrayElementOwnership.None;
+        arrayElementWrapperType = null;
+        arrayElementNativeType = null;
+        sharedWrapper = SharedWrapperKind.None;
         nullable = false;
         returnExpected = false;
         expectedErrorType = null;
@@ -1637,6 +1697,11 @@ internal sealed class AbiPlan
                     out array,
                     out arrayElementKind,
                     out arrayElementType,
+                    out arrayElementSharedWrapper,
+                    out arrayElementOwnership,
+                    out arrayElementWrapperType,
+                    out arrayElementNativeType,
+                    out sharedWrapper,
                     out nullable,
                     out var nestedExpected,
                     out _,
@@ -1690,37 +1755,117 @@ internal sealed class AbiPlan
             return true;
         }
 
-        if (TryParseVector(nativeType, out var vectorElement))
+        var isVector = TryParseVector(nativeType, out var sequenceElement);
+        var isSet = !isVector && TryParseUnorderedSet(nativeType, out sequenceElement);
+        if (isVector || isSet)
         {
-            if (IsStringViewType(vectorElement) || IsStringType(vectorElement))
+            if (IsStringViewType(sequenceElement) || IsStringType(sequenceElement))
             {
                 kind = AbiKind.ArrayView;
                 arrayElementKind = AbiKind.StringView;
-                arrayElementType = vectorElement;
+                arrayElementType = sequenceElement;
                 array = true;
                 return true;
             }
 
-            if (TryMapEnumUnderlying(vectorElement, enumUnderlyingByName, out var vectorKind)
-                || TryMapFundamental(vectorElement, out vectorKind))
+            if (TryMapEnumUnderlying(sequenceElement, enumUnderlyingByName, out var elementKind)
+                || TryMapFundamental(sequenceElement, out elementKind))
             {
                 kind = AbiKind.ArrayView;
-                arrayElementKind = vectorKind;
-                arrayElementType = vectorElement;
+                arrayElementKind = elementKind;
+                arrayElementType = sequenceElement;
                 array = true;
                 return true;
             }
 
-            if (IsPointerType(vectorElement))
+            if (IsPointerType(sequenceElement))
             {
                 kind = AbiKind.ArrayView;
                 arrayElementKind = AbiKind.Opaque;
-                arrayElementType = vectorElement;
+                arrayElementType = sequenceElement;
                 array = true;
                 return true;
             }
 
-            reason = $"vector return type '{vectorElement}' is not supported";
+            if (TryParseSharedPtr(sequenceElement, out var sharedElement))
+            {
+                kind = AbiKind.ArrayView;
+                arrayElementKind = AbiKind.Shared;
+                arrayElementType = sharedElement;
+                arrayElementSharedWrapper = SharedWrapperKind.SharedPtr;
+                arrayElementNativeType = sharedElement;
+                array = true;
+                return true;
+            }
+
+            if (TryParseSharedWrapper(sequenceElement, out var sharedElementWrapper, out var wrappedElement))
+            {
+                kind = AbiKind.ArrayView;
+                arrayElementKind = AbiKind.Shared;
+                arrayElementType = wrappedElement;
+                arrayElementSharedWrapper = sharedElementWrapper;
+                arrayElementNativeType = wrappedElement;
+                array = true;
+                return true;
+            }
+
+            if (TryParseUniquePtr(sequenceElement, out var uniqueElement)
+                && TryResolveRecordWrapper(
+                    uniqueElement,
+                    declarationsByQualifiedName,
+                    declarationNames,
+                    destroyableDeclarationIds,
+                    true,
+                    out var uniqueWrapper))
+            {
+                kind = AbiKind.ArrayView;
+                arrayElementKind = AbiKind.Opaque;
+                arrayElementType = uniqueElement;
+                arrayElementOwnership = ArrayElementOwnership.UniquePtr;
+                arrayElementWrapperType = uniqueWrapper;
+                arrayElementNativeType = uniqueElement;
+                array = true;
+                return true;
+            }
+
+            if (TryParseOptional(sequenceElement, out var optionalElement)
+                && TryResolveRecordWrapper(
+                    optionalElement,
+                    declarationsByQualifiedName,
+                    declarationNames,
+                    destroyableDeclarationIds,
+                    false,
+                    out var optionalWrapper))
+            {
+                kind = AbiKind.ArrayView;
+                arrayElementKind = AbiKind.Opaque;
+                arrayElementType = optionalElement;
+                arrayElementOwnership = ArrayElementOwnership.OptionalRecordCopy;
+                arrayElementWrapperType = optionalWrapper;
+                arrayElementNativeType = optionalElement;
+                array = true;
+                return true;
+            }
+
+            if (TryResolveRecordWrapper(
+                    sequenceElement,
+                    declarationsByQualifiedName,
+                    declarationNames,
+                    destroyableDeclarationIds,
+                    false,
+                    out var recordWrapper))
+            {
+                kind = AbiKind.ArrayView;
+                arrayElementKind = AbiKind.Opaque;
+                arrayElementType = sequenceElement;
+                arrayElementOwnership = ArrayElementOwnership.RecordCopy;
+                arrayElementWrapperType = recordWrapper;
+                arrayElementNativeType = sequenceElement;
+                array = true;
+                return true;
+            }
+
+            reason = $"{(isSet ? "set" : "vector")} return type '{sequenceElement}' is not supported";
             return false;
         }
 
@@ -1805,7 +1950,17 @@ internal sealed class AbiPlan
             // wrapper releases it through the returned release callback.
             kind = AbiKind.Shared;
             nativeType = sharedPointee;
+            sharedWrapper = SharedWrapperKind.SharedPtr;
             nullable = true;
+            return true;
+        }
+
+        if (TryParseSharedWrapper(nativeType, out var sharedWrapperKind, out var wrappedPointee))
+        {
+            kind = AbiKind.Shared;
+            nativeType = wrappedPointee;
+            sharedWrapper = sharedWrapperKind;
+            nullable = sharedWrapperKind == SharedWrapperKind.Nullable;
             return true;
         }
 
@@ -2306,6 +2461,68 @@ internal sealed class AbiPlan
         return inner.Length > 0;
     }
 
+    private static bool TryParseUnorderedSet(string canonical, out string element)
+    {
+        element = "";
+        var text = NormalizeTypeName(canonical);
+        const string prefix = "std::unordered_set<";
+        if (!text.StartsWith(prefix, StringComparison.Ordinal)
+            || !text.EndsWith(">", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var arguments = SplitTemplateArguments(text[prefix.Length..^1].Trim()).ToList();
+        if (arguments.Count != 1)
+        {
+            return false;
+        }
+
+        element = StripTopLevelQualifiers(arguments[0].Trim());
+        return element.Length > 0;
+    }
+
+    private static bool TryParseSharedWrapper(
+        string canonical,
+        out SharedWrapperKind wrapper,
+        out string pointee)
+    {
+        wrapper = SharedWrapperKind.None;
+        pointee = "";
+        var text = NormalizeTypeName(canonical);
+        string prefix;
+        if (text.StartsWith("endstone::NotNull<", StringComparison.Ordinal))
+        {
+            prefix = "endstone::NotNull<";
+            wrapper = SharedWrapperKind.NotNull;
+        }
+        else if (text.StartsWith("endstone::Nullable<", StringComparison.Ordinal))
+        {
+            prefix = "endstone::Nullable<";
+            wrapper = SharedWrapperKind.Nullable;
+        }
+        else
+        {
+            return false;
+        }
+
+        if (!text.EndsWith(">", StringComparison.Ordinal))
+        {
+            wrapper = SharedWrapperKind.None;
+            return false;
+        }
+
+        var arguments = SplitTemplateArguments(text[prefix.Length..^1].Trim()).ToList();
+        if (arguments.Count != 1)
+        {
+            wrapper = SharedWrapperKind.None;
+            return false;
+        }
+
+        pointee = StripTopLevelQualifiers(arguments[0].Trim());
+        return pointee.Length > 0;
+    }
+
     private static bool TryParseSharedPtr(string canonical, out string pointee)
     {
         pointee = "";
@@ -2728,6 +2945,29 @@ internal sealed class AbiPlan
 
         reason = $"parameter type '{text}' is not supported";
         return false;
+    }
+
+    private static bool TryResolveRecordWrapper(
+        string nativeType,
+        IReadOnlyDictionary<string, DeclarationRecord> declarationsByQualifiedName,
+        IReadOnlyDictionary<string, DeclarationName> declarationNames,
+        IReadOnlySet<string> destroyableDeclarationIds,
+        bool allowAbstract,
+        out string wrapperType)
+    {
+        wrapperType = "";
+        if (!declarationsByQualifiedName.TryGetValue(nativeType, out var declaration)
+            || declaration.Access != "public"
+            || (!allowAbstract && declaration.Abstract)
+            || (!allowAbstract && !declaration.CopyConstructible)
+            || !destroyableDeclarationIds.Contains(declaration.Id)
+            || !declarationNames.TryGetValue(declaration.Id, out var declarationName))
+        {
+            return false;
+        }
+
+        wrapperType = "global::" + declarationName.NamespaceName + "." + declarationName.ClassName;
+        return true;
     }
 
     private static string? LookupWrapperType(
