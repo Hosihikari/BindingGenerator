@@ -10,7 +10,7 @@ if (args.Length == 0 || args[0] is "-h" or "--help" or "help")
 switch (args[0])
 {
     case "version":
-        Console.WriteLine($"Hosihikari.Bindings.Generator 0.1.0 (IR {IrSchema.Version})");
+        Console.WriteLine($"Hosihikari.Bindings.Generator 0.2.0 (IR {IrSchema.Version})");
         return 0;
 
     case "validate-ir":

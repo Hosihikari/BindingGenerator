@@ -56,7 +56,7 @@ internal static class InteropEmitter
                 var memberNames = BuildMemberNames(declarationMembers, plan);
                 foreach (var member in declarationMembers)
                 {
-                    if (member.Access == "private")
+                    if (member.Access != "public")
                     {
                         continue;
                     }
@@ -486,7 +486,9 @@ internal static class InteropEmitter
         var returnType = method.ReturnKind switch
         {
             AbiKind.Void => "void",
-            AbiKind.Opaque => "nint",
+            AbiKind.Opaque => method.ReturnOwned && method.ReturnWrapperType is not null
+                ? method.ReturnWrapperType
+                : "nint",
             _ => AbiPlan.CSharpType(method.ReturnKind),
         };
 
@@ -497,20 +499,20 @@ internal static class InteropEmitter
             lines.Add($"        var __hs_stringBytes = global::System.Text.Encoding.UTF8.GetBytes({stringName});");
             lines.Add("        fixed (byte* __hs_stringData = __hs_stringBytes)");
             lines.Add("        {");
-            EmitMethodBody(lines, method.ReturnKind, call, "            ");
+            EmitMethodBody(lines, method, call, "            ");
             lines.Add("        }");
         }
         else
         {
-            EmitMethodBody(lines, method.ReturnKind, call, "        ");
+            EmitMethodBody(lines, method, call, "        ");
         }
 
         lines.Add("    }");
     }
 
-    private static void EmitMethodBody(List<string> lines, AbiKind returnKind, string call, string indent)
+    private static void EmitMethodBody(List<string> lines, AbiFunction method, string call, string indent)
     {
-        switch (returnKind)
+        switch (method.ReturnKind)
         {
             case AbiKind.Void:
                 lines.Add(indent + call + ";");
@@ -520,7 +522,15 @@ internal static class InteropEmitter
                 lines.Add(indent + "return global::System.Text.Encoding.UTF8.GetString(__hs_view.Data, checked((int)__hs_view.Size));");
                 break;
             case AbiKind.Opaque:
-                lines.Add(indent + $"return (nint){call};");
+                if (method.ReturnOwned && method.ReturnWrapperType is not null)
+                {
+                    lines.Add(indent + $"return new {method.ReturnWrapperType}((nint){call});");
+                }
+                else
+                {
+                    lines.Add(indent + $"return (nint){call};");
+                }
+
                 break;
             default:
                 lines.Add(indent + $"return {call};");

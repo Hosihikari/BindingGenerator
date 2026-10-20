@@ -177,9 +177,9 @@ public:
                 } else if (isa<CXXDestructorDecl>(Method)) {
                     emitMember(Definition, DeclId, Method, "destructor", false);
                 } else if (Method->isOverloadedOperator() || isa<CXXConversionDecl>(Method)) {
-                    emitMember(Definition, DeclId, Method, "operator", false);
+                    emitMember(Definition, DeclId, Method, "operator", Method->isStatic());
                 } else {
-                    emitMember(Definition, DeclId, Method, "method", false);
+                    emitMember(Definition, DeclId, Method, "method", Method->isStatic());
                 }
             }
         }
@@ -360,6 +360,71 @@ private:
         default:
             return "public";
         }
+    }
+
+    bool isDeclAccessible(const Decl* D) const {
+        if (const auto* Tag = dyn_cast<TagDecl>(D)) {
+            AccessSpecifier Access = Tag->getAccess();
+            if (Access == AS_private || Access == AS_protected) {
+                return false;
+            }
+        }
+        for (const DeclContext* Context = D->getDeclContext(); Context; Context = Context->getParent()) {
+            if (const auto* Tag = dyn_cast<TagDecl>(Context)) {
+                AccessSpecifier Access = Tag->getAccess();
+                if (Access == AS_private || Access == AS_protected) {
+                    return false;
+                }
+            } else if (!isa<NamespaceDecl>(Context) && !isa<TranslationUnitDecl>(Context)) {
+                break;
+            }
+        }
+        return true;
+    }
+
+    bool isTypeAccessible(QualType Type) const {
+        Type = Type.getCanonicalType();
+        if (Type.isNull()) {
+            return true;
+        }
+
+        if (const auto* Tag = Type->getAsTagDecl()) {
+            if (!isDeclAccessible(Tag)) {
+                return false;
+            }
+            if (const auto* Spec = dyn_cast<ClassTemplateSpecializationDecl>(Tag)) {
+                for (const auto& Argument : Spec->getTemplateArgs().asArray()) {
+                    if (Argument.getKind() == TemplateArgument::Type
+                        && !isTypeAccessible(Argument.getAsType())) {
+                        return false;
+                    }
+                }
+            }
+            return true;
+        }
+
+        if (const auto* Spec = Type->getAs<TemplateSpecializationType>()) {
+            if (const auto* Record = Spec->getAsCXXRecordDecl()) {
+                if (!isDeclAccessible(Record)) {
+                    return false;
+                }
+            }
+            for (const auto& Argument : Spec->template_arguments()) {
+                if (Argument.getKind() == TemplateArgument::Type
+                    && !isTypeAccessible(Argument.getAsType())) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        if (const auto* Pointer = Type->getAs<PointerType>()) {
+            return isTypeAccessible(Pointer->getPointeeType());
+        }
+        if (const auto* Reference = Type->getAs<ReferenceType>()) {
+            return isTypeAccessible(Reference->getPointeeType());
+        }
+        return true;
     }
 
     std::string typeString(QualType Type) const {
@@ -550,6 +615,14 @@ private:
                 llvm::json::Object Item;
                 Item["kind"] = templateArgumentKind(Argument);
                 Item["value"] = templateArgumentString(Argument);
+                if (Argument.getKind() == TemplateArgument::Type) {
+                    if (!isTypeAccessible(Argument.getAsType())) {
+                        Item["accessible"] = false;
+                    }
+                    if (Argument.getAsType()->isIncompleteType()) {
+                        Item["complete"] = false;
+                    }
+                }
                 Arguments.emplace_back(std::move(Item));
             }
             Template["arguments"] = std::move(Arguments);
@@ -558,6 +631,28 @@ private:
 
         if (auto* Function = dyn_cast<FunctionDecl>(Decl)) {
             Object["signature"] = makeSignature(Function);
+        }
+
+        if (auto* Enum = dyn_cast<EnumDecl>(Decl)) {
+            Object["underlyingType"] = typeString(Enum->getIntegerType());
+        }
+
+        if (auto* Record = dyn_cast<CXXRecordDecl>(Decl)) {
+            if (Record->isCompleteDefinition()) {
+                bool CopyConstructible = Record->hasSimpleCopyConstructor();
+                if (!CopyConstructible) {
+                    for (auto* Constructor : Record->ctors()) {
+                        if (Constructor->isCopyConstructor()
+                            && !Constructor->isDeleted()
+                            && Constructor->getAccess() == AS_public) {
+                            CopyConstructible = true;
+                            break;
+                        }
+                    }
+                }
+                Object["abstract"] = Record->isAbstract();
+                Object["copyConstructible"] = CopyConstructible;
+            }
         }
 
         return Object;
@@ -616,6 +711,29 @@ private:
         Object["access"] = accessString(Member->getAccess());
         Object["static"] = Static;
 
+        if (auto* Function = dyn_cast<FunctionDecl>(Member);
+            Function && Function->getDescribedFunctionTemplate()) {
+            Object["memberTemplate"] = true;
+        }
+
+        if (auto* Method = dyn_cast<CXXMethodDecl>(Member)) {
+            switch (Method->getRefQualifier()) {
+            case RQ_LValue:
+                Object["refQualifier"] = "lvalue";
+                break;
+            case RQ_RValue:
+                Object["refQualifier"] = "rvalue";
+                break;
+            case RQ_None:
+                break;
+            }
+        }
+
+        if (auto* Variable = dyn_cast<VarDecl>(Member);
+            Variable && isa<VarTemplateSpecializationDecl>(Variable)) {
+            Object["variableTemplate"] = true;
+        }
+
         llvm::json::Array Attributes;
         for (auto* Attribute : Member->attrs()) {
             llvm::json::Object Item;
@@ -643,6 +761,7 @@ private:
             Object["pure"] = Method->isPureVirtual();
             Object["inline"] = Method->isInlined();
             Object["defined"] = Method->hasBody();
+            Object["consteval"] = Method->isConsteval();
             Object["signature"] = makeSignature(Method);
             if (Method->begin_overridden_methods() != Method->end_overridden_methods()) {
                 Object["overrideOf"] = (*Method->begin_overridden_methods())->getQualifiedNameAsString();
@@ -719,11 +838,11 @@ int main(int argc, char** argv) {
 
     llvm::json::Object Manifest;
     Manifest["schema"] = "hosihikari.bindings.ir/1";
-    Manifest["irVersion"] = "1.1.0";
+    Manifest["irVersion"] = "1.2.0";
 
     llvm::json::Object Frontend;
     Frontend["name"] = "libtooling";
-    Frontend["version"] = "0.1.0";
+    Frontend["version"] = "0.2.0";
     Frontend["llvm"] = "23.1.3";
     Manifest["frontend"] = std::move(Frontend);
 

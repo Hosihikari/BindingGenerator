@@ -452,9 +452,11 @@ internal static class ShimEmitter
                 }
                 else if (function.ReturnKind == AbiKind.Opaque)
                 {
-                    var address = AbiPlan.IsReferenceType(function.NativeReturnType)
-                        ? "&" + target
-                        : target;
+                    // A pointer field is returned as-is; references, arrays, and by-value
+                    // records are exposed through the address of the field.
+                    var address = AbiPlan.IsPointerType(function.NativeReturnType)
+                        ? target
+                        : "&" + target;
                     yield return $"    return const_cast<void*>(static_cast<void const*>({address}));";
                 }
                 else
@@ -493,10 +495,17 @@ internal static class ShimEmitter
                 }
                 else if (function.ReturnKind == AbiKind.Opaque)
                 {
-                    var address = function.NativeReturnType.TrimEnd().EndsWith("&", StringComparison.Ordinal)
-                        ? "&" + call
-                        : call;
-                    yield return $"    return const_cast<void*>(static_cast<void const*>({address}));";
+                    if (function.ReturnOwned)
+                    {
+                        yield return $"    return static_cast<void*>(new {function.NativeReturnType}({call}));";
+                    }
+                    else
+                    {
+                        var address = function.NativeReturnType.TrimEnd().EndsWith("&", StringComparison.Ordinal)
+                            ? "&" + call
+                            : call;
+                        yield return $"    return const_cast<void*>(static_cast<void const*>({address}));";
+                    }
                 }
                 else
                 {
@@ -564,7 +573,9 @@ internal static class ShimEmitter
                 var pointee = parameter.NativePointee ?? "void";
                 var constPrefix = parameter.IsConst ? "const " : "";
                 return parameter.IsReference
-                    ? $"*static_cast<{constPrefix}{pointee}*>({name})"
+                    ? (parameter.IsRValueReference
+                        ? $"std::move(*static_cast<{constPrefix}{pointee}*>({name}))"
+                        : $"*static_cast<{constPrefix}{pointee}*>({name})")
                     : $"static_cast<{constPrefix}{pointee}*>({name})";
             }
 

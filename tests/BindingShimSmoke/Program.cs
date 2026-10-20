@@ -51,7 +51,7 @@ if (version.to_string() != "1.2.3"
     throw new InvalidOperationException("Version round-trip returned unexpected values.");
 }
 
-if (!version.valid("1.2.3"))
+if (!LlVersion.valid("1.2.3"))
 {
     throw new InvalidOperationException("Version::valid rejected a valid version.");
 }
