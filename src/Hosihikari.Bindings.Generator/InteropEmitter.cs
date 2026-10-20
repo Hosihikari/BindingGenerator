@@ -121,6 +121,13 @@ internal static class InteropEmitter
                 "    }",
                 "",
                 "    [global::System.Runtime.InteropServices.StructLayout(global::System.Runtime.InteropServices.LayoutKind.Sequential)]",
+                "    internal struct ArrayView",
+                "    {",
+                "        public void* Data;",
+                "        public nuint Size;",
+                "    }",
+                "",
+                "    [global::System.Runtime.InteropServices.StructLayout(global::System.Runtime.InteropServices.LayoutKind.Sequential)]",
                 "    internal struct Table",
                 "    {",
                 "        public uint Version;",
@@ -555,6 +562,9 @@ internal static class InteropEmitter
             AbiKind.Opaque => method.ReturnOwned && method.ReturnWrapperType is not null
                 ? method.ReturnWrapperType + (method.ReturnNullable ? "?" : "")
                 : "nint",
+            AbiKind.ArrayView => method.ArrayElementKind == AbiKind.StringView
+                ? "string[]"
+                : AbiPlan.CSharpType(method.ArrayElementKind) + "[]",
             _ => AbiPlan.CSharpType(method.ReturnKind) + (method.ReturnOptional ? "?" : ""),
         };
 
@@ -598,6 +608,30 @@ internal static class InteropEmitter
                 else
                 {
                     lines.Add(indent + "return global::System.Text.Encoding.UTF8.GetString(__hs_view.Data, checked((int)__hs_view.Size));");
+                }
+
+                break;
+            case AbiKind.ArrayView:
+                lines.Add(indent + $"var __hs_view = {call};");
+                if (method.ArrayElementKind == AbiKind.StringView)
+                {
+                    lines.Add(indent + "var __hs_items = (NativeMethods.StringView*)__hs_view.Data;");
+                    lines.Add(indent + "var __hs_result = new string[checked((int)__hs_view.Size)];");
+                    lines.Add(indent + "for (var __hs_i = 0; __hs_i < __hs_result.Length; __hs_i++)");
+                    lines.Add(indent + "{");
+                    lines.Add(indent + "    __hs_result[__hs_i] = global::System.Text.Encoding.UTF8.GetString(__hs_items[__hs_i].Data, checked((int)__hs_items[__hs_i].Size));");
+                    lines.Add(indent + "}");
+                    lines.Add(indent + "return __hs_result;");
+                }
+                else
+                {
+                    var elementType = AbiPlan.CSharpType(method.ArrayElementKind);
+                    lines.Add(indent + $"var __hs_result = new {elementType}[checked((int)__hs_view.Size)];");
+                    lines.Add(indent + "if (__hs_view.Size > 0)");
+                    lines.Add(indent + "{");
+                    lines.Add(indent + $"    new global::System.ReadOnlySpan<{elementType}>(__hs_view.Data, checked((int)__hs_view.Size)).CopyTo(__hs_result);");
+                    lines.Add(indent + "}");
+                    lines.Add(indent + "return __hs_result;");
                 }
 
                 break;

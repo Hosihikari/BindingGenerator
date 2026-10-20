@@ -21,6 +21,7 @@ internal enum AbiKind
     Opaque,
     StringView,
     Callback,
+    ArrayView,
 }
 
 internal enum AbiFunctionKind
@@ -81,6 +82,9 @@ internal sealed class AbiFunction
     public bool ReturnOwned { get; init; }
     public bool ReturnUniquePtr { get; init; }
     public bool ReturnOptional { get; init; }
+    public bool ReturnArray { get; init; }
+    public AbiKind ArrayElementKind { get; init; }
+    public string? ArrayElementType { get; init; }
     public bool ReturnNullable { get; init; }
     public List<AbiParameter> Parameters { get; init; } = [];
     public bool Static { get; init; }
@@ -632,6 +636,7 @@ internal sealed class AbiPlan
         AbiKind.Opaque => "void*",
         AbiKind.StringView => "HosihikariStringView",
         AbiKind.Callback => "void*",
+        AbiKind.ArrayView => "HosihikariArrayView",
         _ => "void",
     };
 
@@ -654,6 +659,7 @@ internal sealed class AbiPlan
         AbiKind.Opaque => "nint",
         AbiKind.StringView => "string",
         AbiKind.Callback => "nint",
+        AbiKind.ArrayView => "nint",
         _ => "nint",
     };
 
@@ -661,6 +667,7 @@ internal sealed class AbiPlan
     {
         AbiKind.Opaque => "void*",
         AbiKind.StringView => "NativeMethods.StringView",
+        AbiKind.ArrayView => "NativeMethods.ArrayView",
         _ => CSharpType(kind),
     };
 
@@ -1348,6 +1355,9 @@ internal sealed class AbiPlan
                 out var returnOwned,
                 out var returnUniquePtr,
                 out var returnOptional,
+                out var returnArray,
+                out var arrayElementKind,
+                out var arrayElementType,
                 out var returnNullable,
                 out var returnReason))
         {
@@ -1403,6 +1413,9 @@ internal sealed class AbiPlan
             ReturnOwned = returnOwned,
             ReturnUniquePtr = returnUniquePtr,
             ReturnOptional = returnOptional,
+            ReturnArray = returnArray,
+            ArrayElementKind = arrayElementKind,
+            ArrayElementType = arrayElementType,
             ReturnNullable = returnNullable,
             Parameters = parameters,
             Static = method.Static,
@@ -1423,6 +1436,9 @@ internal sealed class AbiPlan
         out bool owned,
         out bool uniquePtr,
         out bool optional,
+        out bool array,
+        out AbiKind arrayElementKind,
+        out string? arrayElementType,
         out bool nullable,
         out string? reason)
     {
@@ -1432,6 +1448,9 @@ internal sealed class AbiPlan
         owned = false;
         uniquePtr = false;
         optional = false;
+        array = false;
+        arrayElementKind = AbiKind.Void;
+        arrayElementType = null;
         nullable = false;
         reason = null;
         if (nativeType.Length == 0)
@@ -1460,6 +1479,31 @@ internal sealed class AbiPlan
         {
             kind = AbiKind.Opaque;
             return true;
+        }
+
+        if (TryParseVector(nativeType, out var vectorElement))
+        {
+            if (IsStringViewType(vectorElement) || IsStringType(vectorElement))
+            {
+                kind = AbiKind.ArrayView;
+                arrayElementKind = AbiKind.StringView;
+                arrayElementType = vectorElement;
+                array = true;
+                return true;
+            }
+
+            if (TryMapEnumUnderlying(vectorElement, enumUnderlyingByName, out var vectorKind)
+                || TryMapFundamental(vectorElement, out vectorKind))
+            {
+                kind = AbiKind.ArrayView;
+                arrayElementKind = vectorKind;
+                arrayElementType = vectorElement;
+                array = true;
+                return true;
+            }
+
+            reason = $"vector return type '{vectorElement}' is not supported";
+            return false;
         }
 
         if (TryParseOptional(nativeType, out var optionalInner))
@@ -1589,6 +1633,27 @@ internal sealed class AbiPlan
         wrapperType = "global::" + resultName.NamespaceName + "." + resultName.ClassName;
         owned = true;
         return true;
+    }
+
+    private static bool TryParseVector(string canonical, out string element)
+    {
+        element = "";
+        var text = NormalizeTypeName(canonical);
+        const string prefix = "std::vector<";
+        if (!text.StartsWith(prefix, StringComparison.Ordinal)
+            || !text.EndsWith(">", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var arguments = SplitTemplateArguments(text[prefix.Length..^1].Trim()).ToList();
+        if (arguments.Count != 1)
+        {
+            return false;
+        }
+
+        element = StripTopLevelQualifiers(arguments[0].Trim());
+        return element.Length > 0;
     }
 
     private static bool TryParseOptional(string canonical, out string inner)

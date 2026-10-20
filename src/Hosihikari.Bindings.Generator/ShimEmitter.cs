@@ -134,6 +134,11 @@ internal static class ShimEmitter
             "    std::size_t size;",
             "};",
             "",
+            "struct HosihikariArrayView {",
+            "    const void* data;",
+            "    std::size_t size;",
+            "};",
+            "",
             "struct HosihikariBindingTableV1 {",
             "    std::uint32_t version;",
             "    std::uint32_t size;",
@@ -177,6 +182,7 @@ internal static class ShimEmitter
             "#include <optional>",
             "#include <string>",
             "#include <string_view>",
+            "#include <vector>",
         };
         if (llAllocator)
         {
@@ -636,6 +642,32 @@ internal static class ShimEmitter
 
                     yield return "    return HosihikariStringView{g_stringResult.data(), g_stringResult.size()};";
                 }
+                else if (function.ReturnKind == AbiKind.ArrayView)
+                {
+                    if (function.ArrayElementKind == AbiKind.StringView)
+                    {
+                        yield return "    thread_local std::vector<std::string> hs_arrayStrings;";
+                        yield return "    thread_local std::vector<HosihikariStringView> hs_arrayViews;";
+                        yield return $"    auto result = {call};";
+                        yield return "    hs_arrayStrings.clear();";
+                        yield return "    hs_arrayViews.clear();";
+                        yield return "    hs_arrayStrings.reserve(result.size());";
+                        yield return "    for (auto const& item : result) { hs_arrayStrings.emplace_back(item.data(), item.size()); }";
+                        yield return "    hs_arrayViews.reserve(hs_arrayStrings.size());";
+                        yield return "    for (auto const& item : hs_arrayStrings) { hs_arrayViews.push_back(HosihikariStringView{item.data(), item.size()}); }";
+                        yield return "    return HosihikariArrayView{hs_arrayViews.data(), hs_arrayViews.size()};";
+                    }
+                    else
+                    {
+                        var elementType = AbiPlan.CppType(function.ArrayElementKind);
+                        yield return $"    thread_local std::vector<{elementType}> hs_arrayResult;";
+                        yield return $"    auto result = {call};";
+                        yield return "    hs_arrayResult.clear();";
+                        yield return "    hs_arrayResult.reserve(result.size());";
+                        yield return $"    for (auto const& item : result) {{ hs_arrayResult.push_back(static_cast<{elementType}>(item)); }}";
+                        yield return "    return HosihikariArrayView{hs_arrayResult.data(), hs_arrayResult.size()};";
+                    }
+                }
                 else if (function.ReturnKind == AbiKind.Opaque)
                 {
                     if (function.ReturnOptional && function.ReturnOwned)
@@ -706,6 +738,7 @@ internal static class ShimEmitter
         AbiKind.Bool => "return false;",
         AbiKind.Opaque => "return nullptr;",
         AbiKind.StringView => "return HosihikariStringView{nullptr, 0};",
+        AbiKind.ArrayView => "return HosihikariArrayView{nullptr, 0};",
         AbiKind.F32 => "return 0.0f;",
         AbiKind.F64 => "return 0.0;",
         _ => "return 0;",
