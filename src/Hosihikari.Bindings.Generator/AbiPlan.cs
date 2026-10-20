@@ -89,12 +89,14 @@ internal sealed class AbiPlan
         IReadOnlyList<AbiFunction> functions,
         IReadOnlyDictionary<string, DeclarationName> declarationNames,
         bool linkCarrier,
-        bool llAllocator)
+        bool llAllocator,
+        IReadOnlyDictionary<string, string> skipReasons)
     {
         Functions = functions;
         DeclarationNames = declarationNames;
         LinkCarrier = linkCarrier;
         LlAllocator = llAllocator;
+        SkipReasons = skipReasons;
         CreateByMember = functions
             .Where(function => function.Kind == AbiFunctionKind.Create && function.MemberId is not null)
             .ToDictionary(function => function.MemberId!, StringComparer.Ordinal);
@@ -119,6 +121,10 @@ internal sealed class AbiPlan
     public IReadOnlyDictionary<string, DeclarationName> DeclarationNames { get; }
     public bool LinkCarrier { get; }
     public bool LlAllocator { get; }
+    public IReadOnlyDictionary<string, string> SkipReasons { get; }
+
+    public bool TryGetSkipReason(string memberId, out string reason) =>
+        SkipReasons.TryGetValue(memberId, out reason!);
     public IReadOnlyDictionary<string, AbiFunction> CreateByMember { get; }
     public IReadOnlyDictionary<string, AbiFunction> GetByMember { get; }
     public IReadOnlyDictionary<string, AbiFunction> SetByMember { get; }
@@ -126,7 +132,7 @@ internal sealed class AbiPlan
     public IReadOnlyDictionary<string, AbiFunction> DestroyByDeclaration { get; }
     public IReadOnlyDictionary<string, List<AbiFunction>> FunctionsByDeclaration { get; }
 
-    public static AbiPlan Empty { get; } = new([], new Dictionary<string, DeclarationName>(StringComparer.Ordinal), false, false);
+    public static AbiPlan Empty { get; } = new([], new Dictionary<string, DeclarationName>(StringComparer.Ordinal), false, false, new Dictionary<string, string>(StringComparer.Ordinal));
 
     public IEnumerable<AbiFunction> FunctionsForSurface(string surface) =>
         Functions.Where(function => string.Equals(function.Surface, surface, StringComparison.Ordinal));
@@ -170,19 +176,6 @@ internal sealed class AbiPlan
             .GroupBy(declaration => declaration.QualifiedName, StringComparer.Ordinal)
             .ToDictionary(group => group.Key, group => group.First().UnderlyingType!, StringComparer.Ordinal);
 
-        var declarations = allClassDeclarations
-            .Where(declaration => declaration.Access == "public")
-            .Where(declaration => linkCarrier || declaration.Template is null)
-            .Where(declaration => IsValidCppQualifiedName(declaration.QualifiedName))
-            .Where(declaration => declaration.Template is null
-                || (linkCarrier
-                    ? !HasInaccessibleTemplateArgument(declaration)
-                        && !HasUnsafeIncompleteTemplateArgument(declaration)
-                    : AreTemplateArgumentsUsable(declaration, allDeclarationsByQualifiedName)))
-            .Where(declaration => declaration.Source is not null)
-            .Where(declaration => IsNativeSourceAvailable(nativeRoot, declaration.Source!.File))
-            .ToList();
-
         var membersByDeclaration = records.OfType<MemberRecord>()
             .GroupBy(member => member.DeclarationId, StringComparer.Ordinal)
             .ToDictionary(
@@ -192,6 +185,51 @@ internal sealed class AbiPlan
                     .OrderBy(member => member.Id, StringComparer.Ordinal)
                     .ToList(),
                 StringComparer.Ordinal);
+
+        var skipReasons = new Dictionary<string, string>(StringComparer.Ordinal);
+        var declarations = new List<DeclarationRecord>();
+        foreach (var declaration in allClassDeclarations.Where(declaration => declaration.Access == "public"))
+        {
+            string? declarationReason = null;
+            if (!linkCarrier && declaration.Template is not null)
+            {
+                declarationReason = "template instances require --link-carrier";
+            }
+            else if (!IsValidCppQualifiedName(declaration.QualifiedName))
+            {
+                declarationReason = "the native name is not a valid C++ qualified name";
+            }
+            else if (declaration.Template is not null
+                && (linkCarrier
+                    ? HasInaccessibleTemplateArgument(declaration)
+                        || HasUnsafeIncompleteTemplateArgument(declaration)
+                    : !AreTemplateArgumentsUsable(declaration, allDeclarationsByQualifiedName)))
+            {
+                declarationReason = "the template arguments are inaccessible or incomplete";
+            }
+            else if (declaration.Source is null)
+            {
+                declarationReason = "the source location is unavailable";
+            }
+            else if (!IsNativeSourceAvailable(nativeRoot, declaration.Source.File))
+            {
+                declarationReason = "the source file is unavailable in the native root";
+            }
+
+            if (declarationReason is null)
+            {
+                declarations.Add(declaration);
+                continue;
+            }
+
+            if (membersByDeclaration.TryGetValue(declaration.Id, out var declarationMembers))
+            {
+                foreach (var member in declarationMembers.Where(member => member.Access == "public"))
+                {
+                    skipReasons[member.Id] = declarationReason;
+                }
+            }
+        }
 
         var allDeclarationsById = records.OfType<DeclarationRecord>()
             .GroupBy(declaration => declaration.Id, StringComparer.Ordinal)
@@ -351,19 +389,58 @@ internal sealed class AbiPlan
             var created = false;
 
             foreach (var constructor in declarationMembers.Where(member =>
-                         member.Kind == "constructor"
-                         && member.Access == "public"
-                         && (linkCarrier ? HasExportedSymbol(declaration, member) : member.Inline)
-                         && (!linkCarrier || declaration.Template is null || member.Defined || !member.Inline)
-                         && !member.Pure))
+                         member.Kind == "constructor" && member.Access == "public"))
             {
-                if (ownsBorrowedString || !destructorAccessible || isAbstract || hasAbstractTemplateArgument)
+                string? reason = null;
+                if (!(linkCarrier ? HasExportedSymbol(declaration, constructor) : constructor.Inline))
                 {
+                    reason = "the constructor is not exported by the carrier";
+                }
+                else if (linkCarrier
+                    && declaration.Template is not null
+                    && constructor.Inline
+                    && !constructor.Defined)
+                {
+                    reason = "the template constructor has no visible definition";
+                }
+                else if (constructor.Pure)
+                {
+                    reason = "the constructor is pure virtual";
+                }
+                else if (ownsBorrowedString)
+                {
+                    reason = "the class owns a borrowed string field";
+                }
+                else if (!destructorAccessible)
+                {
+                    reason = "the class has no accessible destructor";
+                }
+                else if (isAbstract)
+                {
+                    reason = "the class is abstract";
+                }
+                else if (hasAbstractTemplateArgument)
+                {
+                    reason = "the class has an abstract template argument";
+                }
+
+                if (reason is not null)
+                {
+                    skipReasons[constructor.Id] = reason;
                     continue;
                 }
 
-                if (!TryBuildCreate(declaration, constructor, publicDeclarationsByQualifiedName, declarationNames, enumUnderlyingByName, linkCarrier, out var create))
+                if (!TryBuildCreate(
+                        declaration,
+                        constructor,
+                        publicDeclarationsByQualifiedName,
+                        declarationNames,
+                        enumUnderlyingByName,
+                        linkCarrier,
+                        out var create,
+                        out reason))
                 {
+                    skipReasons[constructor.Id] = reason ?? "the constructor cannot be projected";
                     continue;
                 }
 
@@ -371,20 +448,50 @@ internal sealed class AbiPlan
                 created = true;
             }
 
-            if (hasPublicDestructor || created
-                || (linkCarrier && destroyableDeclarationIds.Contains(declaration.Id)))
+            var hasDestroy = hasPublicDestructor || created
+                || (linkCarrier && destroyableDeclarationIds.Contains(declaration.Id));
+            if (hasDestroy)
             {
                 functions.Add(BuildDestroy(declaration, declarationNames));
+            }
+            else
+            {
+                var destructor = declarationMembers.FirstOrDefault(member =>
+                    member.Kind == "destructor" && member.Access == "public");
+                if (destructor is not null)
+                {
+                    skipReasons[destructor.Id] = "the class has no accessible destructor";
+                }
             }
 
             foreach (var field in declarationMembers.Where(member =>
                          (member.Kind == "field" || (linkCarrier && member.Kind == "static_field"))
-                         && member.Access == "public"
-                         && !member.VariableTemplate
-                         && member.Type is not null))
+                         && member.Access == "public"))
             {
-                if (!TryBuildField(declaration, field, publicDeclarationsByQualifiedName, declarationNames, enumUnderlyingByName, linkCarrier, out var getter, out var setter))
+                if (field.VariableTemplate)
                 {
+                    skipReasons[field.Id] = "static variable templates are not projected";
+                    continue;
+                }
+
+                if (field.Type is null)
+                {
+                    skipReasons[field.Id] = "the field type is unavailable";
+                    continue;
+                }
+
+                if (!TryBuildField(
+                        declaration,
+                        field,
+                        publicDeclarationsByQualifiedName,
+                        declarationNames,
+                        enumUnderlyingByName,
+                        linkCarrier,
+                        out var getter,
+                        out var setter,
+                        out var fieldReason))
+                {
+                    skipReasons[field.Id] = fieldReason ?? "the field type is not supported";
                     continue;
                 }
 
@@ -395,21 +502,49 @@ internal sealed class AbiPlan
                 }
             }
 
-            if (!linkSafe)
-            {
-                continue;
-            }
-
             foreach (var method in declarationMembers.Where(member =>
-                         member.Kind is "method" or "operator"
-                         && member.Access == "public"
-                         && (linkCarrier ? HasExportedSymbol(declaration, member) : member.Inline)
-                         && !member.Pure
-                         && !member.MemberTemplate
-                         && member.RefQualifier != "rvalue"))
+                         member.Kind is "method" or "operator" && member.Access == "public"))
             {
-                if (!TryBuildMethod(declaration, method, publicDeclarationsByQualifiedName, declarationNames, destroyableDeclarationIds, enumUnderlyingByName, linkCarrier, out var function))
+                string? reason = null;
+                if (!linkSafe)
                 {
+                    reason = "the class is not link-safe in the current mode";
+                }
+                else if (!(linkCarrier ? HasExportedSymbol(declaration, method) : method.Inline))
+                {
+                    reason = "the member is not exported by the carrier";
+                }
+                else if (method.Pure)
+                {
+                    reason = "the member is pure virtual";
+                }
+                else if (method.MemberTemplate)
+                {
+                    reason = "member function templates are not projected";
+                }
+                else if (method.RefQualifier == "rvalue")
+                {
+                    reason = "rvalue-qualified members are not projected";
+                }
+
+                if (reason is not null)
+                {
+                    skipReasons[method.Id] = reason;
+                    continue;
+                }
+
+                if (!TryBuildMethod(
+                        declaration,
+                        method,
+                        publicDeclarationsByQualifiedName,
+                        declarationNames,
+                        destroyableDeclarationIds,
+                        enumUnderlyingByName,
+                        linkCarrier,
+                        out var function,
+                        out reason))
+                {
+                    skipReasons[method.Id] = reason ?? "the member cannot be projected";
                     continue;
                 }
 
@@ -435,7 +570,7 @@ internal sealed class AbiPlan
             indexBySurface[function.Surface] = index + 1;
         }
 
-        return new AbiPlan(ordered, declarationNames, linkCarrier, llAllocator);
+        return new AbiPlan(ordered, declarationNames, linkCarrier, llAllocator, skipReasons);
     }
 
     public static string CppType(AbiKind kind) => kind switch
@@ -1024,11 +1159,26 @@ internal sealed class AbiPlan
         IReadOnlyDictionary<string, DeclarationName> declarationNames,
         IReadOnlyDictionary<string, string> enumUnderlyingByName,
         bool linkCarrier,
-        out AbiFunction function)
+        out AbiFunction function,
+        out string? reason)
     {
         function = null!;
-        if (constructor.Signature is null || constructor.Signature.Variadic || constructor.Consteval)
+        reason = null;
+        if (constructor.Signature is null)
         {
+            reason = "the constructor signature is unavailable";
+            return false;
+        }
+
+        if (constructor.Signature.Variadic)
+        {
+            reason = "variadic constructors are not supported";
+            return false;
+        }
+
+        if (constructor.Consteval)
+        {
+            reason = "consteval constructors cannot be called at runtime";
             return false;
         }
 
@@ -1043,8 +1193,10 @@ internal sealed class AbiPlan
                     declarationNames,
                     enumUnderlyingByName,
                     linkCarrier,
-                    out var abiParameter))
+                    out var abiParameter,
+                    out var parameterReason))
             {
+                reason = parameterReason;
                 return false;
             }
 
@@ -1055,6 +1207,7 @@ internal sealed class AbiPlan
                 {
                     // The shim would have to bind a temporary string to a mutable reference,
                     // and v1 pins at most one string buffer per call.
+                    reason = "constructors accept at most one string parameter";
                     return false;
                 }
             }
@@ -1065,6 +1218,7 @@ internal sealed class AbiPlan
             {
                 // Copy-like constructors that take a mutable reference can instantiate
                 // unrelated templates (for example AnyFunction(AnyFunction&)).
+                reason = "constructors with mutable reference parameters are not projected";
                 return false;
             }
 
@@ -1112,14 +1266,32 @@ internal sealed class AbiPlan
         IReadOnlySet<string> destroyableDeclarationIds,
         IReadOnlyDictionary<string, string> enumUnderlyingByName,
         bool linkCarrier,
-        out AbiFunction function)
+        out AbiFunction function,
+        out string? reason)
     {
         function = null!;
-        if (method.Signature is null
-            || method.Signature.Variadic
-            || method.Consteval
-            || string.Equals(method.Name, "operator=", StringComparison.Ordinal))
+        reason = null;
+        if (method.Signature is null)
         {
+            reason = "the method signature is unavailable";
+            return false;
+        }
+
+        if (method.Signature.Variadic)
+        {
+            reason = "variadic methods are not supported";
+            return false;
+        }
+
+        if (method.Consteval)
+        {
+            reason = "consteval methods cannot be called at runtime";
+            return false;
+        }
+
+        if (string.Equals(method.Name, "operator=", StringComparison.Ordinal))
+        {
+            reason = "assignment operators are not projected";
             return false;
         }
 
@@ -1133,8 +1305,10 @@ internal sealed class AbiPlan
                 out var returnKind,
                 out var nativeReturnType,
                 out var returnWrapperType,
-                out var returnOwned))
+                out var returnOwned,
+                out var returnReason))
         {
+            reason = returnReason;
             return false;
         }
 
@@ -1149,8 +1323,10 @@ internal sealed class AbiPlan
                     declarationNames,
                     enumUnderlyingByName,
                     linkCarrier,
-                    out var abiParameter))
+                    out var abiParameter,
+                    out var parameterReason))
             {
+                reason = parameterReason;
                 return false;
             }
 
@@ -1159,6 +1335,7 @@ internal sealed class AbiPlan
                 stringParameters++;
                 if (stringParameters > 1 || IsNonConstLValueReference(parameter.Type))
                 {
+                    reason = "methods accept at most one string parameter";
                     return false;
                 }
             }
@@ -1197,14 +1374,17 @@ internal sealed class AbiPlan
         out AbiKind kind,
         out string nativeType,
         out string? wrapperType,
-        out bool owned)
+        out bool owned,
+        out string? reason)
     {
         kind = AbiKind.Void;
         nativeType = canonical.Trim();
         wrapperType = null;
         owned = false;
+        reason = null;
         if (nativeType.Length == 0)
         {
+            reason = "the return type is empty";
             return false;
         }
 
@@ -1230,19 +1410,42 @@ internal sealed class AbiPlan
             return true;
         }
 
-        if (!linkCarrier || !IsByValueRecordType(nativeType))
+        if (!IsByValueRecordType(nativeType))
         {
+            reason = $"return type '{canonical}' is not supported";
+            return false;
+        }
+
+        if (!linkCarrier)
+        {
+            reason = $"by-value return type '{canonical}' requires --link-carrier";
             return false;
         }
 
         // A by-value record result is copied into a shim-owned object. The copy can only be
         // released through the class emitted destroy function, so require an accessible one.
         var byValueName = StripTopLevelQualifiers(nativeType);
-        if (!declarationsByQualifiedName.TryGetValue(byValueName, out var resultDeclaration)
-            || resultDeclaration.Abstract
-            || !destroyableDeclarationIds.Contains(resultDeclaration.Id)
-            || !declarationNames.TryGetValue(resultDeclaration.Id, out var resultName))
+        if (!declarationsByQualifiedName.TryGetValue(byValueName, out var resultDeclaration))
         {
+            reason = $"by-value return type '{byValueName}' is not a known bindable declaration";
+            return false;
+        }
+
+        if (resultDeclaration.Abstract)
+        {
+            reason = $"by-value return type '{byValueName}' is abstract";
+            return false;
+        }
+
+        if (!destroyableDeclarationIds.Contains(resultDeclaration.Id))
+        {
+            reason = $"by-value return type '{byValueName}' has no accessible destructor";
+            return false;
+        }
+
+        if (!declarationNames.TryGetValue(resultDeclaration.Id, out var resultName))
+        {
+            reason = $"by-value return type '{byValueName}' has no generated wrapper";
             return false;
         }
 
@@ -1261,10 +1464,12 @@ internal sealed class AbiPlan
         IReadOnlyDictionary<string, string> enumUnderlyingByName,
         bool linkCarrier,
         out AbiFunction getter,
-        out AbiFunction? setter)
+        out AbiFunction? setter,
+        out string? reason)
     {
         getter = null!;
         setter = null;
+        reason = null;
         var type = field.Type!;
         var text = type.Canonical.Trim();
         var kind = AbiKind.Void;
@@ -1279,6 +1484,7 @@ internal sealed class AbiPlan
             {
                 if (!IsByValueRecordType(text) && !IsArrayType(text))
                 {
+                    reason = $"field type '{text}' is not supported";
                     return false;
                 }
 
@@ -1313,7 +1519,15 @@ internal sealed class AbiPlan
             return true;
         }
 
-        if (!TryMapParameter(name, text, declarationsByQualifiedName, declarationNames, enumUnderlyingByName, linkCarrier, out var valueParameter))
+        if (!TryMapParameter(
+                name,
+                text,
+                declarationsByQualifiedName,
+                declarationNames,
+                enumUnderlyingByName,
+                linkCarrier,
+                out var valueParameter,
+                out _))
         {
             return true;
         }
@@ -1360,11 +1574,14 @@ internal sealed class AbiPlan
         IReadOnlyDictionary<string, DeclarationName> declarationNames,
         IReadOnlyDictionary<string, string> enumUnderlyingByName,
         bool linkCarrier,
-        out AbiParameter parameter)
+        out AbiParameter parameter,
+        out string? reason)
     {
         parameter = null!;
+        reason = null;
         if (string.IsNullOrWhiteSpace(canonical))
         {
+            reason = "the parameter type is empty";
             return false;
         }
 
@@ -1380,7 +1597,7 @@ internal sealed class AbiPlan
             return true;
         }
 
-        if (TryParseStdFunction(text, enumUnderlyingByName, out var callback))
+        if (TryParseStdFunction(text, enumUnderlyingByName, out var callback, out var callbackReason))
         {
             parameter = new AbiParameter
             {
@@ -1390,6 +1607,13 @@ internal sealed class AbiPlan
                 Callback = callback,
             };
             return true;
+        }
+
+        if (callbackReason is not null
+            && NormalizeTypeName(text).StartsWith("std::function<", StringComparison.Ordinal))
+        {
+            reason = callbackReason;
+            return false;
         }
 
         if (TryMapEnumUnderlying(text, enumUnderlyingByName, out var kind)
@@ -1423,26 +1647,44 @@ internal sealed class AbiPlan
         if (linkCarrier && IsByValueRecordType(text))
         {
             var byValueName = StripTopLevelQualifiers(text);
-            if (declarationsByQualifiedName.TryGetValue(byValueName, out var byValueDeclaration)
-                && !byValueDeclaration.Abstract
-                && byValueDeclaration.CopyConstructible)
+            if (!declarationsByQualifiedName.TryGetValue(byValueName, out var byValueDeclaration))
             {
-                parameter = new AbiParameter
-                {
-                    Name = name,
-                    Kind = AbiKind.Opaque,
-                    NativeType = text,
-                    NativePointee = byValueName,
-                    IsReference = true,
-                    IsConst = true,
-                    WrapperType = LookupWrapperType(text, declarationsByQualifiedName, declarationNames),
-                };
-                return true;
+                reason = $"by-value record parameter '{byValueName}' is not a known bindable declaration";
+                return false;
             }
 
+            if (byValueDeclaration.Abstract)
+            {
+                reason = $"by-value record parameter '{byValueName}' is abstract";
+                return false;
+            }
+
+            if (!byValueDeclaration.CopyConstructible)
+            {
+                reason = $"by-value record parameter '{byValueName}' is not copy-constructible";
+                return false;
+            }
+
+            parameter = new AbiParameter
+            {
+                Name = name,
+                Kind = AbiKind.Opaque,
+                NativeType = text,
+                NativePointee = byValueName,
+                IsReference = true,
+                IsConst = true,
+                WrapperType = LookupWrapperType(text, declarationsByQualifiedName, declarationNames),
+            };
+            return true;
+        }
+
+        if (!linkCarrier && IsByValueRecordType(text))
+        {
+            reason = $"by-value record parameter '{text}' requires --link-carrier";
             return false;
         }
 
+        reason = $"parameter type '{text}' is not supported";
         return false;
     }
 
@@ -1495,12 +1737,15 @@ internal sealed class AbiPlan
     private static bool TryParseStdFunction(
         string canonical,
         IReadOnlyDictionary<string, string> enumUnderlyingByName,
-        out AbiCallback callback)
+        out AbiCallback callback,
+        out string? reason)
     {
         callback = null!;
+        reason = null;
         var text = canonical.Trim();
         if (IsPointerType(text) || IsArrayType(text))
         {
+            reason = $"callback type '{canonical}' is not supported";
             return false;
         }
 
@@ -1509,6 +1754,7 @@ internal sealed class AbiPlan
         if (!core.StartsWith(prefix, StringComparison.Ordinal)
             || !core.EndsWith(">", StringComparison.Ordinal))
         {
+            reason = $"callback type '{canonical}' is not supported";
             return false;
         }
 
@@ -1534,6 +1780,7 @@ internal sealed class AbiPlan
 
         if (paren < 0)
         {
+            reason = $"callback type '{canonical}' is not supported";
             return false;
         }
 
@@ -1547,12 +1794,14 @@ internal sealed class AbiPlan
             && !TryMapFundamental(returnType, out returnKind))
         {
             // String, pointer, reference, and record results need a richer callback ABI.
+            reason = $"callback return type '{returnType}' is not supported";
             return false;
         }
 
         var close = inner.IndexOf(')', paren + 1);
         if (close < 0)
         {
+            reason = $"callback type '{canonical}' is not supported";
             return false;
         }
 
@@ -1562,8 +1811,13 @@ internal sealed class AbiPlan
         {
             foreach (var argumentText in SplitTemplateArguments(argumentsText))
             {
-                if (!TryMapCallbackArgument(argumentText.Trim(), enumUnderlyingByName, out var argument))
+                if (!TryMapCallbackArgument(
+                        argumentText.Trim(),
+                        enumUnderlyingByName,
+                        out var argument,
+                        out var argumentReason))
                 {
+                    reason = argumentReason;
                     return false;
                 }
 
@@ -1584,12 +1838,15 @@ internal sealed class AbiPlan
     private static bool TryMapCallbackArgument(
         string canonical,
         IReadOnlyDictionary<string, string> enumUnderlyingByName,
-        out AbiCallbackArgument argument)
+        out AbiCallbackArgument argument,
+        out string? reason)
     {
         argument = null!;
+        reason = null;
         var text = canonical.Trim();
         if (text.Length == 0)
         {
+            reason = "the callback parameter type is empty";
             return false;
         }
 
@@ -1633,6 +1890,7 @@ internal sealed class AbiPlan
         if (!IsByValueRecordType(text)
             || NormalizeTypeName(text).StartsWith("std::function<", StringComparison.Ordinal))
         {
+            reason = $"callback parameter type '{text}' is not supported";
             return false;
         }
 

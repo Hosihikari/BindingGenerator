@@ -5,7 +5,12 @@ namespace Hosihikari.Bindings.Generator;
 
 internal static class InteropEmitter
 {
-    private const string StubReason = "BindingShim does not expose this member.";
+    private const string DefaultStubReason = "BindingShim does not expose this member.";
+
+    private static string StubMessage(AbiPlan plan, MemberRecord member) =>
+        plan.TryGetSkipReason(member.Id, out var reason)
+            ? $"BindingShim cannot project this member: {reason}."
+            : DefaultStubReason;
 
     public static void Emit(IReadOnlyList<IrRecord> records, string outputDirectory, AbiPlan plan)
     {
@@ -328,11 +333,12 @@ internal static class InteropEmitter
         AbiPlan plan,
         bool hasDestroy)
     {
+        var stubMessage = StubMessage(plan, member);
         switch (member.Kind)
         {
             case "field":
             case "static_field":
-                EmitField(lines, member, name, plan);
+                EmitField(lines, member, name, plan, stubMessage);
                 break;
 
             case "constructor":
@@ -343,7 +349,7 @@ internal static class InteropEmitter
                 else
                 {
                     lines.Add($"    public static {className} {name}({CSharpParameters(member)}) =>");
-                    lines.Add($"        throw new global::System.NotSupportedException(\"{StubReason}\");");
+                    lines.Add($"        throw new global::System.NotSupportedException(\"{stubMessage}\");");
                 }
 
                 break;
@@ -352,7 +358,7 @@ internal static class InteropEmitter
                 if (!hasDestroy)
                 {
                     lines.Add($"    public void {name}() =>");
-                    lines.Add($"        throw new global::System.NotSupportedException(\"{StubReason}\");");
+                    lines.Add($"        throw new global::System.NotSupportedException(\"{stubMessage}\");");
                 }
 
                 break;
@@ -365,13 +371,13 @@ internal static class InteropEmitter
                 }
                 else
                 {
-                    EmitMethodStub(lines, member, name);
+                    EmitMethodStub(lines, member, name, stubMessage);
                 }
 
                 break;
 
             case "function":
-                EmitMethodStub(lines, member, name);
+                EmitMethodStub(lines, member, name, stubMessage);
                 break;
 
             default:
@@ -380,7 +386,12 @@ internal static class InteropEmitter
         }
     }
 
-    private static void EmitField(List<string> lines, MemberRecord member, string name, AbiPlan plan)
+    private static void EmitField(
+        List<string> lines,
+        MemberRecord member,
+        string name,
+        AbiPlan plan,
+        string stubMessage)
     {
         var hasGetter = plan.GetByMember.TryGetValue(member.Id, out var getter);
         var hasSetter = plan.SetByMember.TryGetValue(member.Id, out var setter);
@@ -390,8 +401,8 @@ internal static class InteropEmitter
             var type = TypeNames.ToCSharpType(member.Type);
             lines.Add($"    public {modifier}{type} {name}");
             lines.Add("    {");
-            lines.Add($"        get => throw new global::System.NotSupportedException(\"{StubReason}\");");
-            lines.Add($"        set => throw new global::System.NotSupportedException(\"{StubReason}\");");
+            lines.Add($"        get => throw new global::System.NotSupportedException(\"{stubMessage}\");");
+            lines.Add($"        set => throw new global::System.NotSupportedException(\"{stubMessage}\");");
             lines.Add("    }");
             return;
         }
@@ -549,13 +560,17 @@ internal static class InteropEmitter
         }
     }
 
-    private static void EmitMethodStub(List<string> lines, MemberRecord member, string name)
+    private static void EmitMethodStub(
+        List<string> lines,
+        MemberRecord member,
+        string name,
+        string stubMessage)
     {
         var returnCanonical = member.Signature?.ReturnType ?? member.Type?.Canonical ?? "void";
         var returnType = TypeNames.ToCSharpType(new TypeRef { Kind = "fundamental", Canonical = returnCanonical });
         var modifier = member.Static ? "static " : "";
         lines.Add($"    public {modifier}{returnType} {name}({CSharpParameters(member)}) =>");
-        lines.Add($"        throw new global::System.NotSupportedException(\"{StubReason}\");");
+        lines.Add($"        throw new global::System.NotSupportedException(\"{stubMessage}\");");
     }
 
     private static string ParameterDeclarations(IReadOnlyList<AbiParameter> parameters)
