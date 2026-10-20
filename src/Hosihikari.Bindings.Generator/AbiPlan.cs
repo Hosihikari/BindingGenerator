@@ -1563,7 +1563,12 @@ internal sealed class AbiPlan
 
             if (abiParameter.Kind == AbiKind.Opaque
                 && abiParameter.IsReference
-                && !abiParameter.IsConst)
+                && !abiParameter.IsConst
+                && !CanPassMutableReference(
+                    declaration,
+                    abiParameter,
+                    declarationsByQualifiedName,
+                    declarationNames))
             {
                 // Copy-like constructors that take a mutable reference can instantiate
                 // unrelated templates (for example AnyFunction(AnyFunction&)).
@@ -1590,6 +1595,29 @@ internal sealed class AbiPlan
             Parameters = parameters,
         };
         return true;
+    }
+
+    private static bool CanPassMutableReference(
+        DeclarationRecord declaration,
+        AbiParameter parameter,
+        IReadOnlyDictionary<string, DeclarationRecord> declarationsByQualifiedName,
+        IReadOnlyDictionary<string, DeclarationName> declarationNames)
+    {
+        if (declaration.Template is not null)
+        {
+            // A template constructor can bind a mutable reference to an unrelated implicit
+            // specialization; keep those out of the projection.
+            return false;
+        }
+
+        if (parameter.NativePointee is not { Length: > 0 } pointee
+            || !declarationsByQualifiedName.TryGetValue(pointee, out var pointeeDeclaration))
+        {
+            return false;
+        }
+
+        return pointeeDeclaration.Access == "public"
+            && declarationNames.ContainsKey(pointeeDeclaration.Id);
     }
 
     private static AbiFunction BuildDestroy(
