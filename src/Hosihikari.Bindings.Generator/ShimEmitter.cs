@@ -551,9 +551,11 @@ internal static class ShimEmitter
 
         foreach (var parameter in function.Parameters.Where(parameter => parameter.IsVector))
         {
-            parameters.Add("const " + (parameter.VectorElementKind == AbiKind.StringView
-                ? "HosihikariStringView"
-                : AbiPlan.CppType(parameter.VectorElementKind)) + "*");
+            parameters.Add("const " + (parameter.VectorElementOwnership == ArrayElementOwnership.PairCopy
+                ? "HosihikariMapEntry"
+                : parameter.VectorElementKind == AbiKind.StringView
+                    ? "HosihikariStringView"
+                    : AbiPlan.CppType(parameter.VectorElementKind)) + "*");
             parameters.Add("std::size_t");
         }
 
@@ -638,9 +640,11 @@ internal static class ShimEmitter
             if (parameter.IsVector)
             {
                 var name = CppParameterName(parameter, index);
-                var elementType = parameter.VectorElementKind == AbiKind.StringView
-                    ? "HosihikariStringView"
-                    : AbiPlan.CppType(parameter.VectorElementKind);
+                var elementType = parameter.VectorElementOwnership == ArrayElementOwnership.PairCopy
+                    ? "HosihikariMapEntry"
+                    : parameter.VectorElementKind == AbiKind.StringView
+                        ? "HosihikariStringView"
+                        : AbiPlan.CppType(parameter.VectorElementKind);
                 parameters.Add($"const {elementType}* {name}_data");
                 parameters.Add($"std::size_t {name}_count");
             }
@@ -681,6 +685,20 @@ internal static class ShimEmitter
             }
 
             foreach (var line in EmitMapParameterConstruction(parameter, index))
+            {
+                yield return "    " + line;
+            }
+        }
+
+        for (var index = 0; index < function.Parameters.Count; index++)
+        {
+            var parameter = function.Parameters[index];
+            if (!parameter.IsVector || parameter.VectorElementOwnership != ArrayElementOwnership.PairCopy)
+            {
+                continue;
+            }
+
+            foreach (var line in EmitPairVectorConstruction(parameter, index))
             {
                 yield return "    " + line;
             }
@@ -1167,6 +1185,21 @@ internal static class ShimEmitter
         yield return "}";
     }
 
+    private static IEnumerable<string> EmitPairVectorConstruction(AbiParameter parameter, int index)
+    {
+        var name = CppParameterName(parameter, index);
+        var pairType = $"std::pair<{parameter.VectorPairKeyType}, {parameter.VectorPairValueType}>";
+        yield return $"std::vector<{pairType}> hs_vec{index};";
+        yield return $"hs_vec{index}.reserve({name}_count);";
+        yield return $"for (std::size_t hs_vec{index}Index = 0; hs_vec{index}Index < {name}_count; ++hs_vec{index}Index)";
+        yield return "{";
+        yield return $"    auto const& hs_entry = {name}_data[hs_vec{index}Index];";
+        yield return $"    hs_vec{index}.emplace_back(";
+        yield return $"        {MapEntryDecodeExpression(parameter.VectorPairKeyKind, ArrayElementOwnership.None, parameter.VectorPairKeyType, "key", "keySize")},";
+        yield return $"        {MapEntryDecodeExpression(parameter.VectorPairValueKind, ArrayElementOwnership.None, parameter.VectorPairValueType, "value", "valueSize")});";
+        yield return "}";
+    }
+
     private static string MapEntryDecodeExpression(
         AbiKind kind,
         ArrayElementOwnership ownership,
@@ -1306,6 +1339,11 @@ internal static class ShimEmitter
 
         if (parameter.IsVector)
         {
+            if (parameter.VectorElementOwnership == ArrayElementOwnership.PairCopy)
+            {
+                return $"std::move(hs_vec{index})";
+            }
+
             if (parameter.VectorElementKind == AbiKind.StringView)
             {
                 var helper = AbiPlan.IsStringViewType(parameter.VectorElementType ?? "")

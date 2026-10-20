@@ -55,6 +55,10 @@ internal sealed class AbiParameter
     public string? VectorElementWrapperType { get; init; }
     public ArrayElementOwnership VectorElementOwnership { get; init; }
     public string? VectorElementNativeType { get; init; }
+    public AbiKind VectorPairKeyKind { get; init; }
+    public AbiKind VectorPairValueKind { get; init; }
+    public string? VectorPairKeyType { get; init; }
+    public string? VectorPairValueType { get; init; }
     public bool IsMap { get; init; }
     public AbiKind MapKeyKind { get; init; }
     public AbiKind MapValueKind { get; init; }
@@ -161,6 +165,7 @@ internal enum ArrayElementOwnership
     RecordCopy,
     OptionalRecordCopy,
     VariantCopy,
+    PairCopy,
 }
 
 internal sealed class AbiFunction
@@ -1987,14 +1992,8 @@ internal sealed class AbiPlan
             return true;
         }
 
-        if (IsPointerOrReferenceType(nativeType))
-        {
-            kind = AbiKind.Opaque;
-            return true;
-        }
-
         var callableType = NormalizeTypeName(nativeType);
-        if (callables.TryGet(surface, callableType, out var callableInfo))
+        if (!IsPointerType(nativeType) && callables.TryGet(surface, callableType, out var callableInfo))
         {
             kind = AbiKind.Opaque;
             nativeType = callableInfo.NativeType;
@@ -2004,7 +2003,7 @@ internal sealed class AbiPlan
             return true;
         }
 
-        if (TryParseTimePoint(nativeType, out var timeClock, out var isSystemClock))
+        if (!IsPointerType(nativeType) && TryParseTimePoint(nativeType, out var timeClock, out var isSystemClock))
         {
             kind = AbiKind.I64;
             timeConversion = isSystemClock ? TimeConversion.SystemTimePoint : TimeConversion.ClockTimePoint;
@@ -2012,7 +2011,7 @@ internal sealed class AbiPlan
             return true;
         }
 
-        if (TryParseDuration(nativeType, out var timeDuration))
+        if (!IsPointerType(nativeType) && TryParseDuration(nativeType, out var timeDuration))
         {
             kind = AbiKind.I64;
             timeConversion = TimeConversion.Duration;
@@ -2020,7 +2019,7 @@ internal sealed class AbiPlan
             return true;
         }
 
-        if (TryParseTypeId(nativeType, out var typeIdCategory))
+        if (!IsPointerType(nativeType) && TryParseTypeId(nativeType, out var typeIdCategory))
         {
             kind = AbiKind.U16;
             specialValue = SpecialValueKind.TypeId;
@@ -2028,14 +2027,14 @@ internal sealed class AbiPlan
             return true;
         }
 
-        if (IsStrongOrdering(nativeType))
+        if (!IsPointerType(nativeType) && IsStrongOrdering(nativeType))
         {
             kind = AbiKind.I8;
             specialValue = SpecialValueKind.StrongOrdering;
             return true;
         }
 
-        if (IsFilesystemPath(nativeType))
+        if (!IsPointerType(nativeType) && IsFilesystemPath(nativeType))
         {
             kind = AbiKind.StringView;
             specialValue = SpecialValueKind.Path;
@@ -2043,13 +2042,19 @@ internal sealed class AbiPlan
         }
 
         var variantType = NormalizeTypeName(nativeType);
-        if (variants.TryGet(surface, variantType, out var variantInfo))
+        if (!IsPointerType(nativeType) && variants.TryGet(surface, variantType, out var variantInfo))
         {
             kind = AbiKind.Opaque;
             nativeType = variantType;
             wrapperType = variantInfo.WrapperType;
             owned = true;
             returnVariant = variantInfo;
+            return true;
+        }
+
+        if (IsPointerOrReferenceType(nativeType))
+        {
+            kind = AbiKind.Opaque;
             return true;
         }
 
@@ -3085,6 +3090,72 @@ internal sealed class AbiPlan
     private static bool IsFilesystemPath(string canonical) =>
         string.Equals(NormalizeTypeName(canonical), "std::filesystem::path", StringComparison.Ordinal);
 
+    private static string CSharpMapValueTypeKind(AbiKind kind) =>
+        kind == AbiKind.StringView ? "string" : CSharpMapKeyType(kind);
+
+    private static bool TryMapPairElementKinds(
+        string first,
+        string second,
+        IReadOnlyDictionary<string, string> enumUnderlyingByName,
+        out AbiKind keyKind,
+        out AbiKind valueKind)
+    {
+        keyKind = AbiKind.Void;
+        valueKind = AbiKind.Void;
+        return TryMapMapScalarKind(first, enumUnderlyingByName, out keyKind)
+            && TryMapMapScalarKind(second, enumUnderlyingByName, out valueKind);
+    }
+
+    private static bool TryMapMapScalarKind(
+        string type,
+        IReadOnlyDictionary<string, string> enumUnderlyingByName,
+        out AbiKind kind)
+    {
+        if (IsStringViewType(type) || IsStringType(type))
+        {
+            kind = AbiKind.StringView;
+            return true;
+        }
+
+        if (TryMapEnumUnderlying(type, enumUnderlyingByName, out kind)
+            || TryMapFundamental(type, out kind))
+        {
+            return true;
+        }
+
+        if (IsPointerType(type))
+        {
+            kind = AbiKind.Opaque;
+            return true;
+        }
+
+        kind = AbiKind.Void;
+        return false;
+    }
+
+    private static bool TryParsePair(string canonical, out string first, out string second)
+    {
+        first = "";
+        second = "";
+        var text = NormalizeTypeName(canonical);
+        const string prefix = "std::pair<";
+        if (!text.StartsWith(prefix, StringComparison.Ordinal)
+            || !text.EndsWith(">", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var arguments = SplitTemplateArguments(text[prefix.Length..^1].Trim()).ToList();
+        if (arguments.Count != 2)
+        {
+            return false;
+        }
+
+        first = StripTopLevelQualifiers(arguments[0].Trim());
+        second = StripTopLevelQualifiers(arguments[1].Trim());
+        return first.Length > 0 && second.Length > 0;
+    }
+
     private static bool TryMapMapEntryKinds(
         string surface,
         string mapKey,
@@ -3587,6 +3658,27 @@ internal sealed class AbiPlan
                     VectorElementWrapperType = vectorRecordWrapper,
                     VectorElementOwnership = ArrayElementOwnership.RecordCopy,
                     VectorElementNativeType = vectorElement,
+                };
+                return true;
+            }
+
+            if (TryParsePair(vectorElement, out var pairFirst, out var pairSecond)
+                && TryMapPairElementKinds(pairFirst, pairSecond, enumUnderlyingByName, out var pairKeyKind, out var pairValueKind))
+            {
+                parameter = new AbiParameter
+                {
+                    Name = name,
+                    Kind = AbiKind.Vector,
+                    NativeType = text,
+                    IsVector = true,
+                    VectorElementKind = AbiKind.Opaque,
+                    VectorElementType = vectorElement,
+                    VectorElementWrapperType = $"global::System.Collections.Generic.KeyValuePair<{CSharpMapKeyType(pairKeyKind)}, {CSharpMapValueTypeKind(pairValueKind)}>",
+                    VectorElementOwnership = ArrayElementOwnership.PairCopy,
+                    VectorPairKeyKind = pairKeyKind,
+                    VectorPairValueKind = pairValueKind,
+                    VectorPairKeyType = pairFirst,
+                    VectorPairValueType = pairSecond,
                 };
                 return true;
             }
