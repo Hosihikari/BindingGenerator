@@ -163,6 +163,7 @@ internal static class ShimEmitter
             $"// ir-manifest-sha256: {manifestHash}",
             "#include \"binding_table.h\"",
             "",
+            "#include <chrono>",
             "#include <cstddef>",
             "#include <cstdint>",
             "#include <exception>",
@@ -830,6 +831,19 @@ internal static class ShimEmitter
                         : call;
                     yield return $"    return hs_make_shared_handle({sharedExpression});";
                 }
+                else if (function.TimeConversion != TimeConversion.None)
+                {
+                    if (function.ReturnOptional)
+                    {
+                        yield return $"    auto result = {call};";
+                        yield return "    *hs_hasValue = result.has_value();";
+                        yield return $"    return result ? {TimeReturnExpression(function, "*result")} : std::int64_t{{0}};";
+                    }
+                    else
+                    {
+                        yield return $"    return {TimeReturnExpression(function, call)};";
+                    }
+                }
                 else if (function.ReturnKind == AbiKind.Opaque)
                 {
                     if (function.ReturnOptional && function.ReturnOwned)
@@ -955,6 +969,30 @@ internal static class ShimEmitter
         }
     }
 
+    private static string TimeParameterExpression(AbiParameter parameter, string name) =>
+        parameter.TimeConversion switch
+        {
+            TimeConversion.SystemTimePoint =>
+                $"std::chrono::system_clock::time_point(std::chrono::milliseconds({name}))",
+            TimeConversion.ClockTimePoint =>
+                $"std::chrono::time_point<{parameter.TimeClockType}>({parameter.TimeClockType}::duration({name}))",
+            TimeConversion.Duration =>
+                $"{parameter.TimeDurationType}({name})",
+            _ => name,
+        };
+
+    private static string TimeReturnExpression(AbiFunction function, string expression) =>
+        function.TimeConversion switch
+        {
+            TimeConversion.SystemTimePoint =>
+                $"static_cast<std::int64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(({expression}).time_since_epoch()).count())",
+            TimeConversion.ClockTimePoint =>
+                $"static_cast<std::int64_t>(({expression}).time_since_epoch().count())",
+            TimeConversion.Duration =>
+                $"static_cast<std::int64_t>(({expression}).count())",
+            _ => expression,
+        };
+
     private static string ExpectedErrorText(AbiFunction function) =>
         AbiPlan.IsStringType(function.ExpectedErrorType ?? "")
             ? "hs_expected.error().c_str()"
@@ -1014,6 +1052,17 @@ internal static class ShimEmitter
         {
             var inner = parameter.OptionalRefInnerType ?? parameter.NativeType;
             return $"({name}_hasValue ? optional_ref<{inner}>{{static_cast<{inner}*>({name})}} : optional_ref<{inner}>{{}})";
+        }
+
+        if (parameter.IsOptional && parameter.TimeConversion != TimeConversion.None)
+        {
+            var inner = parameter.OptionalInnerType ?? parameter.NativeType;
+            return $"({name}_hasValue ? std::optional<{inner}>{{{TimeParameterExpression(parameter, name)}}} : std::nullopt)";
+        }
+
+        if (parameter.TimeConversion != TimeConversion.None)
+        {
+            return TimeParameterExpression(parameter, name);
         }
 
         if (parameter.IsOptional)

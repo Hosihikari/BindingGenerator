@@ -54,6 +54,9 @@ internal sealed class AbiParameter
     public string? WrapperType { get; init; }
     public AbiCallback? Callback { get; init; }
     public VariantAbiInfo? VariantInfo { get; init; }
+    public TimeConversion TimeConversion { get; init; }
+    public string? TimeClockType { get; init; }
+    public string? TimeDurationType { get; init; }
 }
 
 internal enum VariantOp
@@ -122,6 +125,14 @@ internal enum SharedWrapperKind
     Nullable,
 }
 
+internal enum TimeConversion
+{
+    None,
+    SystemTimePoint,
+    ClockTimePoint,
+    Duration,
+}
+
 internal enum ArrayElementOwnership
 {
     None,
@@ -166,6 +177,9 @@ internal sealed class AbiFunction
     public VariantAbiInfo? VariantInfo { get; init; }
     public VariantOp VariantOp { get; init; }
     public VariantAlternative? VariantAlternative { get; init; }
+    public TimeConversion TimeConversion { get; init; }
+    public string? TimeClockType { get; init; }
+    public string? TimeDurationType { get; init; }
 }
 
 internal sealed class VariantRegistry
@@ -1517,6 +1531,9 @@ internal sealed class AbiPlan
                 out var arrayElementWrapperType,
                 out var arrayElementNativeType,
                 out var sharedWrapper,
+                out var timeConversion,
+                out var timeClockType,
+                out var timeDurationType,
                 out var returnNullable,
                 out var returnExpected,
                 out var expectedErrorType,
@@ -1592,6 +1609,9 @@ internal sealed class AbiPlan
             ArrayElementWrapperType = arrayElementWrapperType,
             ArrayElementNativeType = arrayElementNativeType,
             SharedWrapper = sharedWrapper,
+            TimeConversion = timeConversion,
+            TimeClockType = timeClockType,
+            TimeDurationType = timeDurationType,
             ReturnNullable = returnNullable,
             ReturnExpected = returnExpected,
             ExpectedErrorType = expectedErrorType,
@@ -1625,6 +1645,9 @@ internal sealed class AbiPlan
         out string? arrayElementWrapperType,
         out string? arrayElementNativeType,
         out SharedWrapperKind sharedWrapper,
+        out TimeConversion timeConversion,
+        out string? timeClockType,
+        out string? timeDurationType,
         out bool nullable,
         out bool returnExpected,
         out string? expectedErrorType,
@@ -1645,6 +1668,9 @@ internal sealed class AbiPlan
         arrayElementWrapperType = null;
         arrayElementNativeType = null;
         sharedWrapper = SharedWrapperKind.None;
+        timeConversion = TimeConversion.None;
+        timeClockType = null;
+        timeDurationType = null;
         nullable = false;
         returnExpected = false;
         expectedErrorType = null;
@@ -1702,6 +1728,9 @@ internal sealed class AbiPlan
                     out arrayElementWrapperType,
                     out arrayElementNativeType,
                     out sharedWrapper,
+                    out timeConversion,
+                    out timeClockType,
+                    out timeDurationType,
                     out nullable,
                     out var nestedExpected,
                     out _,
@@ -1741,6 +1770,22 @@ internal sealed class AbiPlan
         if (IsPointerOrReferenceType(nativeType))
         {
             kind = AbiKind.Opaque;
+            return true;
+        }
+
+        if (TryParseTimePoint(nativeType, out var timeClock, out var isSystemClock))
+        {
+            kind = AbiKind.I64;
+            timeConversion = isSystemClock ? TimeConversion.SystemTimePoint : TimeConversion.ClockTimePoint;
+            timeClockType = timeClock;
+            return true;
+        }
+
+        if (TryParseDuration(nativeType, out var timeDuration))
+        {
+            kind = AbiKind.I64;
+            timeConversion = TimeConversion.Duration;
+            timeDurationType = timeDuration;
             return true;
         }
 
@@ -1895,6 +1940,28 @@ internal sealed class AbiPlan
                 nativeType = optionalInner;
                 optional = true;
                 nullable = true;
+                return true;
+            }
+
+            if (TryParseTimePoint(optionalInner, out var optionalClock, out var optionalSystemClock))
+            {
+                kind = AbiKind.I64;
+                nativeType = optionalInner;
+                optional = true;
+                nullable = true;
+                timeConversion = optionalSystemClock ? TimeConversion.SystemTimePoint : TimeConversion.ClockTimePoint;
+                timeClockType = optionalClock;
+                return true;
+            }
+
+            if (TryParseDuration(optionalInner, out var optionalDuration))
+            {
+                kind = AbiKind.I64;
+                nativeType = optionalInner;
+                optional = true;
+                nullable = true;
+                timeConversion = TimeConversion.Duration;
+                timeDurationType = optionalDuration;
                 return true;
             }
 
@@ -2461,6 +2528,44 @@ internal sealed class AbiPlan
         return inner.Length > 0;
     }
 
+    private static bool TryParseTimePoint(string canonical, out string clockType, out bool isSystemClock)
+    {
+        clockType = "";
+        isSystemClock = false;
+        var text = NormalizeTypeName(canonical);
+        const string prefix = "std::chrono::time_point<";
+        if (!text.StartsWith(prefix, StringComparison.Ordinal)
+            || !text.EndsWith(">", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var arguments = SplitTemplateArguments(text[prefix.Length..^1].Trim()).ToList();
+        if (arguments.Count is < 1 or > 2)
+        {
+            return false;
+        }
+
+        clockType = StripTopLevelQualifiers(arguments[0].Trim());
+        isSystemClock = string.Equals(clockType, "std::chrono::system_clock", StringComparison.Ordinal);
+        return clockType.Length > 0;
+    }
+
+    private static bool TryParseDuration(string canonical, out string durationType)
+    {
+        durationType = "";
+        var text = NormalizeTypeName(canonical);
+        const string prefix = "std::chrono::duration<";
+        if (!text.StartsWith(prefix, StringComparison.Ordinal)
+            || !text.EndsWith(">", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        durationType = text;
+        return true;
+    }
+
     private static bool TryParseUnorderedSet(string canonical, out string element)
     {
         element = "";
@@ -2801,6 +2906,36 @@ internal sealed class AbiPlan
                 return true;
             }
 
+            if (TryParseTimePoint(optionalInner, out var optionalClock, out var optionalSystemClock))
+            {
+                parameter = new AbiParameter
+                {
+                    Name = name,
+                    Kind = AbiKind.I64,
+                    NativeType = optionalInner,
+                    IsOptional = true,
+                    OptionalInnerType = optionalInner,
+                    TimeConversion = optionalSystemClock ? TimeConversion.SystemTimePoint : TimeConversion.ClockTimePoint,
+                    TimeClockType = optionalClock,
+                };
+                return true;
+            }
+
+            if (TryParseDuration(optionalInner, out var optionalDuration))
+            {
+                parameter = new AbiParameter
+                {
+                    Name = name,
+                    Kind = AbiKind.I64,
+                    NativeType = optionalInner,
+                    IsOptional = true,
+                    OptionalInnerType = optionalInner,
+                    TimeConversion = TimeConversion.Duration,
+                    TimeDurationType = optionalDuration,
+                };
+                return true;
+            }
+
             if (variants.TryGet(surface, NormalizeTypeName(optionalInner), out var optionalVariant))
             {
                 var optionalVariantType = NormalizeTypeName(optionalInner);
@@ -2883,6 +3018,46 @@ internal sealed class AbiPlan
                 Name = name,
                 Kind = kind,
                 NativeType = text,
+            };
+            return true;
+        }
+
+        if (!IsPointerType(text)
+            && TryParseTimePoint(text, out var parameterClock, out var parameterSystemClock))
+        {
+            if (IsNonConstLValueReference(text))
+            {
+                reason = "mutable time references are not supported";
+                return false;
+            }
+
+            parameter = new AbiParameter
+            {
+                Name = name,
+                Kind = AbiKind.I64,
+                NativeType = text,
+                TimeConversion = parameterSystemClock ? TimeConversion.SystemTimePoint : TimeConversion.ClockTimePoint,
+                TimeClockType = parameterClock,
+            };
+            return true;
+        }
+
+        if (!IsPointerType(text)
+            && TryParseDuration(text, out var parameterDuration))
+        {
+            if (IsNonConstLValueReference(text))
+            {
+                reason = "mutable duration references are not supported";
+                return false;
+            }
+
+            parameter = new AbiParameter
+            {
+                Name = name,
+                Kind = AbiKind.I64,
+                NativeType = text,
+                TimeConversion = TimeConversion.Duration,
+                TimeDurationType = parameterDuration,
             };
             return true;
         }
