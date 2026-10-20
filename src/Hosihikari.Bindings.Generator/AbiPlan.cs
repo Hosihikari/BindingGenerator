@@ -545,11 +545,28 @@ internal sealed class AbiPlan
             uniquePtrOwnedDeclarationIds.Add(uniqueDeclaration.Id);
         }
 
+        // A variant alternative can be a class whose members are all inherited (for example
+        // StepSlider, which re-exports Dropdown through `using Dropdown::Dropdown;`). The IR
+        // records no members for it, but a copy made by the variant wrapper still needs a
+        // destroy function. Limit this path to memberless classes that actually appear as
+        // variant alternatives so unrelated declarations stay untouched.
+        var memberlessVariantAlternativeIds = allowOwnedByValue
+            ? CollectMemberlessVariantAlternatives(records, membersByDeclaration, publicDeclarationsByQualifiedName)
+            : new HashSet<string>(StringComparer.Ordinal);
         var destroyableDeclarationIds = new HashSet<string>(StringComparer.Ordinal);
         foreach (var declaration in allowOwnedByValue ? declarations : [])
         {
-            if (!membersByDeclaration.TryGetValue(declaration.Id, out var declarationMembers)
-                || HasImplicitSpecializationMembers(declaration, declarationMembers)
+            if (!membersByDeclaration.TryGetValue(declaration.Id, out var declarationMembers))
+            {
+                if (!memberlessVariantAlternativeIds.Contains(declaration.Id))
+                {
+                    continue;
+                }
+
+                declarationMembers = [];
+            }
+
+            if (HasImplicitSpecializationMembers(declaration, declarationMembers)
                 || !(linkCarrier || virtualDispatch || IsLinkSafe(declaration.Id))
                 || (declaration.Abstract && !uniquePtrOwnedDeclarationIds.Contains(declaration.Id))
                 || !CanDeleteImplicitDestructor(declaration, declarationMembers, out _))
@@ -574,7 +591,12 @@ internal sealed class AbiPlan
         {
             if (!membersByDeclaration.TryGetValue(declaration.Id, out var declarationMembers))
             {
-                continue;
+                if (!destroyableDeclarationIds.Contains(declaration.Id))
+                {
+                    continue;
+                }
+
+                declarationMembers = [];
             }
 
             // A primary-template record can carry the members of an implicit specialization.
@@ -2578,6 +2600,63 @@ internal sealed class AbiPlan
             IsReference = argument.IsReference,
             IsConst = argument.IsConst,
         };
+    }
+
+    private static HashSet<string> CollectMemberlessVariantAlternatives(
+        IReadOnlyList<IrRecord> records,
+        IReadOnlyDictionary<string, List<MemberRecord>> membersByDeclaration,
+        IReadOnlyDictionary<string, DeclarationRecord> declarationsByQualifiedName)
+    {
+        var result = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var member in records.OfType<MemberRecord>())
+        {
+            if (member.Signature is not null)
+            {
+                Consider(member.Signature.ReturnType);
+                foreach (var parameter in member.Signature.Parameters)
+                {
+                    Consider(parameter.Type);
+                }
+            }
+
+            if (member.Type is not null)
+            {
+                Consider(member.Type.Canonical);
+            }
+        }
+
+        return result;
+
+        void Consider(string type)
+        {
+            var normalized = NormalizeTypeName(type);
+            if (TryParseVariant(normalized, out var alternatives))
+            {
+                foreach (var alternative in alternatives)
+                {
+                    if (!declarationsByQualifiedName.TryGetValue(alternative, out var declaration)
+                        || declaration.Access != "public"
+                        || declaration.Abstract
+                        || !declaration.CopyConstructible
+                        || membersByDeclaration.ContainsKey(declaration.Id))
+                    {
+                        continue;
+                    }
+
+                    result.Add(declaration.Id);
+                }
+
+                return;
+            }
+
+            if (TryParseOptional(normalized, out var inner)
+                || TryParseOptionalRef(normalized, out inner)
+                || TryParseExpected(normalized, out inner, out _)
+                || TryParseVector(normalized, out inner))
+            {
+                Consider(inner);
+            }
+        }
     }
 
     private static VariantRegistry BuildVariantRegistry(
