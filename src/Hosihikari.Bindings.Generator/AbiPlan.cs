@@ -53,6 +53,48 @@ internal sealed class AbiParameter
     public string? VectorElementType { get; init; }
     public string? WrapperType { get; init; }
     public AbiCallback? Callback { get; init; }
+    public VariantAbiInfo? VariantInfo { get; init; }
+}
+
+internal enum VariantOp
+{
+    None,
+    Create,
+    Index,
+    Get,
+}
+
+internal enum VariantAlternativeKind
+{
+    String,
+    Record,
+    Pointer,
+    Scalar,
+}
+
+internal sealed class VariantAlternative
+{
+    public int Index { get; init; }
+    public string NativeType { get; init; } = "";
+    public VariantAlternativeKind Kind { get; init; }
+    public AbiKind ScalarKind { get; init; }
+    public string? WrapperType { get; init; }
+    public string ManagedName { get; init; } = "";
+}
+
+internal sealed class VariantAbiInfo
+{
+    public string NativeType { get; init; } = "";
+    public string Surface { get; init; } = "";
+    public string ClassName { get; init; } = "";
+    public string WrapperType => "global::" + NamespaceName + "." + ClassName;
+    public string NamespaceName => $"Hosihikari.Bindings.{TypeNames.SurfaceNamespace(Surface)}.Interop";
+    public List<VariantAlternative> Alternatives { get; init; } = [];
+    public List<AbiFunction> CreateFunctions { get; } = [];
+    public List<AbiFunction> GetFunctions { get; } = [];
+    public AbiFunction? IndexFunction { get; set; }
+    public AbiFunction? DestroyFunction { get; set; }
+    public bool Used { get; set; }
 }
 
 internal sealed class AbiCallback
@@ -100,6 +142,21 @@ internal sealed class AbiFunction
     public bool NeedsPresenceFlag => ReturnOptional || ReturnExpected;
     public List<AbiParameter> Parameters { get; init; } = [];
     public bool Static { get; init; }
+    public VariantAbiInfo? VariantInfo { get; init; }
+    public VariantOp VariantOp { get; init; }
+    public VariantAlternative? VariantAlternative { get; init; }
+}
+
+internal sealed class VariantRegistry
+{
+    private readonly Dictionary<(string Surface, string Type), VariantAbiInfo> _byKey = [];
+
+    public IEnumerable<VariantAbiInfo> All => _byKey.Values;
+
+    public bool TryGet(string surface, string type, out VariantAbiInfo info) =>
+        _byKey.TryGetValue((surface, type), out info!);
+
+    public void Add(VariantAbiInfo info) => _byKey[(info.Surface, info.NativeType)] = info;
 }
 
 internal sealed class AbiPlan
@@ -110,7 +167,8 @@ internal sealed class AbiPlan
         bool linkCarrier,
         bool llAllocator,
         bool virtualDispatch,
-        IReadOnlyDictionary<string, string> skipReasons)
+        IReadOnlyDictionary<string, string> skipReasons,
+        IReadOnlyList<VariantAbiInfo> usedVariants)
     {
         Functions = functions;
         DeclarationNames = declarationNames;
@@ -118,6 +176,7 @@ internal sealed class AbiPlan
         LlAllocator = llAllocator;
         VirtualDispatch = virtualDispatch;
         SkipReasons = skipReasons;
+        UsedVariants = usedVariants;
         CreateByMember = functions
             .Where(function => function.Kind == AbiFunctionKind.Create && function.MemberId is not null)
             .ToDictionary(function => function.MemberId!, StringComparer.Ordinal);
@@ -144,6 +203,7 @@ internal sealed class AbiPlan
     public bool LlAllocator { get; }
     public bool VirtualDispatch { get; }
     public IReadOnlyDictionary<string, string> SkipReasons { get; }
+    public IReadOnlyList<VariantAbiInfo> UsedVariants { get; }
 
     public bool TryGetSkipReason(string memberId, out string reason) =>
         SkipReasons.TryGetValue(memberId, out reason!);
@@ -154,7 +214,7 @@ internal sealed class AbiPlan
     public IReadOnlyDictionary<string, AbiFunction> DestroyByDeclaration { get; }
     public IReadOnlyDictionary<string, List<AbiFunction>> FunctionsByDeclaration { get; }
 
-    public static AbiPlan Empty { get; } = new([], new Dictionary<string, DeclarationName>(StringComparer.Ordinal), false, false, false, new Dictionary<string, string>(StringComparer.Ordinal));
+    public static AbiPlan Empty { get; } = new([], new Dictionary<string, DeclarationName>(StringComparer.Ordinal), false, false, false, new Dictionary<string, string>(StringComparer.Ordinal), []);
 
     public IEnumerable<AbiFunction> FunctionsForSurface(string surface) =>
         Functions.Where(function => string.Equals(function.Surface, surface, StringComparison.Ordinal));
@@ -389,6 +449,14 @@ internal sealed class AbiPlan
             destroyableDeclarationIds.Add(declaration.Id);
         }
 
+        var variants = BuildVariantRegistry(
+            records,
+            publicDeclarationsByQualifiedName,
+            declarationNames,
+            destroyableDeclarationIds,
+            enumUnderlyingByName,
+            allowOwnedByValue);
+
         var functions = new List<AbiFunction>();
         foreach (var declaration in declarations)
         {
@@ -480,6 +548,7 @@ internal sealed class AbiPlan
                         declarationNames,
                         enumUnderlyingByName,
                         allowOwnedByValue,
+                        variants,
                         out var create,
                         out reason))
                 {
@@ -539,6 +608,7 @@ internal sealed class AbiPlan
                         declarationNames,
                         enumUnderlyingByName,
                         allowOwnedByValue,
+                        variants,
                         out var getter,
                         out var setter,
                         out var fieldReason))
@@ -597,6 +667,7 @@ internal sealed class AbiPlan
                         destroyableDeclarationIds,
                         enumUnderlyingByName,
                         allowOwnedByValue,
+                        variants,
                         out var function,
                         out reason))
                 {
@@ -606,6 +677,19 @@ internal sealed class AbiPlan
 
                 functions.Add(function);
             }
+        }
+
+        var usedVariants = functions
+            .SelectMany(function => function.Parameters
+                .Select(parameter => parameter.VariantInfo)
+                .Append(function.VariantInfo))
+            .OfType<VariantAbiInfo>()
+            .Distinct()
+            .ToList();
+        foreach (var variant in usedVariants)
+        {
+            variant.Used = true;
+            functions.AddRange(BuildVariantFunctions(variant));
         }
 
         var ordered = functions
@@ -626,7 +710,7 @@ internal sealed class AbiPlan
             indexBySurface[function.Surface] = index + 1;
         }
 
-        return new AbiPlan(ordered, declarationNames, linkCarrier, llAllocator, virtualDispatch, skipReasons);
+        return new AbiPlan(ordered, declarationNames, linkCarrier, llAllocator, virtualDispatch, skipReasons, usedVariants);
     }
 
     public static string CppType(AbiKind kind) => kind switch
@@ -1224,6 +1308,7 @@ internal sealed class AbiPlan
         IReadOnlyDictionary<string, DeclarationName> declarationNames,
         IReadOnlyDictionary<string, string> enumUnderlyingByName,
         bool linkCarrier,
+        VariantRegistry variants,
         out AbiFunction function,
         out string? reason)
     {
@@ -1253,12 +1338,14 @@ internal sealed class AbiPlan
         foreach (var parameter in constructor.Signature.Parameters)
         {
             if (!TryMapParameter(
+                    declaration.Surface,
                     parameter.Name,
                     parameter.Type,
                     declarationsByQualifiedName,
                     declarationNames,
                     enumUnderlyingByName,
                     linkCarrier,
+                    variants,
                     out var abiParameter,
                     out var parameterReason))
             {
@@ -1342,6 +1429,7 @@ internal sealed class AbiPlan
         IReadOnlySet<string> destroyableDeclarationIds,
         IReadOnlyDictionary<string, string> enumUnderlyingByName,
         bool linkCarrier,
+        VariantRegistry variants,
         out AbiFunction function,
         out string? reason)
     {
@@ -1372,12 +1460,14 @@ internal sealed class AbiPlan
         }
 
         if (!TryMapReturnType(
+                declaration.Surface,
                 method.Signature.ReturnType,
                 declarationsByQualifiedName,
                 declarationNames,
                 destroyableDeclarationIds,
                 enumUnderlyingByName,
                 linkCarrier,
+                variants,
                 out var returnKind,
                 out var nativeReturnType,
                 out var returnWrapperType,
@@ -1390,6 +1480,7 @@ internal sealed class AbiPlan
                 out var returnNullable,
                 out var returnExpected,
                 out var expectedErrorType,
+                out var returnVariant,
                 out var returnReason))
         {
             reason = returnReason;
@@ -1402,12 +1493,14 @@ internal sealed class AbiPlan
         foreach (var parameter in method.Signature.Parameters)
         {
             if (!TryMapParameter(
+                    declaration.Surface,
                     parameter.Name,
                     parameter.Type,
                     declarationsByQualifiedName,
                     declarationNames,
                     enumUnderlyingByName,
                     linkCarrier,
+                    variants,
                     out var abiParameter,
                     out var parameterReason))
             {
@@ -1461,6 +1554,7 @@ internal sealed class AbiPlan
             ReturnNullable = returnNullable,
             ReturnExpected = returnExpected,
             ExpectedErrorType = expectedErrorType,
+            VariantInfo = returnVariant,
             Parameters = parameters,
             Static = method.Static,
         };
@@ -1468,12 +1562,14 @@ internal sealed class AbiPlan
     }
 
     private static bool TryMapReturnType(
+        string surface,
         string canonical,
         IReadOnlyDictionary<string, DeclarationRecord> declarationsByQualifiedName,
         IReadOnlyDictionary<string, DeclarationName> declarationNames,
         IReadOnlySet<string> destroyableDeclarationIds,
         IReadOnlyDictionary<string, string> enumUnderlyingByName,
         bool linkCarrier,
+        VariantRegistry variants,
         out AbiKind kind,
         out string nativeType,
         out string? wrapperType,
@@ -1486,6 +1582,7 @@ internal sealed class AbiPlan
         out bool nullable,
         out bool returnExpected,
         out string? expectedErrorType,
+        out VariantAbiInfo? returnVariant,
         out string? reason)
     {
         kind = AbiKind.Void;
@@ -1500,6 +1597,7 @@ internal sealed class AbiPlan
         nullable = false;
         returnExpected = false;
         expectedErrorType = null;
+        returnVariant = null;
         reason = null;
         if (nativeType.Length == 0)
         {
@@ -1531,12 +1629,14 @@ internal sealed class AbiPlan
             }
 
             if (!TryMapReturnType(
+                    surface,
                     expectedValueType,
                     declarationsByQualifiedName,
                     declarationNames,
                     destroyableDeclarationIds,
                     enumUnderlyingByName,
                     linkCarrier,
+                    variants,
                     out kind,
                     out nativeType,
                     out wrapperType,
@@ -1549,6 +1649,7 @@ internal sealed class AbiPlan
                     out nullable,
                     out var nestedExpected,
                     out _,
+                    out var nestedVariant,
                     out var expectedValueReason))
             {
                 reason = $"expected value type '{expectedValueType}': {expectedValueReason}";
@@ -1561,6 +1662,7 @@ internal sealed class AbiPlan
                 return false;
             }
 
+            returnVariant = nestedVariant;
             return true;
         }
 
@@ -1583,6 +1685,17 @@ internal sealed class AbiPlan
         if (IsPointerOrReferenceType(nativeType))
         {
             kind = AbiKind.Opaque;
+            return true;
+        }
+
+        var variantType = NormalizeTypeName(nativeType);
+        if (variants.TryGet(surface, variantType, out var variantInfo))
+        {
+            kind = AbiKind.Opaque;
+            nativeType = variantType;
+            wrapperType = variantInfo.WrapperType;
+            owned = true;
+            returnVariant = variantInfo;
             return true;
         }
 
@@ -1646,6 +1759,18 @@ internal sealed class AbiPlan
                 nativeType = optionalInner;
                 optional = true;
                 nullable = true;
+                return true;
+            }
+
+            if (variants.TryGet(surface, NormalizeTypeName(optionalInner), out var optionalVariant))
+            {
+                kind = AbiKind.Opaque;
+                nativeType = NormalizeTypeName(optionalInner);
+                wrapperType = optionalVariant.WrapperType;
+                owned = true;
+                optional = true;
+                nullable = true;
+                returnVariant = optionalVariant;
                 return true;
             }
 
@@ -1789,6 +1914,339 @@ internal sealed class AbiPlan
         return element.Length > 0;
     }
 
+    private static bool TryParseVariant(string canonical, out List<string> alternatives)
+    {
+        alternatives = [];
+        var text = NormalizeTypeName(canonical);
+        const string prefix = "std::variant<";
+        if (!text.StartsWith(prefix, StringComparison.Ordinal)
+            || !text.EndsWith(">", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        foreach (var argument in SplitTemplateArguments(text[prefix.Length..^1].Trim()))
+        {
+            var alternative = StripTopLevelQualifiers(argument.Trim());
+            if (alternative.Length == 0)
+            {
+                return false;
+            }
+
+            alternatives.Add(alternative);
+        }
+
+        return alternatives.Count > 0;
+    }
+
+    private static string VariantScalarName(AbiKind kind) => kind switch
+    {
+        AbiKind.Bool => "Bool",
+        AbiKind.I8 => "SByte",
+        AbiKind.U8 => "Byte",
+        AbiKind.I16 => "Int16",
+        AbiKind.U16 => "UInt16",
+        AbiKind.I32 => "Int32",
+        AbiKind.U32 => "UInt32",
+        AbiKind.I64 => "Int64",
+        AbiKind.U64 => "UInt64",
+        AbiKind.USize => "NUInt",
+        AbiKind.ISize => "NInt",
+        AbiKind.F32 => "Single",
+        AbiKind.F64 => "Double",
+        _ => "Value",
+    };
+
+    private static string VariantPointerName(string nativeType)
+    {
+        var text = nativeType.TrimEnd();
+        while (text.EndsWith("*", StringComparison.Ordinal))
+        {
+            text = text[..^1].TrimEnd();
+        }
+
+        return TypeNames.Sanitize(TypeNames.NativeName(text)) + "Pointer";
+    }
+
+    private static VariantRegistry BuildVariantRegistry(
+        IReadOnlyList<IrRecord> records,
+        IReadOnlyDictionary<string, DeclarationRecord> declarationsByQualifiedName,
+        IReadOnlyDictionary<string, DeclarationName> declarationNames,
+        IReadOnlySet<string> destroyableDeclarationIds,
+        IReadOnlyDictionary<string, string> enumUnderlyingByName,
+        bool allowOwnedByValue)
+    {
+        var surfaceByDeclaration = records.OfType<DeclarationRecord>()
+            .ToDictionary(declaration => declaration.Id, declaration => declaration.Surface, StringComparer.Ordinal);
+        var registry = new VariantRegistry();
+        foreach (var member in records.OfType<MemberRecord>())
+        {
+            if (!surfaceByDeclaration.TryGetValue(member.DeclarationId, out var surface))
+            {
+                continue;
+            }
+
+            if (member.Signature is not null)
+            {
+                Consider(surface, member.Signature.ReturnType);
+                foreach (var parameter in member.Signature.Parameters)
+                {
+                    Consider(surface, parameter.Type);
+                }
+            }
+
+            if (member.Type is not null)
+            {
+                Consider(surface, member.Type.Canonical);
+            }
+        }
+
+        return registry;
+
+        void Consider(string surface, string type)
+        {
+            var normalized = NormalizeTypeName(type);
+            if (TryParseVariant(normalized, out _))
+            {
+                Register(surface, normalized);
+                return;
+            }
+
+            if (TryParseOptional(normalized, out var inner)
+                || TryParseOptionalRef(normalized, out inner)
+                || TryParseExpected(normalized, out inner, out _)
+                || TryParseVector(normalized, out inner))
+            {
+                Consider(surface, inner);
+            }
+        }
+
+        void Register(string surface, string nativeType)
+        {
+            if (registry.TryGet(surface, nativeType, out _)
+                || !TryParseVariant(nativeType, out var alternativeTypes))
+            {
+                return;
+            }
+
+            var alternatives = new List<VariantAlternative>();
+            var usedNames = new HashSet<string>(StringComparer.Ordinal);
+            var usedTypes = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var alternativeType in alternativeTypes)
+            {
+                if (!usedTypes.Add(alternativeType))
+                {
+                    return;
+                }
+
+                VariantAlternativeKind kind;
+                AbiKind scalarKind = AbiKind.Void;
+                string? wrapperType = null;
+                string baseName;
+                if (IsStringType(alternativeType))
+                {
+                    kind = VariantAlternativeKind.String;
+                    baseName = "String";
+                }
+                else if (TryMapEnumUnderlying(alternativeType, enumUnderlyingByName, out scalarKind)
+                    || TryMapFundamental(alternativeType, out scalarKind))
+                {
+                    kind = VariantAlternativeKind.Scalar;
+                    baseName = VariantScalarName(scalarKind);
+                }
+                else if (IsPointerType(alternativeType)
+                    && !alternativeType.Contains('(', StringComparison.Ordinal))
+                {
+                    kind = VariantAlternativeKind.Pointer;
+                    baseName = VariantPointerName(alternativeType);
+                }
+                else if (allowOwnedByValue
+                    && declarationsByQualifiedName.TryGetValue(alternativeType, out var declaration)
+                    && declaration.Access == "public"
+                    && !declaration.Abstract
+                    && declaration.CopyConstructible
+                    && destroyableDeclarationIds.Contains(declaration.Id)
+                    && declarationNames.TryGetValue(declaration.Id, out var alternativeName))
+                {
+                    kind = VariantAlternativeKind.Record;
+                    wrapperType = "global::" + alternativeName.NamespaceName + "." + alternativeName.ClassName;
+                    baseName = TypeNames.Sanitize(TypeNames.NativeName(alternativeType));
+                }
+                else
+                {
+                    return;
+                }
+
+                var managedName = baseName;
+                var suffix = 2;
+                while (!usedNames.Add(managedName))
+                {
+                    managedName = baseName + "_" + suffix;
+                    suffix++;
+                }
+
+                alternatives.Add(new VariantAlternative
+                {
+                    Index = alternatives.Count,
+                    NativeType = alternativeType,
+                    Kind = kind,
+                    ScalarKind = scalarKind,
+                    WrapperType = wrapperType,
+                    ManagedName = managedName,
+                });
+            }
+
+            registry.Add(new VariantAbiInfo
+            {
+                NativeType = nativeType,
+                Surface = surface,
+                ClassName = "Variant_" + CSharpNaming.ShortHash(nativeType),
+                Alternatives = alternatives,
+            });
+        }
+    }
+
+    private static IEnumerable<AbiFunction> BuildVariantFunctions(VariantAbiInfo info)
+    {
+        var functions = new List<AbiFunction>();
+        var hash = CSharpNaming.ShortHash(info.NativeType);
+        var className = new DeclarationName(info.NamespaceName, "", info.ClassName);
+        var declarationId = "variant:" + info.NativeType;
+
+        foreach (var alternative in info.Alternatives)
+        {
+            var parameters = new List<AbiParameter>();
+            switch (alternative.Kind)
+            {
+                case VariantAlternativeKind.String:
+                    parameters.Add(new AbiParameter
+                    {
+                        Name = "value",
+                        Kind = AbiKind.StringView,
+                        NativeType = alternative.NativeType,
+                    });
+                    break;
+                case VariantAlternativeKind.Record:
+                    parameters.Add(new AbiParameter
+                    {
+                        Name = "value",
+                        Kind = AbiKind.Opaque,
+                        NativeType = alternative.NativeType,
+                        NativePointee = alternative.NativeType,
+                        IsReference = true,
+                        IsConst = true,
+                        WrapperType = alternative.WrapperType,
+                    });
+                    break;
+                case VariantAlternativeKind.Pointer:
+                    parameters.Add(new AbiParameter
+                    {
+                        Name = "value",
+                        Kind = AbiKind.Opaque,
+                        NativeType = alternative.NativeType,
+                        NativePointee = alternative.NativeType,
+                    });
+                    break;
+                case VariantAlternativeKind.Scalar:
+                    parameters.Add(new AbiParameter
+                    {
+                        Name = "value",
+                        Kind = alternative.ScalarKind,
+                        NativeType = alternative.NativeType,
+                    });
+                    break;
+            }
+
+            var create = new AbiFunction
+            {
+                CppName = $"hs_variant_{hash}_create_{alternative.Index}",
+                Kind = AbiFunctionKind.Create,
+                Surface = info.Surface,
+                DeclarationId = declarationId,
+                MemberId = $"{declarationId}:create:{alternative.Index}",
+                ClassCppName = info.NativeType,
+                ClassName = className,
+                NativeMemberName = "create",
+                CSharpMemberName = "Create" + alternative.ManagedName,
+                ReturnKind = AbiKind.Opaque,
+                NativeReturnType = info.NativeType,
+                Parameters = parameters,
+                Static = true,
+                VariantInfo = info,
+                VariantOp = VariantOp.Create,
+                VariantAlternative = alternative,
+            };
+            info.CreateFunctions.Add(create);
+            functions.Add(create);
+
+            var getKind = alternative.Kind switch
+            {
+                VariantAlternativeKind.String => AbiKind.StringView,
+                VariantAlternativeKind.Scalar => alternative.ScalarKind,
+                _ => AbiKind.Opaque,
+            };
+            var get = new AbiFunction
+            {
+                CppName = $"hs_variant_{hash}_get_{alternative.Index}",
+                Kind = AbiFunctionKind.Method,
+                Surface = info.Surface,
+                DeclarationId = declarationId,
+                MemberId = $"{declarationId}:get:{alternative.Index}",
+                ClassCppName = info.NativeType,
+                ClassName = className,
+                NativeMemberName = "get",
+                CSharpMemberName = "As" + alternative.ManagedName,
+                ReturnKind = getKind,
+                NativeReturnType = alternative.NativeType,
+                Parameters = [],
+                VariantInfo = info,
+                VariantOp = VariantOp.Get,
+                VariantAlternative = alternative,
+            };
+            info.GetFunctions.Add(get);
+            functions.Add(get);
+        }
+
+        var index = new AbiFunction
+        {
+            CppName = $"hs_variant_{hash}_index",
+            Kind = AbiFunctionKind.Method,
+            Surface = info.Surface,
+            DeclarationId = declarationId,
+            MemberId = declarationId + ":index",
+            ClassCppName = info.NativeType,
+            ClassName = className,
+            NativeMemberName = "index",
+            CSharpMemberName = "Index",
+            ReturnKind = AbiKind.I32,
+            NativeReturnType = "int",
+            Parameters = [],
+            VariantInfo = info,
+            VariantOp = VariantOp.Index,
+        };
+        info.IndexFunction = index;
+        functions.Add(index);
+
+        var destroy = new AbiFunction
+        {
+            CppName = $"hs_variant_{hash}_destroy",
+            Kind = AbiFunctionKind.Destroy,
+            Surface = info.Surface,
+            DeclarationId = declarationId,
+            MemberId = declarationId + ":destroy",
+            ClassCppName = info.NativeType,
+            ClassName = className,
+            NativeMemberName = "~variant",
+            CSharpMemberName = "Dispose",
+            ReturnKind = AbiKind.Void,
+            Parameters = [],
+            VariantInfo = info,
+        };
+        info.DestroyFunction = destroy;
+        functions.Add(destroy);
+        return functions;
+    }
+
     private static bool TryParseExpected(string canonical, out string valueType, out string errorType)
     {
         valueType = "";
@@ -1908,6 +2366,7 @@ internal sealed class AbiPlan
         IReadOnlyDictionary<string, DeclarationName> declarationNames,
         IReadOnlyDictionary<string, string> enumUnderlyingByName,
         bool linkCarrier,
+        VariantRegistry variants,
         out AbiFunction getter,
         out AbiFunction? setter,
         out string? reason)
@@ -1965,12 +2424,14 @@ internal sealed class AbiPlan
         }
 
         if (!TryMapParameter(
+                declaration.Surface,
                 name,
                 text,
                 declarationsByQualifiedName,
                 declarationNames,
                 enumUnderlyingByName,
                 linkCarrier,
+                variants,
                 out var valueParameter,
                 out _))
         {
@@ -2015,12 +2476,14 @@ internal sealed class AbiPlan
     }
 
     private static bool TryMapParameter(
+        string surface,
         string name,
         string canonical,
         IReadOnlyDictionary<string, DeclarationRecord> declarationsByQualifiedName,
         IReadOnlyDictionary<string, DeclarationName> declarationNames,
         IReadOnlyDictionary<string, string> enumUnderlyingByName,
         bool linkCarrier,
+        VariantRegistry variants,
         out AbiParameter parameter,
         out string? reason)
     {
@@ -2033,6 +2496,23 @@ internal sealed class AbiPlan
         }
 
         var text = canonical.Trim();
+        var variantType = NormalizeTypeName(text);
+        if (variants.TryGet(surface, variantType, out var variantInfo))
+        {
+            parameter = new AbiParameter
+            {
+                Name = name,
+                Kind = AbiKind.Opaque,
+                NativeType = variantType,
+                NativePointee = variantType,
+                IsReference = true,
+                IsConst = true,
+                WrapperType = variantInfo.WrapperType,
+                VariantInfo = variantInfo,
+            };
+            return true;
+        }
+
         if (TryParseVector(text, out var vectorElement))
         {
             if (IsStringViewType(vectorElement) || IsStringType(vectorElement))
@@ -2109,6 +2589,23 @@ internal sealed class AbiPlan
                     NativeType = optionalInner,
                     IsOptional = true,
                     OptionalInnerType = optionalInner,
+                };
+                return true;
+            }
+
+            if (variants.TryGet(surface, NormalizeTypeName(optionalInner), out var optionalVariant))
+            {
+                var optionalVariantType = NormalizeTypeName(optionalInner);
+                parameter = new AbiParameter
+                {
+                    Name = name,
+                    Kind = AbiKind.Opaque,
+                    NativeType = optionalVariantType,
+                    NativePointee = optionalVariantType,
+                    IsOptional = true,
+                    OptionalInnerType = optionalVariantType,
+                    WrapperType = optionalVariant.WrapperType,
+                    VariantInfo = optionalVariant,
                 };
                 return true;
             }

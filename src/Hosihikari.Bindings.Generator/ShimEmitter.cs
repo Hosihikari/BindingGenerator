@@ -191,6 +191,7 @@ internal static class ShimEmitter
             "#include <string>",
             "#include <string_view>",
             "#include <utility>",
+            "#include <variant>",
             "#include <vector>",
         };
         if (llAllocator)
@@ -654,6 +655,16 @@ internal static class ShimEmitter
         switch (function.Kind)
         {
             case AbiFunctionKind.Create:
+                if (function.VariantOp == VariantOp.Create)
+                {
+                    foreach (var line in EmitVariantCreate(function))
+                    {
+                        yield return line;
+                    }
+
+                    break;
+                }
+
                 yield return $"    return new {function.ClassCppName}({string.Join(", ", BuildNativeArguments(function))});";
                 break;
 
@@ -702,6 +713,16 @@ internal static class ShimEmitter
 
             case AbiFunctionKind.Method:
             {
+                if (function.VariantOp is VariantOp.Index or VariantOp.Get)
+                {
+                    foreach (var line in EmitVariantRead(function))
+                    {
+                        yield return line;
+                    }
+
+                    break;
+                }
+
                 var memberName = function.NativeMemberName;
                 if (memberName.StartsWith("operator ", StringComparison.Ordinal)
                     && function.ReturnKind != AbiKind.Void
@@ -869,6 +890,59 @@ internal static class ShimEmitter
 
         yield return "    " + DefaultReturn(function.ReturnKind);
         yield return "}";
+    }
+
+    private static IEnumerable<string> EmitVariantCreate(AbiFunction function)
+    {
+        var info = function.VariantInfo!;
+        var alternative = function.VariantAlternative!;
+        var native = info.NativeType;
+        var construct = alternative.Kind switch
+        {
+            VariantAlternativeKind.String =>
+                $"std::in_place_index<{alternative.Index}>, std::string(value_data, value_size)",
+            VariantAlternativeKind.Record =>
+                $"std::in_place_index<{alternative.Index}>, *static_cast<const {alternative.NativeType}*>(value)",
+            _ => $"std::in_place_index<{alternative.Index}>, static_cast<{alternative.NativeType}>(value)",
+        };
+        yield return $"    return static_cast<void*>(new {native}({construct}));";
+    }
+
+    private static IEnumerable<string> EmitVariantRead(AbiFunction function)
+    {
+        var info = function.VariantInfo!;
+        var native = info.NativeType;
+        if (function.VariantOp == VariantOp.Index)
+        {
+            yield return $"    return static_cast<std::int32_t>(static_cast<const {native}*>({SelfParameter})->index());";
+            yield break;
+        }
+
+        var alternative = function.VariantAlternative!;
+        yield return $"    auto const& hs_value = *static_cast<const {native}*>({SelfParameter});";
+        if (alternative.Kind == VariantAlternativeKind.String)
+        {
+            yield return "    thread_local std::string hs_variantString;";
+            yield return $"    if (hs_value.index() != {alternative.Index}) {{ return HosihikariStringView{{nullptr, 0}}; }}";
+            yield return $"    auto const& hs_text = std::get<{alternative.Index}>(hs_value);";
+            yield return "    hs_variantString.assign(hs_text.data(), hs_text.size());";
+            yield return "    return HosihikariStringView{hs_variantString.data(), hs_variantString.size()};";
+            yield break;
+        }
+
+        yield return $"    if (hs_value.index() != {alternative.Index}) {{ {DefaultReturn(function.ReturnKind)} }}";
+        if (alternative.Kind == VariantAlternativeKind.Record)
+        {
+            yield return $"    return static_cast<void*>(new {alternative.NativeType}(std::get<{alternative.Index}>(hs_value)));";
+        }
+        else if (alternative.Kind == VariantAlternativeKind.Pointer)
+        {
+            yield return $"    return const_cast<void*>(static_cast<void const*>(std::get<{alternative.Index}>(hs_value)));";
+        }
+        else
+        {
+            yield return $"    return static_cast<{AbiPlan.CppType(function.ReturnKind)}>(std::get<{alternative.Index}>(hs_value));";
+        }
     }
 
     private static string ExpectedErrorText(AbiFunction function) =>
