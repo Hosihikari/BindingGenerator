@@ -167,6 +167,7 @@ internal static class ShimEmitter
             "#include <cstddef>",
             "#include <cstdint>",
             "#include <exception>",
+            "#include <filesystem>",
             "#include <functional>",
             "#include <memory>",
             "#include <new>",
@@ -792,7 +793,21 @@ internal static class ShimEmitter
                 else if (function.ReturnKind == AbiKind.StringView)
                 {
                     yield return $"    auto result = {call};";
-                    if (function.ReturnOptional)
+                    if (function.SpecialValue == SpecialValueKind.Path)
+                    {
+                        if (function.ReturnOptional)
+                        {
+                            yield return "    *hs_hasValue = result.has_value();";
+                            yield return "    g_stringResult.assign(result ? result->string() : \"\");";
+                        }
+                        else
+                        {
+                            yield return "    g_stringResult.assign(result.string());";
+                        }
+
+                        yield return "    return HosihikariStringView{g_stringResult.data(), g_stringResult.size()};";
+                    }
+                    else if (function.ReturnOptional)
                     {
                         yield return "    *hs_hasValue = result.has_value();";
                         yield return "    g_stringResult.assign(result ? result->data() : \"\", result ? result->size() : 0);";
@@ -802,7 +817,10 @@ internal static class ShimEmitter
                         yield return "    g_stringResult.assign(result.data(), result.size());";
                     }
 
-                    yield return "    return HosihikariStringView{g_stringResult.data(), g_stringResult.size()};";
+                    if (function.SpecialValue != SpecialValueKind.Path)
+                    {
+                        yield return "    return HosihikariStringView{g_stringResult.data(), g_stringResult.size()};";
+                    }
                 }
                 else if (function.ReturnKind == AbiKind.ArrayView)
                 {
@@ -876,6 +894,20 @@ internal static class ShimEmitter
                         ? $"({call}).get()"
                         : call;
                     yield return $"    return hs_make_shared_handle({sharedExpression});";
+                }
+                else if (function.SpecialValue is SpecialValueKind.TypeId or SpecialValueKind.StrongOrdering)
+                {
+                    var fallback = AbiPlan.CppType(function.ReturnKind) + "{0}";
+                    if (function.ReturnOptional)
+                    {
+                        yield return $"    auto result = {call};";
+                        yield return "    *hs_hasValue = result.has_value();";
+                        yield return $"    return result ? {SpecialReturnExpression(function, "*result")} : {fallback};";
+                    }
+                    else
+                    {
+                        yield return $"    return {SpecialReturnExpression(function, call)};";
+                    }
                 }
                 else if (function.TimeConversion != TimeConversion.None)
                 {
@@ -1015,6 +1047,28 @@ internal static class ShimEmitter
         }
     }
 
+    private static string SpecialParameterExpression(AbiParameter parameter, string name) =>
+        parameter.SpecialValue switch
+        {
+            SpecialValueKind.TypeId =>
+                $"Bedrock::typeid_t<{parameter.SpecialValueType}>({name})",
+            SpecialValueKind.StrongOrdering =>
+                $"({name} < 0 ? std::strong_ordering::less : ({name} > 0 ? std::strong_ordering::greater : std::strong_ordering::equal))",
+            SpecialValueKind.Path =>
+                $"std::filesystem::path(std::string({name}_data, {name}_size))",
+            _ => name,
+        };
+
+    private static string SpecialReturnExpression(AbiFunction function, string expression) =>
+        function.SpecialValue switch
+        {
+            SpecialValueKind.TypeId =>
+                $"static_cast<std::uint16_t>(({expression}).value)",
+            SpecialValueKind.StrongOrdering =>
+                $"static_cast<std::int8_t>(({expression}) < 0 ? -1 : (({expression}) > 0 ? 1 : 0))",
+            _ => expression,
+        };
+
     private static string TimeParameterExpression(AbiParameter parameter, string name) =>
         parameter.TimeConversion switch
         {
@@ -1101,6 +1155,17 @@ internal static class ShimEmitter
                     $"hs_make_variant_vector<{parameter.VectorElementNativeType}>({name}_data, {name}_count)",
                 _ => $"hs_make_vector<{parameter.VectorElementType}>({name}_data, {name}_count)",
             };
+        }
+
+        if (parameter.SpecialValue != SpecialValueKind.None)
+        {
+            if (parameter.IsOptional)
+            {
+                var inner = parameter.OptionalInnerType ?? parameter.NativeType;
+                return $"({name}_hasValue ? std::optional<{inner}>{{{SpecialParameterExpression(parameter, name)}}} : std::nullopt)";
+            }
+
+            return SpecialParameterExpression(parameter, name);
         }
 
         if (parameter.IsOptionalRef)

@@ -60,6 +60,8 @@ internal sealed class AbiParameter
     public TimeConversion TimeConversion { get; init; }
     public string? TimeClockType { get; init; }
     public string? TimeDurationType { get; init; }
+    public SpecialValueKind SpecialValue { get; init; }
+    public string? SpecialValueType { get; init; }
 }
 
 internal enum VariantOp
@@ -128,6 +130,14 @@ internal enum SharedWrapperKind
     Nullable,
 }
 
+internal enum SpecialValueKind
+{
+    None,
+    TypeId,
+    StrongOrdering,
+    Path,
+}
+
 internal enum TimeConversion
 {
     None,
@@ -184,6 +194,8 @@ internal sealed class AbiFunction
     public TimeConversion TimeConversion { get; init; }
     public string? TimeClockType { get; init; }
     public string? TimeDurationType { get; init; }
+    public SpecialValueKind SpecialValue { get; init; }
+    public string? SpecialValueType { get; init; }
     public CallableAbiInfo? CallableInfo { get; init; }
     public CallableOp CallableOp { get; init; }
 }
@@ -1595,6 +1607,8 @@ internal sealed class AbiPlan
                 out var timeConversion,
                 out var timeClockType,
                 out var timeDurationType,
+                out var specialValue,
+                out var specialValueType,
                 out var returnNullable,
                 out var returnExpected,
                 out var expectedErrorType,
@@ -1674,6 +1688,8 @@ internal sealed class AbiPlan
             TimeConversion = timeConversion,
             TimeClockType = timeClockType,
             TimeDurationType = timeDurationType,
+            SpecialValue = specialValue,
+            SpecialValueType = specialValueType,
             ReturnNullable = returnNullable,
             ReturnExpected = returnExpected,
             ExpectedErrorType = expectedErrorType,
@@ -1712,6 +1728,8 @@ internal sealed class AbiPlan
         out TimeConversion timeConversion,
         out string? timeClockType,
         out string? timeDurationType,
+        out SpecialValueKind specialValue,
+        out string? specialValueType,
         out bool nullable,
         out bool returnExpected,
         out string? expectedErrorType,
@@ -1736,6 +1754,8 @@ internal sealed class AbiPlan
         timeConversion = TimeConversion.None;
         timeClockType = null;
         timeDurationType = null;
+        specialValue = SpecialValueKind.None;
+        specialValueType = null;
         nullable = false;
         returnExpected = false;
         expectedErrorType = null;
@@ -1798,6 +1818,8 @@ internal sealed class AbiPlan
                     out timeConversion,
                     out timeClockType,
                     out timeDurationType,
+                    out specialValue,
+                    out specialValueType,
                     out nullable,
                     out var nestedExpected,
                     out _,
@@ -1866,6 +1888,28 @@ internal sealed class AbiPlan
             kind = AbiKind.I64;
             timeConversion = TimeConversion.Duration;
             timeDurationType = timeDuration;
+            return true;
+        }
+
+        if (TryParseTypeId(nativeType, out var typeIdCategory))
+        {
+            kind = AbiKind.U16;
+            specialValue = SpecialValueKind.TypeId;
+            specialValueType = typeIdCategory;
+            return true;
+        }
+
+        if (IsStrongOrdering(nativeType))
+        {
+            kind = AbiKind.I8;
+            specialValue = SpecialValueKind.StrongOrdering;
+            return true;
+        }
+
+        if (IsFilesystemPath(nativeType))
+        {
+            kind = AbiKind.StringView;
+            specialValue = SpecialValueKind.Path;
             return true;
         }
 
@@ -2056,6 +2100,37 @@ internal sealed class AbiPlan
                 nullable = true;
                 timeConversion = TimeConversion.Duration;
                 timeDurationType = optionalDuration;
+                return true;
+            }
+
+            if (TryParseTypeId(optionalInner, out var optionalTypeId))
+            {
+                kind = AbiKind.U16;
+                nativeType = optionalInner;
+                optional = true;
+                nullable = true;
+                specialValue = SpecialValueKind.TypeId;
+                specialValueType = optionalTypeId;
+                return true;
+            }
+
+            if (IsStrongOrdering(optionalInner))
+            {
+                kind = AbiKind.I8;
+                nativeType = optionalInner;
+                optional = true;
+                nullable = true;
+                specialValue = SpecialValueKind.StrongOrdering;
+                return true;
+            }
+
+            if (IsFilesystemPath(optionalInner))
+            {
+                kind = AbiKind.StringView;
+                nativeType = optionalInner;
+                optional = true;
+                nullable = true;
+                specialValue = SpecialValueKind.Path;
                 return true;
             }
 
@@ -2783,6 +2858,33 @@ internal sealed class AbiPlan
         return true;
     }
 
+    private static bool TryParseTypeId(string canonical, out string category)
+    {
+        category = "";
+        var text = NormalizeTypeName(canonical);
+        const string prefix = "Bedrock::typeid_t<";
+        if (!text.StartsWith(prefix, StringComparison.Ordinal)
+            || !text.EndsWith(">", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var arguments = SplitTemplateArguments(text[prefix.Length..^1].Trim()).ToList();
+        if (arguments.Count != 1)
+        {
+            return false;
+        }
+
+        category = arguments[0].Trim();
+        return category.Length > 0;
+    }
+
+    private static bool IsStrongOrdering(string canonical) =>
+        string.Equals(NormalizeTypeName(canonical), "std::strong_ordering", StringComparison.Ordinal);
+
+    private static bool IsFilesystemPath(string canonical) =>
+        string.Equals(NormalizeTypeName(canonical), "std::filesystem::path", StringComparison.Ordinal);
+
     private static bool TryParseUnorderedSet(string canonical, out string element)
     {
         element = "";
@@ -3215,6 +3317,49 @@ internal sealed class AbiPlan
                 return true;
             }
 
+            if (TryParseTypeId(optionalInner, out var optionalTypeId))
+            {
+                parameter = new AbiParameter
+                {
+                    Name = name,
+                    Kind = AbiKind.U16,
+                    NativeType = optionalInner,
+                    IsOptional = true,
+                    OptionalInnerType = optionalInner,
+                    SpecialValue = SpecialValueKind.TypeId,
+                    SpecialValueType = optionalTypeId,
+                };
+                return true;
+            }
+
+            if (IsStrongOrdering(optionalInner))
+            {
+                parameter = new AbiParameter
+                {
+                    Name = name,
+                    Kind = AbiKind.I8,
+                    NativeType = optionalInner,
+                    IsOptional = true,
+                    OptionalInnerType = optionalInner,
+                    SpecialValue = SpecialValueKind.StrongOrdering,
+                };
+                return true;
+            }
+
+            if (IsFilesystemPath(optionalInner))
+            {
+                parameter = new AbiParameter
+                {
+                    Name = name,
+                    Kind = AbiKind.StringView,
+                    NativeType = optionalInner,
+                    IsOptional = true,
+                    OptionalInnerType = optionalInner,
+                    SpecialValue = SpecialValueKind.Path,
+                };
+                return true;
+            }
+
             if (variants.TryGet(surface, NormalizeTypeName(optionalInner), out var optionalVariant))
             {
                 var optionalVariantType = NormalizeTypeName(optionalInner);
@@ -3337,6 +3482,49 @@ internal sealed class AbiPlan
                 NativeType = text,
                 TimeConversion = TimeConversion.Duration,
                 TimeDurationType = parameterDuration,
+            };
+            return true;
+        }
+
+        if (TryParseTypeId(text, out var parameterTypeId))
+        {
+            parameter = new AbiParameter
+            {
+                Name = name,
+                Kind = AbiKind.U16,
+                NativeType = text,
+                SpecialValue = SpecialValueKind.TypeId,
+                SpecialValueType = parameterTypeId,
+            };
+            return true;
+        }
+
+        if (IsStrongOrdering(text))
+        {
+            parameter = new AbiParameter
+            {
+                Name = name,
+                Kind = AbiKind.I8,
+                NativeType = text,
+                SpecialValue = SpecialValueKind.StrongOrdering,
+            };
+            return true;
+        }
+
+        if (IsFilesystemPath(text))
+        {
+            if (IsNonConstLValueReference(text))
+            {
+                reason = "mutable path references are not supported";
+                return false;
+            }
+
+            parameter = new AbiParameter
+            {
+                Name = name,
+                Kind = AbiKind.StringView,
+                NativeType = text,
+                SpecialValue = SpecialValueKind.Path,
             };
             return true;
         }
