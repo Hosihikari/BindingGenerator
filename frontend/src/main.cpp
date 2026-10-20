@@ -19,6 +19,7 @@
 
 #include <algorithm>
 #include <fstream>
+#include <map>
 #include <set>
 #include <string>
 #include <vector>
@@ -163,8 +164,10 @@ public:
 
         for (auto* Member : Definition->decls()) {
             if (auto* Field = dyn_cast<FieldDecl>(Member)) {
+                collectDependencyEnums(Field);
                 emitMember(Definition, DeclId, Field, "field", false);
             } else if (auto* Variable = dyn_cast<VarDecl>(Member)) {
+                collectDependencyEnums(Variable);
                 if (Variable->isStaticDataMember()) {
                     emitMember(Definition, DeclId, Variable, "static_field", true);
                 }
@@ -172,6 +175,7 @@ public:
                 if (Method->isImplicit() || Method->isDeleted()) {
                     continue;
                 }
+                collectDependencyEnums(Method);
                 if (isa<CXXConstructorDecl>(Method)) {
                     emitMember(Definition, DeclId, Method, "constructor", false);
                 } else if (isa<CXXDestructorDecl>(Method)) {
@@ -197,6 +201,8 @@ public:
         if (!Decl->getDeclContext()->isNamespace() || isInternalName(Decl)) {
             return true;
         }
+
+        collectDependencyEnums(Decl);
 
         std::string DeclId = idFor(Decl, "");
         if (!Emitted.insert(DeclId).second) {
@@ -224,6 +230,48 @@ public:
         return true;
     }
 
+    // Enums are often declared in headers outside the module filter while still
+    // appearing in filtered signatures. Record them as dependency declarations so
+    // the ABI planner can map their underlying integer type.
+    void collectDependencyEnums(const NamedDecl* Decl) {
+        if (const auto* Function = dyn_cast<FunctionDecl>(Decl)) {
+            collectDependencyEnum(Function->getReturnType());
+            for (auto* Parameter : Function->parameters()) {
+                collectDependencyEnum(Parameter->getType());
+            }
+        } else if (const auto* Field = dyn_cast<FieldDecl>(Decl)) {
+            collectDependencyEnum(Field->getType());
+        } else if (const auto* Variable = dyn_cast<VarDecl>(Decl)) {
+            collectDependencyEnum(Variable->getType());
+        }
+    }
+
+    void collectDependencyEnum(QualType Type) {
+        const auto* Enum = Type.getCanonicalType().getTypePtr()->getAs<EnumType>();
+        if (Enum == nullptr) {
+            return;
+        }
+
+        EnumDecl* Decl = Enum->getDecl();
+        if (Decl == nullptr || Decl->isImplicit() || !Decl->isCompleteDefinition()
+            || !isInRoot(Decl->getLocation(), false) || isInternalName(Decl)) {
+            return;
+        }
+
+        DependencyEnums.emplace(idFor(Decl, ""), Decl);
+    }
+
+    void EmitDependencyEnums() {
+        for (const auto& [Id, Decl] : DependencyEnums) {
+            if (!Emitted.insert(Id).second) {
+                continue;
+            }
+
+            Records.emplace_back(makeDeclaration(Decl, Id, "enum"));
+            ++Declarations;
+        }
+    }
+
     std::vector<llvm::json::Object> Records;
     int Declarations = 0;
     int Variants = 0;
@@ -233,6 +281,7 @@ private:
     ASTContext& Ctx;
     const Options& Opt;
     std::set<std::string> Emitted;
+    std::map<std::string, EnumDecl*> DependencyEnums;
 
     bool isInternalName(const NamedDecl* Decl) const {
         std::string Qualified = Decl->getQualifiedNameAsString();
@@ -254,7 +303,7 @@ private:
         return false;
     }
 
-    bool isInRoot(SourceLocation Location) const {
+    bool isInRoot(SourceLocation Location, bool ApplyFilters = true) const {
         if (Location.isInvalid()) {
             return false;
         }
@@ -281,7 +330,7 @@ private:
             return false;
         }
 
-        if (Opt.Filters.empty()) {
+        if (!ApplyFilters || Opt.Filters.empty()) {
             return true;
         }
 
@@ -819,6 +868,7 @@ int main(int argc, char** argv) {
 
     IrVisitor Visitor(AST->getASTContext(), Opt);
     Visitor.TraverseDecl(AST->getASTContext().getTranslationUnitDecl());
+    Visitor.EmitDependencyEnums();
 
     llvm::sys::fs::create_directories(Opt.Output);
 
