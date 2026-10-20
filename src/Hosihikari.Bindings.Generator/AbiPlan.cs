@@ -59,6 +59,7 @@ internal sealed class AbiParameter
     public AbiKind VectorPairValueKind { get; init; }
     public string? VectorPairKeyType { get; init; }
     public string? VectorPairValueType { get; init; }
+    public bool IsWeakPtr { get; init; }
     public bool IsMap { get; init; }
     public AbiKind MapKeyKind { get; init; }
     public AbiKind MapValueKind { get; init; }
@@ -950,6 +951,7 @@ internal sealed class AbiPlan
             {
                 AbiKind.StringView => "string",
                 AbiKind.Opaque => parameter.WrapperType ?? "nint",
+                AbiKind.Shared => "global::Hosihikari.Bindings.Abi.SharedHandle?",
                 _ => CSharpType(parameter.Kind),
             };
 
@@ -3373,6 +3375,27 @@ internal sealed class AbiPlan
         return pointee.Length > 0;
     }
 
+    private static bool TryParseWeakPtr(string canonical, out string pointee)
+    {
+        pointee = "";
+        var text = NormalizeTypeName(canonical);
+        const string prefix = "std::weak_ptr<";
+        if (!text.StartsWith(prefix, StringComparison.Ordinal)
+            || !text.EndsWith(">", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var arguments = SplitTemplateArguments(text[prefix.Length..^1].Trim()).ToList();
+        if (arguments.Count != 1)
+        {
+            return false;
+        }
+
+        pointee = StripTopLevelQualifiers(arguments[0].Trim());
+        return pointee.Length > 0;
+    }
+
     private static bool TryParseUniquePtr(string canonical, out string pointee)
     {
         pointee = "";
@@ -3478,6 +3501,7 @@ internal sealed class AbiPlan
         }
 
         if (valueParameter.Kind == AbiKind.Callback
+            || valueParameter.Kind == AbiKind.Shared
             || valueParameter.IsOptional
             || valueParameter.IsVector
             || valueParameter.IsMap)
@@ -3550,6 +3574,31 @@ internal sealed class AbiPlan
                 IsConst = true,
                 WrapperType = variantInfo.WrapperType,
                 VariantInfo = variantInfo,
+            };
+            return true;
+        }
+
+        if (!IsPointerType(text) && TryParseSharedPtr(text, out var sharedPointee))
+        {
+            parameter = new AbiParameter
+            {
+                Name = name,
+                Kind = AbiKind.Shared,
+                NativeType = NormalizeTypeName(text),
+                NativePointee = sharedPointee,
+            };
+            return true;
+        }
+
+        if (!IsPointerType(text) && TryParseWeakPtr(text, out var weakPointee))
+        {
+            parameter = new AbiParameter
+            {
+                Name = name,
+                Kind = AbiKind.Shared,
+                NativeType = NormalizeTypeName(text),
+                NativePointee = weakPointee,
+                IsWeakPtr = true,
             };
             return true;
         }

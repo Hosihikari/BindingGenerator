@@ -173,8 +173,11 @@ internal static class ShimEmitter
             "#include <memory>",
             "#include <new>",
             "#include <optional>",
+            "#include <stdexcept>",
             "#include <string>",
             "#include <string_view>",
+            "#include <type_traits>",
+            "#include <typeindex>",
             "#include <unordered_map>",
             "#include <utility>",
             "#include <variant>",
@@ -263,8 +266,25 @@ internal static class ShimEmitter
         source.Add("    for (std::size_t i = 0; i < count; ++i) { result.emplace_back(data[i].data, data[i].size); }");
         source.Add("    return result;");
         source.Add("}");
+        source.Add("struct hs_shared_holder_base");
+        source.Add("{");
+        source.Add("    virtual ~hs_shared_holder_base() = default;");
+        source.Add("    virtual std::shared_ptr<const void> hs_share() const = 0;");
+        source.Add("    virtual std::type_index hs_type() const = 0;");
+        source.Add("};");
+        source.Add("");
         source.Add("template <class T>");
-        source.Add("struct hs_shared_holder { std::shared_ptr<T> value; };");
+        source.Add("struct hs_shared_holder final : hs_shared_holder_base");
+        source.Add("{");
+        source.Add("    explicit hs_shared_holder(std::shared_ptr<T> value) : value(std::move(value)) {}");
+        source.Add("    std::shared_ptr<T> value;");
+        source.Add("    std::shared_ptr<const void> hs_share() const override");
+        source.Add("    {");
+        source.Add("        return std::shared_ptr<const void>(value, value.get());");
+        source.Add("    }");
+        source.Add("");
+        source.Add("    std::type_index hs_type() const override { return std::type_index(typeid(T)); }");
+        source.Add("};");
         source.Add("");
         source.Add("template <class T>");
         source.Add("void hs_release_shared_holder(void* holder)");
@@ -276,8 +296,28 @@ internal static class ShimEmitter
         source.Add("HosihikariSharedHandle hs_make_shared_handle(std::shared_ptr<T> value)");
         source.Add("{");
         source.Add("    if (!value) { return HosihikariSharedHandle{nullptr, nullptr, nullptr}; }");
-        source.Add("    auto* holder = new hs_shared_holder<T>{std::move(value)};");
+        source.Add("    auto* holder = new hs_shared_holder<T>(std::move(value));");
         source.Add("    return HosihikariSharedHandle{holder, const_cast<void*>(static_cast<void const*>(holder->value.get())), &hs_release_shared_holder<T>};");
+        source.Add("}");
+        source.Add("");
+        source.Add("template <class T>");
+        source.Add("std::shared_ptr<T> hs_shared_from_handle(HosihikariSharedHandle handle)");
+        source.Add("{");
+        source.Add("    if (handle.holder == nullptr) { return {}; }");
+        source.Add("    auto* holder = static_cast<hs_shared_holder_base*>(handle.holder);");
+        source.Add("    if (holder->hs_type() != std::type_index(typeid(T))) {");
+        source.Add("        throw std::invalid_argument(\"shared handle type mismatch\");");
+        source.Add("    }");
+        source.Add("    using Value = std::remove_const_t<T>;");
+        source.Add("    auto shared = holder->hs_share();");
+        source.Add("    auto* raw = const_cast<Value*>(static_cast<Value const*>(shared.get()));");
+        source.Add("    return std::shared_ptr<T>(std::move(shared), raw);");
+        source.Add("}");
+        source.Add("");
+        source.Add("template <class T>");
+        source.Add("std::weak_ptr<T> hs_weak_from_handle(HosihikariSharedHandle handle)");
+        source.Add("{");
+        source.Add("    return std::weak_ptr<T>(hs_shared_from_handle<T>(handle));");
         source.Add("}");
         source.Add("");
         source.Add("template <class T>");
@@ -1418,6 +1458,13 @@ internal static class ShimEmitter
                     ? "std::basic_string_view<char>"
                     : "std::basic_string<char>";
                 return $"{stringType}({name}_data, {name}_size)";
+
+            case AbiKind.Shared:
+            {
+                var pointee = parameter.NativePointee ?? "void";
+                var helper = parameter.IsWeakPtr ? "hs_weak_from_handle" : "hs_shared_from_handle";
+                return $"{helper}<{pointee}>({name})";
+            }
 
             case AbiKind.Opaque:
             {

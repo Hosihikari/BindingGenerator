@@ -445,6 +445,9 @@ internal static class InteropEmitter
                     types.Add("void*");
                     types.Add("void*");
                     break;
+                case AbiKind.Shared:
+                    types.Add("global::Hosihikari.Bindings.Abi.SharedHandleData");
+                    break;
                 default:
                     types.Add(AbiPlan.CSharpType(parameter.Kind));
                     break;
@@ -533,7 +536,9 @@ internal static class InteropEmitter
     }
 
     private static string ParameterKey(AbiParameter parameter) =>
-        parameter.IsMap
+        parameter.Kind == AbiKind.Shared
+            ? "shared:" + parameter.NativeType + (parameter.IsWeakPtr ? ":weak" : "")
+            : parameter.IsMap
             ? "map:" + parameter.NativeType
             : parameter.IsVector
             ? "vector:" + parameter.VectorElementType
@@ -977,7 +982,9 @@ internal static class InteropEmitter
                 continue;
             }
 
-            var type = parameter.IsMap
+            var type = parameter.Kind == AbiKind.Shared
+                ? "global::Hosihikari.Bindings.Abi.SharedHandle?"
+                : parameter.IsMap
                 ? $"global::System.Collections.Generic.Dictionary<{AbiPlan.CSharpMapKeyType(parameter.MapKeyKind)}, {AbiPlan.CSharpMapValueType(parameter)}>?"
                 : parameter.IsVector
                     ? parameter.VectorElementWrapperType is not null
@@ -1086,6 +1093,9 @@ internal static class InteropEmitter
                     yield return $"(void*){release}";
                     break;
                 }
+                case AbiKind.Shared:
+                    yield return $"{name}?.ToNative() ?? default(global::Hosihikari.Bindings.Abi.SharedHandleData)";
+                    break;
                 default:
                     yield return parameter.IsOptional
                         ? $"{name} ?? default({AbiPlan.CSharpType(parameter.Kind)})"
