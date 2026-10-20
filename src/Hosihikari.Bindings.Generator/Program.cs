@@ -39,13 +39,14 @@ switch (args[0])
         if (args.Length < 4)
         {
             Console.Error.WriteLine(
-                "usage: emit <ir-manifest.json> <shard-directory> <output-directory> [--native-root <path>] [--link-carrier] [--ll-allocator]");
+                "usage: emit <ir-manifest.json> <shard-directory> <output-directory> [--native-root <path>] [--link-carrier] [--ll-allocator] [--virtual-dispatch]");
             return 2;
         }
 
         string? nativeRoot = null;
         var linkCarrier = false;
         var llAllocator = false;
+        var virtualDispatch = false;
         for (var index = 4; index < args.Length; index++)
         {
             switch (args[index])
@@ -58,6 +59,9 @@ switch (args[0])
                     break;
                 case "--ll-allocator":
                     llAllocator = true;
+                    break;
+                case "--virtual-dispatch":
+                    virtualDispatch = true;
                     break;
                 default:
                     Console.Error.WriteLine($"unknown option: {args[index]}");
@@ -77,6 +81,12 @@ switch (args[0])
             return 2;
         }
 
+        if (virtualDispatch && nativeRoot is null)
+        {
+            Console.Error.WriteLine("--virtual-dispatch requires --native-root.");
+            return 2;
+        }
+
         var manifest = ReadManifest(args[1]);
         var records = ReadRecords(args[2]);
         var validation = IrValidator.Validate(manifest, records);
@@ -88,7 +98,7 @@ switch (args[0])
 
         var manifestHash = "sha256:" + IrHash.CanonicalJsonSha256(File.ReadAllText(args[1]));
         var output = Path.GetFullPath(args[3]);
-        var plan = AbiPlan.Build(records, nativeRoot, linkCarrier, llAllocator);
+        var plan = AbiPlan.Build(records, nativeRoot, linkCarrier, llAllocator, virtualDispatch);
         foreach (var subdirectory in new[] { "interop", "shim", "coverage" })
         {
             DeleteDirectory(Path.Combine(output, subdirectory));

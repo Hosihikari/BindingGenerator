@@ -66,6 +66,9 @@ add_executable(hosihikari-ir-frontend src/main.cpp)
 target_include_directories(hosihikari-ir-frontend PRIVATE ${LLVM_INCLUDE_DIRS} ${CLANG_INCLUDE_DIRS})
 if(MSVC)
   target_compile_options(hosihikari-ir-frontend PRIVATE /utf-8)
+  # Endstone's public umbrella reaches deeply nested template instantiations;
+  # the default 1 MiB main-thread stack overflows inside clang's AST.
+  target_link_options(hosihikari-ir-frontend PRIVATE /STACK:67108864)
 endif()
 target_link_libraries(
   hosihikari-ir-frontend

@@ -150,6 +150,14 @@ internal static class ShimEmitter
             "",
             "HOSIHIKARI_SHIM_EXPORT const HosihikariBindingTableV1* hosihikari_get_binding_table_v1();",
             "HOSIHIKARI_SHIM_EXPORT const char* hosihikari_get_last_error() noexcept;",
+        ]);
+        if (string.Equals(surface, "endstone", StringComparison.Ordinal))
+        {
+            header.Add("HOSIHIKARI_SHIM_EXPORT void* hosihikari_endstone_get_server() noexcept;");
+        }
+
+        header.AddRange(
+        [
             "",
             "}",
         ]);
@@ -175,9 +183,19 @@ internal static class ShimEmitter
             source.Add("#include \"mc/deps/core/memory/IMemoryAllocator.h\"");
         }
 
-        foreach (var include in BuildIncludes(functions, declarations))
+        if (string.Equals(surface, "endstone", StringComparison.Ordinal))
         {
-            source.Add($"#include \"{include}\"");
+            // The Endstone public API relies on declaration order and complete types; the
+            // umbrella keeps the generated translation unit equivalent to a plugin build.
+            source.Add("#include \"endstone/endstone.hpp\"");
+            source.Add("#include \"endstone/detail.h\"");
+        }
+        else
+        {
+            foreach (var include in BuildIncludes(functions, declarations))
+            {
+                source.Add($"#include \"{include}\"");
+            }
         }
 
         if (llAllocator)
@@ -264,6 +282,17 @@ internal static class ShimEmitter
         source.Add("{");
         source.Add("    return g_lastError.c_str();");
         source.Add("}");
+
+        if (string.Equals(surface, "endstone", StringComparison.Ordinal))
+        {
+            source.Add("");
+            source.Add("extern \"C\" HOSIHIKARI_SHIM_EXPORT void* hosihikari_endstone_get_server() noexcept");
+            source.Add("{");
+            source.Add("    try { return &::endstone::detail::getServer(); }");
+            source.Add("    catch (std::exception const& hs_error) { setLastError(hs_error.what()); return nullptr; }");
+            source.Add("    catch (...) { setLastError(\"unknown native error\"); return nullptr; }");
+            source.Add("}");
+        }
 
         Write(directory, header, source);
     }
@@ -557,9 +586,25 @@ internal static class ShimEmitter
 
             case AbiFunctionKind.Method:
             {
+                var memberName = function.NativeMemberName;
+                if (memberName.StartsWith("operator ", StringComparison.Ordinal)
+                    && function.ReturnKind != AbiKind.Void
+                    && !memberName["operator ".Length..].Contains("::", StringComparison.Ordinal)
+                    && function.NativeReturnType.Contains("::", StringComparison.Ordinal))
+                {
+                    var targetType = function.NativeReturnType.TrimEnd();
+                    while (targetType.EndsWith("&", StringComparison.Ordinal)
+                        || targetType.EndsWith("*", StringComparison.Ordinal))
+                    {
+                        targetType = targetType[..^1].TrimEnd();
+                    }
+
+                    memberName = "operator " + targetType;
+                }
+
                 var target = function.Static
-                    ? $"{function.ClassCppName}::{function.NativeMemberName}"
-                    : $"static_cast<{function.ClassCppName}*>({SelfParameter})->{function.NativeMemberName}";
+                    ? $"{function.ClassCppName}::{memberName}"
+                    : $"static_cast<{function.ClassCppName}*>({SelfParameter})->{memberName}";
                 var call = $"{target}({string.Join(", ", BuildNativeArguments(function))})";
                 if (function.ReturnKind == AbiKind.Void)
                 {

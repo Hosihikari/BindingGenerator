@@ -65,6 +65,10 @@ powershell -File frontend/smoke-shim.ps1 -IrDirectory artifacts/llapi-full-ir -L
 
 完整 LLAPI 伞头当前选出 214 个 link-safe 函数；用 `--link-carrier` 链接 `LeviLamina.lib` 时为 2,879 个函数。切片覆盖 `ll::event::EventId`、`ll::event::EventIdView`、`ll::hash_utils::HashedIdBase`、`ll::hash_utils::HashCombiner`、`ll::data::Version` 以及其他符合条件的类。Smoke test 从托管字符串创建原生 `EventId`，读取名称与哈希，比较两个 `HashedIdBase` 视图，调用 `HashCombiner::hash()`，并让 `ll::data::Version` 经过字符串构造、`to_string()`、字段读取、`valid(string)` 与 `isIdenticalTo(Version)` 往返。其余成员保留 Interop stub，并在覆盖清单中只记录 `interop` 发射器。
 
+## Endstone 表面
+
+`frontend/run-endstone.ps1` 解析 Endstone 公共伞头（`include/endstone/endstone.hpp`）并提供 expected-lite 与 nlohmann_json 头。`--virtual-dispatch` 为 header-only 虚接口发射免链接 shim：inline 成员与虚方法经宿主提供的 vtable 调用，非虚 out-of-line 成员保留 stub。`frontend/build-endstone-shim.ps1` 用 Endstone 头编译生成的表。Endstone 0.11.14 表面当前选出 946 个函数。
+
 ## 许可证
 
 GPL-3.0-or-later，见 `LICENSE.md`。

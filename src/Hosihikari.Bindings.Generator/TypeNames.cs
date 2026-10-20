@@ -21,7 +21,7 @@ internal static class TypeNames
     {
         "bedrock" => "Bedrock",
         "levilamina" => "LeviLamina",
-        "endstone" => "EndStone",
+        "endstone" => "Endstone",
         _ => "Unknown",
     };
 

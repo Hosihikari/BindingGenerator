@@ -90,12 +90,14 @@ internal sealed class AbiPlan
         IReadOnlyDictionary<string, DeclarationName> declarationNames,
         bool linkCarrier,
         bool llAllocator,
+        bool virtualDispatch,
         IReadOnlyDictionary<string, string> skipReasons)
     {
         Functions = functions;
         DeclarationNames = declarationNames;
         LinkCarrier = linkCarrier;
         LlAllocator = llAllocator;
+        VirtualDispatch = virtualDispatch;
         SkipReasons = skipReasons;
         CreateByMember = functions
             .Where(function => function.Kind == AbiFunctionKind.Create && function.MemberId is not null)
@@ -121,6 +123,7 @@ internal sealed class AbiPlan
     public IReadOnlyDictionary<string, DeclarationName> DeclarationNames { get; }
     public bool LinkCarrier { get; }
     public bool LlAllocator { get; }
+    public bool VirtualDispatch { get; }
     public IReadOnlyDictionary<string, string> SkipReasons { get; }
 
     public bool TryGetSkipReason(string memberId, out string reason) =>
@@ -132,7 +135,7 @@ internal sealed class AbiPlan
     public IReadOnlyDictionary<string, AbiFunction> DestroyByDeclaration { get; }
     public IReadOnlyDictionary<string, List<AbiFunction>> FunctionsByDeclaration { get; }
 
-    public static AbiPlan Empty { get; } = new([], new Dictionary<string, DeclarationName>(StringComparer.Ordinal), false, false, new Dictionary<string, string>(StringComparer.Ordinal));
+    public static AbiPlan Empty { get; } = new([], new Dictionary<string, DeclarationName>(StringComparer.Ordinal), false, false, false, new Dictionary<string, string>(StringComparer.Ordinal));
 
     public IEnumerable<AbiFunction> FunctionsForSurface(string surface) =>
         Functions.Where(function => string.Equals(function.Surface, surface, StringComparison.Ordinal));
@@ -147,7 +150,8 @@ internal sealed class AbiPlan
         IReadOnlyList<IrRecord> records,
         string? nativeRoot,
         bool linkCarrier = false,
-        bool llAllocator = false)
+        bool llAllocator = false,
+        bool virtualDispatch = false)
     {
         if (string.IsNullOrWhiteSpace(nativeRoot) || !Directory.Exists(nativeRoot))
         {
@@ -336,8 +340,9 @@ internal sealed class AbiPlan
                 || constructors.Any(member => member.Access == "public");
         }
 
+        var allowOwnedByValue = linkCarrier || virtualDispatch;
         var destroyableDeclarationIds = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var declaration in linkCarrier ? declarations : [])
+        foreach (var declaration in allowOwnedByValue ? declarations : [])
         {
             if (!membersByDeclaration.TryGetValue(declaration.Id, out var declarationMembers)
                 || HasImplicitSpecializationMembers(declaration, declarationMembers)
@@ -374,16 +379,17 @@ internal sealed class AbiPlan
                 member.Kind == "field"
                 && member.Type is not null
                 && IsStringViewType(member.Type.Canonical));
-            var linkSafe = linkCarrier || IsLinkSafe(declaration.Id);
+            var linkSafe = linkCarrier || virtualDispatch || IsLinkSafe(declaration.Id);
             var destructorUsable = IsDestructorUsable(declaration, declarationMembers);
             var hasPublicDestructor = linkSafe
+                && !virtualDispatch
                 && CanDeleteImplicitDestructor(
                     declaration,
                     declarationMembers,
                     out var explicitDestructor)
                 && explicitDestructor;
             var destructorAccessible = linkSafe && destructorUsable;
-            var isAbstract = declarationMembers.Any(member => member.Pure);
+            var isAbstract = declaration.Abstract || declarationMembers.Any(member => member.Pure);
             var hasAbstractTemplateArgument = declaration.Template is not null
                 && HasAbstractTemplateArgument(declaration, allDeclarationsByQualifiedName, abstractDeclarationIds);
             var created = false;
@@ -392,9 +398,13 @@ internal sealed class AbiPlan
                          member.Kind == "constructor" && member.Access == "public"))
             {
                 string? reason = null;
-                if (!(linkCarrier ? HasExportedSymbol(declaration, constructor) : constructor.Inline))
+                if (!(virtualDispatch ? constructor.Inline
+                        : linkCarrier ? HasExportedSymbol(declaration, constructor)
+                        : constructor.Inline))
                 {
-                    reason = "the constructor is not exported by the carrier";
+                    reason = virtualDispatch
+                        ? "the constructor requires linking against the carrier"
+                        : "the constructor is not exported by the carrier";
                 }
                 else if (linkCarrier
                     && declaration.Template is not null
@@ -403,7 +413,7 @@ internal sealed class AbiPlan
                 {
                     reason = "the template constructor has no visible definition";
                 }
-                else if (constructor.Pure)
+                else if (!virtualDispatch && constructor.Pure)
                 {
                     reason = "the constructor is pure virtual";
                 }
@@ -436,7 +446,7 @@ internal sealed class AbiPlan
                         publicDeclarationsByQualifiedName,
                         declarationNames,
                         enumUnderlyingByName,
-                        linkCarrier,
+                        allowOwnedByValue,
                         out var create,
                         out reason))
                 {
@@ -448,8 +458,9 @@ internal sealed class AbiPlan
                 created = true;
             }
 
-            var hasDestroy = hasPublicDestructor || created
-                || (linkCarrier && destroyableDeclarationIds.Contains(declaration.Id));
+            var hasDestroy = created
+                || (hasPublicDestructor && !virtualDispatch)
+                || (allowOwnedByValue && destroyableDeclarationIds.Contains(declaration.Id));
             if (hasDestroy)
             {
                 functions.Add(BuildDestroy(declaration, declarationNames));
@@ -486,7 +497,7 @@ internal sealed class AbiPlan
                         publicDeclarationsByQualifiedName,
                         declarationNames,
                         enumUnderlyingByName,
-                        linkCarrier,
+                        allowOwnedByValue,
                         out var getter,
                         out var setter,
                         out var fieldReason))
@@ -510,11 +521,15 @@ internal sealed class AbiPlan
                 {
                     reason = "the class is not link-safe in the current mode";
                 }
-                else if (!(linkCarrier ? HasExportedSymbol(declaration, method) : method.Inline))
+                else if (!(virtualDispatch
+                    ? method.Inline || method.Virtual
+                    : linkCarrier ? HasExportedSymbol(declaration, method) : method.Inline))
                 {
-                    reason = "the member is not exported by the carrier";
+                    reason = virtualDispatch
+                        ? "the member requires linking against the carrier"
+                        : "the member is not exported by the carrier";
                 }
-                else if (method.Pure)
+                else if (!virtualDispatch && method.Pure)
                 {
                     reason = "the member is pure virtual";
                 }
@@ -540,7 +555,7 @@ internal sealed class AbiPlan
                         declarationNames,
                         destroyableDeclarationIds,
                         enumUnderlyingByName,
-                        linkCarrier,
+                        allowOwnedByValue,
                         out var function,
                         out reason))
                 {
@@ -570,7 +585,7 @@ internal sealed class AbiPlan
             indexBySurface[function.Surface] = index + 1;
         }
 
-        return new AbiPlan(ordered, declarationNames, linkCarrier, llAllocator, skipReasons);
+        return new AbiPlan(ordered, declarationNames, linkCarrier, llAllocator, virtualDispatch, skipReasons);
     }
 
     public static string CppType(AbiKind kind) => kind switch
@@ -1418,7 +1433,7 @@ internal sealed class AbiPlan
 
         if (!linkCarrier)
         {
-            reason = $"by-value return type '{canonical}' requires --link-carrier";
+            reason = $"by-value return type '{canonical}' requires --link-carrier or --virtual-dispatch";
             return false;
         }
 
@@ -1680,7 +1695,7 @@ internal sealed class AbiPlan
 
         if (!linkCarrier && IsByValueRecordType(text))
         {
-            reason = $"by-value record parameter '{text}' requires --link-carrier";
+            reason = $"by-value record parameter '{text}' requires --link-carrier or --virtual-dispatch";
             return false;
         }
 

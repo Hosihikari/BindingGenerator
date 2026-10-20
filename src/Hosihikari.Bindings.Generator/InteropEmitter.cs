@@ -186,6 +186,39 @@ internal static class InteropEmitter
                 "}",
             ]);
 
+            if (string.Equals(surface, "endstone", StringComparison.Ordinal))
+            {
+                var loadIndex = lines.FindIndex(line => line.Trim() == "s_table = table;");
+                if (loadIndex >= 0)
+                {
+                    lines.Insert(
+                        loadIndex,
+                        "        s_getServer = (delegate* unmanaged[Cdecl]<void*>)global::System.Runtime.InteropServices.NativeLibrary.GetExport(library, \"hosihikari_endstone_get_server\").ToPointer();");
+                }
+
+                lines.InsertRange(lines.Count - 1,
+                [
+                    "    private static delegate* unmanaged[Cdecl]<void*> s_getServer;",
+                    "",
+                    "    public static nint GetServer()",
+                    "    {",
+                    "        if (s_getServer == null)",
+                    "        {",
+                    "            throw new global::System.InvalidOperationException(\"BindingShim is not loaded. Call NativeMethods.Load(path) first.\");",
+                    "        }",
+                    "",
+                    "        var server = s_getServer();",
+                    "        if (server == null)",
+                    "        {",
+                    "            throw new global::System.InvalidOperationException(GetLastError() ?? \"Failed to get the Endstone server.\");",
+                    "        }",
+                    "",
+                    "        return (nint)server;",
+                    "    }",
+                    "",
+                ]);
+            }
+
             var path = Path.Combine(outputDirectory, "interop", surface, "NativeMethods.g.cs");
             Directory.CreateDirectory(Path.GetDirectoryName(path)!);
             File.WriteAllText(path, string.Join("\n", lines) + "\n", new UTF8Encoding(false));

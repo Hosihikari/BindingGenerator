@@ -65,6 +65,10 @@ powershell -File frontend/smoke-shim.ps1 -IrDirectory artifacts/llapi-full-ir -L
 
 The complete LLAPI umbrella currently selects 214 link-safe functions, or 2,879 functions when built with `--link-carrier` against `LeviLamina.lib`. The slice covers `ll::event::EventId`, `ll::event::EventIdView`, `ll::hash_utils::HashedIdBase`, `ll::hash_utils::HashCombiner`, `ll::data::Version`, and the other eligible classes. The smoke test creates a native `EventId` from a managed string, reads its name and hash, compares two `HashedIdBase` views, calls `HashCombiner::hash()`, and round-trips `ll::data::Version` through string construction, `to_string()`, field getters, `valid(string)`, and `isIdenticalTo(Version)`. The remaining members keep their Interop stubs and are recorded in the coverage manifest with the `interop` emitter only.
 
+## Endstone surface
+
+`frontend/run-endstone.ps1` parses the Endstone public umbrella (`include/endstone/endstone.hpp`) with expected-lite and nlohmann_json headers. `--virtual-dispatch` emits a link-free shim for the header-only virtual interfaces: inline members and virtual methods are called through the host-provided vtables, while non-virtual out-of-line members remain stubs. `frontend/build-endstone-shim.ps1` compiles the generated table against the Endstone headers. The Endstone 0.11.14 surface currently selects 946 functions.
+
 ## Licence
 
 GPL-3.0-or-later, see `LICENSE.md`.
