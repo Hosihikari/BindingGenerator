@@ -195,7 +195,7 @@ internal sealed class AbiPlan
         foreach (var declaration in allClassDeclarations.Where(declaration => declaration.Access == "public"))
         {
             string? declarationReason = null;
-            if (!linkCarrier && declaration.Template is not null)
+            if (!linkCarrier && !virtualDispatch && declaration.Template is not null)
             {
                 declarationReason = "template instances require --link-carrier";
             }
@@ -204,7 +204,7 @@ internal sealed class AbiPlan
                 declarationReason = "the native name is not a valid C++ qualified name";
             }
             else if (declaration.Template is not null
-                && (linkCarrier
+                && ((linkCarrier || virtualDispatch)
                     ? HasInaccessibleTemplateArgument(declaration)
                         || HasUnsafeIncompleteTemplateArgument(declaration)
                     : !AreTemplateArgumentsUsable(declaration, allDeclarationsByQualifiedName)))
@@ -476,12 +476,20 @@ internal sealed class AbiPlan
             }
 
             foreach (var field in declarationMembers.Where(member =>
-                         (member.Kind == "field" || (linkCarrier && member.Kind == "static_field"))
+                         (member.Kind == "field" || member.Kind == "static_field")
                          && member.Access == "public"))
             {
                 if (field.VariableTemplate)
                 {
                     skipReasons[field.Id] = "static variable templates are not projected";
+                    continue;
+                }
+
+                if (field.Kind == "static_field"
+                    && !linkCarrier
+                    && !(virtualDispatch && field.Inline))
+                {
+                    skipReasons[field.Id] = "the static field requires linking against the carrier";
                     continue;
                 }
 

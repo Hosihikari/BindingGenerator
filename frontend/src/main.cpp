@@ -756,6 +756,8 @@ private:
             Object["bitWidth"] = Field->isBitField() ? static_cast<int64_t>(Field->getBitWidthValue()) : 0;
         } else if (auto* Variable = dyn_cast<VarDecl>(Member)) {
             Object["type"] = makeType(Variable->getType());
+            Object["inline"] = Variable->isInline() || Variable->isConstexpr();
+            Object["defined"] = Variable->isThisDeclarationADefinition() == VarDecl::Definition;
         } else if (auto* Method = dyn_cast<CXXMethodDecl>(Member)) {
             Object["virtual"] = Method->isVirtual();
             Object["pure"] = Method->isPureVirtual();
