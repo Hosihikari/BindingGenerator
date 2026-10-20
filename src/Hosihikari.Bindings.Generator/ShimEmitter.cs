@@ -139,6 +139,14 @@ internal static class ShimEmitter
             "    std::size_t size;",
             "};",
             "",
+            "typedef void (*HosihikariSharedRelease)(void*);",
+            "",
+            "struct HosihikariSharedHandle {",
+            "    void* holder;",
+            "    void* target;",
+            "    HosihikariSharedRelease release;",
+            "};",
+            "",
             "struct HosihikariBindingTableV1 {",
             "    std::uint32_t version;",
             "    std::uint32_t size;",
@@ -182,6 +190,7 @@ internal static class ShimEmitter
             "#include <optional>",
             "#include <string>",
             "#include <string_view>",
+            "#include <utility>",
             "#include <vector>",
         };
         if (llAllocator)
@@ -272,6 +281,23 @@ internal static class ShimEmitter
         source.Add("    for (std::size_t i = 0; i < count; ++i) { result.emplace_back(data[i].data, data[i].size); }");
         source.Add("    return result;");
         source.Add("}");
+        source.Add("template <class T>");
+        source.Add("struct hs_shared_holder { std::shared_ptr<T> value; };");
+        source.Add("");
+        source.Add("template <class T>");
+        source.Add("void hs_release_shared_holder(void* holder)");
+        source.Add("{");
+        source.Add("    delete static_cast<hs_shared_holder<T>*>(holder);");
+        source.Add("}");
+        source.Add("");
+        source.Add("template <class T>");
+        source.Add("HosihikariSharedHandle hs_make_shared_handle(std::shared_ptr<T> value)");
+        source.Add("{");
+        source.Add("    if (!value) { return HosihikariSharedHandle{nullptr, nullptr, nullptr}; }");
+        source.Add("    auto* holder = new hs_shared_holder<T>{std::move(value)};");
+        source.Add("    return HosihikariSharedHandle{holder, const_cast<void*>(static_cast<void const*>(holder->value.get())), &hs_release_shared_holder<T>};");
+        source.Add("}");
+        source.Add("");
         source.Add("inline std::vector<std::basic_string_view<char>> hs_make_string_view_vector(HosihikariStringView const* data, std::size_t count)");
         source.Add("{");
         source.Add("    std::vector<std::basic_string_view<char>> result;");
@@ -643,6 +669,10 @@ internal static class ShimEmitter
                     yield return $"    auto const& value = {target};";
                     yield return "    return HosihikariStringView{value.data(), value.size()};";
                 }
+                else if (function.ReturnKind == AbiKind.Shared)
+                {
+                    yield return $"    return hs_make_shared_handle({target});";
+                }
                 else if (function.ReturnKind == AbiKind.Opaque)
                 {
                     // A pointer field is returned as-is; references, arrays, and by-value
@@ -745,6 +775,10 @@ internal static class ShimEmitter
                         yield return "    return HosihikariArrayView{hs_arrayResult.data(), hs_arrayResult.size()};";
                     }
                 }
+                else if (function.ReturnKind == AbiKind.Shared)
+                {
+                    yield return $"    return hs_make_shared_handle({call});";
+                }
                 else if (function.ReturnKind == AbiKind.Opaque)
                 {
                     if (function.ReturnOptional && function.ReturnOwned)
@@ -816,6 +850,7 @@ internal static class ShimEmitter
         AbiKind.Opaque => "return nullptr;",
         AbiKind.StringView => "return HosihikariStringView{nullptr, 0};",
         AbiKind.ArrayView => "return HosihikariArrayView{nullptr, 0};",
+        AbiKind.Shared => "return HosihikariSharedHandle{nullptr, nullptr, nullptr};",
         AbiKind.F32 => "return 0.0f;",
         AbiKind.F64 => "return 0.0;",
         _ => "return 0;",

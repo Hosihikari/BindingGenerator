@@ -23,6 +23,7 @@ internal enum AbiKind
     Callback,
     ArrayView,
     Vector,
+    Shared,
 }
 
 internal enum AbiFunctionKind
@@ -644,6 +645,7 @@ internal sealed class AbiPlan
         AbiKind.Callback => "void*",
         AbiKind.ArrayView => "HosihikariArrayView",
         AbiKind.Vector => "void",
+        AbiKind.Shared => "HosihikariSharedHandle",
         _ => "void",
     };
 
@@ -668,6 +670,7 @@ internal sealed class AbiPlan
         AbiKind.Callback => "nint",
         AbiKind.ArrayView => "nint",
         AbiKind.Vector => "nint",
+        AbiKind.Shared => "nint",
         _ => "nint",
     };
 
@@ -677,6 +680,7 @@ internal sealed class AbiPlan
         AbiKind.StringView => "NativeMethods.StringView",
         AbiKind.ArrayView => "NativeMethods.ArrayView",
         AbiKind.Vector => "nint",
+        AbiKind.Shared => "NativeMethods.SharedHandle",
         _ => CSharpType(kind),
     };
 
@@ -1600,6 +1604,16 @@ internal sealed class AbiPlan
             return true;
         }
 
+        if (TryParseSharedPtr(nativeType, out var sharedPointee))
+        {
+            // The shim keeps one shared reference alive in a heap holder; the managed
+            // wrapper releases it through the returned release callback.
+            kind = AbiKind.Shared;
+            nativeType = sharedPointee;
+            nullable = true;
+            return true;
+        }
+
         if (TryParseUniquePtr(nativeType, out var uniquePointee))
         {
             if (!declarationsByQualifiedName.TryGetValue(uniquePointee, out var pointeeDeclaration))
@@ -1715,6 +1729,27 @@ internal sealed class AbiPlan
 
         inner = StripTopLevelQualifiers(arguments[0].Trim());
         return inner.Length > 0;
+    }
+
+    private static bool TryParseSharedPtr(string canonical, out string pointee)
+    {
+        pointee = "";
+        var text = NormalizeTypeName(canonical);
+        const string prefix = "std::shared_ptr<";
+        if (!text.StartsWith(prefix, StringComparison.Ordinal)
+            || !text.EndsWith(">", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var arguments = SplitTemplateArguments(text[prefix.Length..^1].Trim()).ToList();
+        if (arguments.Count != 1)
+        {
+            return false;
+        }
+
+        pointee = StripTopLevelQualifiers(arguments[0].Trim());
+        return pointee.Length > 0;
     }
 
     private static bool TryParseUniquePtr(string canonical, out string pointee)
