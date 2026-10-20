@@ -328,7 +328,7 @@ internal static class InteropEmitter
             types.Add("bool");
         }
 
-        if (function.ReturnOptional)
+        if (function.NeedsPresenceFlag)
         {
             types.Add("bool*");
         }
@@ -617,7 +617,7 @@ internal static class InteropEmitter
         callArguments.AddRange(BuildCallArgumentList(
             method.Parameters,
             stringIndex >= 0 ? "__hs_stringData" : null));
-        if (method.ReturnOptional)
+        if (method.NeedsPresenceFlag)
         {
             callArguments.Add("&__hs_hasValue");
         }
@@ -639,7 +639,7 @@ internal static class InteropEmitter
 
         lines.Add($"    public {modifier}{returnType} {name}({declarations})");
         lines.Add("    {");
-        if (method.ReturnOptional)
+        if (method.NeedsPresenceFlag)
         {
             lines.Add("        var __hs_hasValue = false;");
         }
@@ -657,6 +657,20 @@ internal static class InteropEmitter
 
     private static void EmitMethodBody(List<string> lines, AbiFunction method, string call, string indent)
     {
+        if (method.ReturnExpected)
+        {
+            if (method.ReturnKind == AbiKind.Void)
+            {
+                lines.Add(indent + $"{call};");
+                lines.Add(indent + "if (!__hs_hasValue) { throw new global::System.InvalidOperationException(NativeMethods.GetLastError() ?? \"Binding API call returned an error.\"); }");
+                return;
+            }
+
+            lines.Add(indent + $"var __hs_expectedResult = {call};");
+            lines.Add(indent + "if (!__hs_hasValue) { throw new global::System.InvalidOperationException(NativeMethods.GetLastError() ?? \"Binding API call returned an error.\"); }");
+            call = "__hs_expectedResult";
+        }
+
         switch (method.ReturnKind)
         {
             case AbiKind.Void:

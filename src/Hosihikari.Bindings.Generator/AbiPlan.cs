@@ -95,6 +95,9 @@ internal sealed class AbiFunction
     public AbiKind ArrayElementKind { get; init; }
     public string? ArrayElementType { get; init; }
     public bool ReturnNullable { get; init; }
+    public bool ReturnExpected { get; init; }
+    public string? ExpectedErrorType { get; init; }
+    public bool NeedsPresenceFlag => ReturnOptional || ReturnExpected;
     public List<AbiParameter> Parameters { get; init; } = [];
     public bool Static { get; init; }
 }
@@ -724,7 +727,7 @@ internal sealed class AbiPlan
             || string.Equals(normalized, "std::string_view", StringComparison.Ordinal);
     }
 
-    private static bool IsStringType(string canonical)
+    internal static bool IsStringType(string canonical)
     {
         if (StripTopLevelQualifiers(canonical).EndsWith("*", StringComparison.Ordinal))
         {
@@ -1385,6 +1388,8 @@ internal sealed class AbiPlan
                 out var arrayElementKind,
                 out var arrayElementType,
                 out var returnNullable,
+                out var returnExpected,
+                out var expectedErrorType,
                 out var returnReason))
         {
             reason = returnReason;
@@ -1454,6 +1459,8 @@ internal sealed class AbiPlan
             ArrayElementKind = arrayElementKind,
             ArrayElementType = arrayElementType,
             ReturnNullable = returnNullable,
+            ReturnExpected = returnExpected,
+            ExpectedErrorType = expectedErrorType,
             Parameters = parameters,
             Static = method.Static,
         };
@@ -1477,6 +1484,8 @@ internal sealed class AbiPlan
         out AbiKind arrayElementKind,
         out string? arrayElementType,
         out bool nullable,
+        out bool returnExpected,
+        out string? expectedErrorType,
         out string? reason)
     {
         kind = AbiKind.Void;
@@ -1489,11 +1498,70 @@ internal sealed class AbiPlan
         arrayElementKind = AbiKind.Void;
         arrayElementType = null;
         nullable = false;
+        returnExpected = false;
+        expectedErrorType = null;
         reason = null;
         if (nativeType.Length == 0)
         {
             reason = "the return type is empty";
             return false;
+        }
+
+        if (TryParseExpected(nativeType, out var expectedValueType, out var expectedError))
+        {
+            if (!IsStringType(expectedError) && !string.Equals(expectedError, "ll::Error", StringComparison.Ordinal))
+            {
+                reason = $"expected error type '{expectedError}' is not supported";
+                return false;
+            }
+
+            expectedErrorType = expectedError;
+            returnExpected = true;
+            if (string.Equals(expectedValueType, "void", StringComparison.Ordinal))
+            {
+                nativeType = "void";
+                return true;
+            }
+
+            if (TryParseOptional(expectedValueType, out _)
+                || TryParseOptionalRef(expectedValueType, out _))
+            {
+                reason = $"expected value type '{expectedValueType}' is not supported";
+                return false;
+            }
+
+            if (!TryMapReturnType(
+                    expectedValueType,
+                    declarationsByQualifiedName,
+                    declarationNames,
+                    destroyableDeclarationIds,
+                    enumUnderlyingByName,
+                    linkCarrier,
+                    out kind,
+                    out nativeType,
+                    out wrapperType,
+                    out owned,
+                    out uniquePtr,
+                    out optional,
+                    out array,
+                    out arrayElementKind,
+                    out arrayElementType,
+                    out nullable,
+                    out var nestedExpected,
+                    out _,
+                    out var expectedValueReason))
+            {
+                reason = $"expected value type '{expectedValueType}': {expectedValueReason}";
+                return false;
+            }
+
+            if (nestedExpected)
+            {
+                reason = $"expected value type '{expectedValueType}' is not supported";
+                return false;
+            }
+
+            return true;
         }
 
         if (IsStringViewType(nativeType) || IsStringType(nativeType))
@@ -1719,6 +1787,32 @@ internal sealed class AbiPlan
 
         element = StripTopLevelQualifiers(arguments[0].Trim());
         return element.Length > 0;
+    }
+
+    private static bool TryParseExpected(string canonical, out string valueType, out string errorType)
+    {
+        valueType = "";
+        errorType = "";
+        var text = NormalizeTypeName(canonical);
+        var prefix = text.StartsWith("nonstd::expected_lite::expected<", StringComparison.Ordinal)
+            ? "nonstd::expected_lite::expected<"
+            : text.StartsWith("nonstd::expected<", StringComparison.Ordinal)
+                ? "nonstd::expected<"
+                : null;
+        if (prefix is null || !text.EndsWith(">", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var arguments = SplitTemplateArguments(text[prefix.Length..^1].Trim()).ToList();
+        if (arguments.Count != 2)
+        {
+            return false;
+        }
+
+        valueType = StripTopLevelQualifiers(arguments[0].Trim());
+        errorType = StripTopLevelQualifiers(arguments[1].Trim());
+        return valueType.Length > 0 && errorType.Length > 0;
     }
 
     private static bool TryParseOptionalRef(string canonical, out string inner)

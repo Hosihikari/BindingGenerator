@@ -555,7 +555,7 @@ internal static class ShimEmitter
             parameters.Add("bool");
         }
 
-        if (function.ReturnOptional)
+        if (function.NeedsPresenceFlag)
         {
             parameters.Add("bool*");
         }
@@ -643,7 +643,7 @@ internal static class ShimEmitter
             }
         }
 
-        if (function.ReturnOptional)
+        if (function.NeedsPresenceFlag)
         {
             parameters.Add("bool* hs_hasValue");
         }
@@ -722,9 +722,29 @@ internal static class ShimEmitter
                     ? $"{function.ClassCppName}::{memberName}"
                     : $"static_cast<{function.ClassCppName}*>({SelfParameter})->{memberName}";
                 var call = $"{target}({string.Join(", ", BuildNativeArguments(function))})";
+                var expectedVoid = function.ReturnExpected && function.ReturnKind == AbiKind.Void;
+                if (function.ReturnExpected)
+                {
+                    yield return $"    auto hs_expected = {call};";
+                    yield return "    if (!hs_expected)";
+                    yield return "    {";
+                    yield return $"        setLastError({ExpectedErrorText(function)});";
+                    yield return "        *hs_hasValue = false;";
+                    yield return $"        {DefaultReturn(function.ReturnKind)}";
+                    yield return "    }";
+                    yield return "    *hs_hasValue = true;";
+                    if (!expectedVoid)
+                    {
+                        call = "std::move(*hs_expected)";
+                    }
+                }
+
                 if (function.ReturnKind == AbiKind.Void)
                 {
-                    yield return $"    {call};";
+                    if (!expectedVoid)
+                    {
+                        yield return $"    {call};";
+                    }
                 }
                 else if (function.ReturnKind == AbiKind.StringView)
                 {
@@ -832,7 +852,7 @@ internal static class ShimEmitter
         yield return "catch (std::exception const& hs_error)";
         yield return "{";
         yield return "    setLastError(hs_error.what());";
-        if (function.ReturnOptional)
+        if (function.NeedsPresenceFlag)
         {
             yield return "    if (hs_hasValue) { *hs_hasValue = false; }";
         }
@@ -842,7 +862,7 @@ internal static class ShimEmitter
         yield return "catch (...)";
         yield return "{";
         yield return "    setLastError(\"unknown native exception\");";
-        if (function.ReturnOptional)
+        if (function.NeedsPresenceFlag)
         {
             yield return "    if (hs_hasValue) { *hs_hasValue = false; }";
         }
@@ -850,6 +870,11 @@ internal static class ShimEmitter
         yield return "    " + DefaultReturn(function.ReturnKind);
         yield return "}";
     }
+
+    private static string ExpectedErrorText(AbiFunction function) =>
+        AbiPlan.IsStringType(function.ExpectedErrorType ?? "")
+            ? "hs_expected.error().c_str()"
+            : "hs_expected.error().message().c_str()";
 
     private static string DefaultReturn(AbiKind kind) => kind switch
     {
