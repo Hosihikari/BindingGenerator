@@ -174,6 +174,7 @@ internal static class ShimEmitter
             "#include <functional>",
             "#include <memory>",
             "#include <new>",
+            "#include <optional>",
             "#include <string>",
             "#include <string_view>",
         };
@@ -481,6 +482,11 @@ internal static class ShimEmitter
             }
         }
 
+        if (function.ReturnOptional)
+        {
+            parameters.Add("bool*");
+        }
+
         var parameterList = parameters.Count == 0 ? "void" : string.Join(", ", parameters);
         return $"{returnType} (*{function.TableField})({parameterList})";
     }
@@ -534,6 +540,11 @@ internal static class ShimEmitter
                     parameters.Add($"{AbiPlan.CppType(parameter.Kind)} {name}");
                     break;
             }
+        }
+
+        if (function.ReturnOptional)
+        {
+            parameters.Add("bool* hs_hasValue");
         }
 
         yield return $"static {returnType} {function.CppName}({string.Join(", ", parameters)}) try";
@@ -613,12 +624,28 @@ internal static class ShimEmitter
                 else if (function.ReturnKind == AbiKind.StringView)
                 {
                     yield return $"    auto result = {call};";
-                    yield return "    g_stringResult.assign(result.data(), result.size());";
+                    if (function.ReturnOptional)
+                    {
+                        yield return "    *hs_hasValue = result.has_value();";
+                        yield return "    g_stringResult.assign(result ? result->data() : \"\", result ? result->size() : 0);";
+                    }
+                    else
+                    {
+                        yield return "    g_stringResult.assign(result.data(), result.size());";
+                    }
+
                     yield return "    return HosihikariStringView{g_stringResult.data(), g_stringResult.size()};";
                 }
                 else if (function.ReturnKind == AbiKind.Opaque)
                 {
-                    if (function.ReturnUniquePtr)
+                    if (function.ReturnOptional && function.ReturnOwned)
+                    {
+                        yield return $"    auto result = {call};";
+                        yield return "    *hs_hasValue = result.has_value();";
+                        yield return "    if (!result) { return nullptr; }";
+                        yield return $"    return static_cast<void*>(new {function.NativeReturnType}(std::move(*result)));";
+                    }
+                    else if (function.ReturnUniquePtr)
                     {
                         yield return $"    auto hs_result = {call};";
                         yield return "    return static_cast<void*>(hs_result.release());";
@@ -635,6 +662,12 @@ internal static class ShimEmitter
                         yield return $"    return const_cast<void*>(static_cast<void const*>({address}));";
                     }
                 }
+                else if (function.ReturnOptional)
+                {
+                    yield return $"    auto result = {call};";
+                    yield return "    *hs_hasValue = result.has_value();";
+                    yield return $"    return result ? static_cast<{returnType}>(*result) : {returnType}{{}};";
+                }
                 else
                 {
                     yield return $"    return static_cast<{returnType}>({call});";
@@ -648,11 +681,21 @@ internal static class ShimEmitter
         yield return "catch (std::exception const& hs_error)";
         yield return "{";
         yield return "    setLastError(hs_error.what());";
+        if (function.ReturnOptional)
+        {
+            yield return "    if (hs_hasValue) { *hs_hasValue = false; }";
+        }
+
         yield return "    " + DefaultReturn(function.ReturnKind);
         yield return "}";
         yield return "catch (...)";
         yield return "{";
         yield return "    setLastError(\"unknown native exception\");";
+        if (function.ReturnOptional)
+        {
+            yield return "    if (hs_hasValue) { *hs_hasValue = false; }";
+        }
+
         yield return "    " + DefaultReturn(function.ReturnKind);
         yield return "}";
     }

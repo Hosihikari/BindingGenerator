@@ -255,6 +255,11 @@ internal static class InteropEmitter
             }
         }
 
+        if (function.ReturnOptional)
+        {
+            types.Add("bool*");
+        }
+
         types.Add(AbiPlan.CSharpTableType(function.ReturnKind));
         return "delegate* unmanaged[Cdecl]<" + string.Join(", ", types) + ">";
     }
@@ -537,18 +542,28 @@ internal static class InteropEmitter
         callArguments.AddRange(BuildCallArgumentList(
             method.Parameters,
             stringIndex >= 0 ? "__hs_stringData" : null));
+        if (method.ReturnOptional)
+        {
+            callArguments.Add("&__hs_hasValue");
+        }
+
         var call = $"NativeMethods.TablePtr->{method.TableField}({string.Join(", ", callArguments)})";
         var returnType = method.ReturnKind switch
         {
             AbiKind.Void => "void",
+            AbiKind.StringView => method.ReturnOptional ? "string?" : "string",
             AbiKind.Opaque => method.ReturnOwned && method.ReturnWrapperType is not null
                 ? method.ReturnWrapperType + (method.ReturnNullable ? "?" : "")
                 : "nint",
-            _ => AbiPlan.CSharpType(method.ReturnKind),
+            _ => AbiPlan.CSharpType(method.ReturnKind) + (method.ReturnOptional ? "?" : ""),
         };
 
         lines.Add($"    public {modifier}{returnType} {name}({declarations})");
         lines.Add("    {");
+        if (method.ReturnOptional)
+        {
+            lines.Add("        var __hs_hasValue = false;");
+        }
         if (stringIndex >= 0)
         {
             lines.Add($"        var __hs_stringBytes = global::System.Text.Encoding.UTF8.GetBytes({stringName});");
@@ -574,7 +589,17 @@ internal static class InteropEmitter
                 break;
             case AbiKind.StringView:
                 lines.Add(indent + $"var __hs_view = {call};");
-                lines.Add(indent + "return global::System.Text.Encoding.UTF8.GetString(__hs_view.Data, checked((int)__hs_view.Size));");
+                if (method.ReturnOptional)
+                {
+                    lines.Add(indent + "return __hs_hasValue"
+                        + " ? global::System.Text.Encoding.UTF8.GetString(__hs_view.Data, checked((int)__hs_view.Size))"
+                        + " : null;");
+                }
+                else
+                {
+                    lines.Add(indent + "return global::System.Text.Encoding.UTF8.GetString(__hs_view.Data, checked((int)__hs_view.Size));");
+                }
+
                 break;
             case AbiKind.Opaque:
                 if (method.ReturnOwned && method.ReturnWrapperType is not null)
@@ -582,7 +607,10 @@ internal static class InteropEmitter
                     if (method.ReturnNullable)
                     {
                         lines.Add(indent + $"var __hs_handle = {call};");
-                        lines.Add(indent + $"return __hs_handle == null ? null : new {method.ReturnWrapperType}((nint)__hs_handle);");
+                        var condition = method.ReturnOptional
+                            ? "__hs_hasValue && __hs_handle != null"
+                            : "__hs_handle != null";
+                        lines.Add(indent + $"return {condition} ? new {method.ReturnWrapperType}((nint)__hs_handle) : null;");
                     }
                     else
                     {
@@ -596,7 +624,16 @@ internal static class InteropEmitter
 
                 break;
             default:
-                lines.Add(indent + $"return {call};");
+                if (method.ReturnOptional)
+                {
+                    lines.Add(indent + $"var __hs_value = {call};");
+                    lines.Add(indent + $"return __hs_hasValue ? __hs_value : ({AbiPlan.CSharpType(method.ReturnKind)}?)null;");
+                }
+                else
+                {
+                    lines.Add(indent + $"return {call};");
+                }
+
                 break;
         }
     }

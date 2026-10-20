@@ -80,6 +80,7 @@ internal sealed class AbiFunction
     public string? ReturnWrapperType { get; init; }
     public bool ReturnOwned { get; init; }
     public bool ReturnUniquePtr { get; init; }
+    public bool ReturnOptional { get; init; }
     public bool ReturnNullable { get; init; }
     public List<AbiParameter> Parameters { get; init; } = [];
     public bool Static { get; init; }
@@ -1346,6 +1347,7 @@ internal sealed class AbiPlan
                 out var returnWrapperType,
                 out var returnOwned,
                 out var returnUniquePtr,
+                out var returnOptional,
                 out var returnNullable,
                 out var returnReason))
         {
@@ -1400,6 +1402,7 @@ internal sealed class AbiPlan
             ReturnWrapperType = returnWrapperType,
             ReturnOwned = returnOwned,
             ReturnUniquePtr = returnUniquePtr,
+            ReturnOptional = returnOptional,
             ReturnNullable = returnNullable,
             Parameters = parameters,
             Static = method.Static,
@@ -1419,6 +1422,7 @@ internal sealed class AbiPlan
         out string? wrapperType,
         out bool owned,
         out bool uniquePtr,
+        out bool optional,
         out bool nullable,
         out string? reason)
     {
@@ -1427,6 +1431,7 @@ internal sealed class AbiPlan
         wrapperType = null;
         owned = false;
         uniquePtr = false;
+        optional = false;
         nullable = false;
         reason = null;
         if (nativeType.Length == 0)
@@ -1454,6 +1459,60 @@ internal sealed class AbiPlan
         if (IsPointerOrReferenceType(nativeType))
         {
             kind = AbiKind.Opaque;
+            return true;
+        }
+
+        if (TryParseOptional(nativeType, out var optionalInner))
+        {
+            if (IsStringViewType(optionalInner) || IsStringType(optionalInner))
+            {
+                kind = AbiKind.StringView;
+                nativeType = optionalInner;
+                optional = true;
+                nullable = true;
+                return true;
+            }
+
+            if (TryMapEnumUnderlying(optionalInner, enumUnderlyingByName, out kind)
+                || TryMapFundamental(optionalInner, out kind))
+            {
+                nativeType = optionalInner;
+                optional = true;
+                nullable = true;
+                return true;
+            }
+
+            if (!linkCarrier || !IsByValueRecordType(optionalInner))
+            {
+                reason = $"optional return type '{optionalInner}' is not supported";
+                return false;
+            }
+
+            if (!declarationsByQualifiedName.TryGetValue(optionalInner, out var optionalDeclaration))
+            {
+                reason = $"optional return type '{optionalInner}' is not a known bindable declaration";
+                return false;
+            }
+
+            if (optionalDeclaration.Abstract
+                || !destroyableDeclarationIds.Contains(optionalDeclaration.Id))
+            {
+                reason = $"optional return type '{optionalInner}' has no accessible destructor";
+                return false;
+            }
+
+            if (!declarationNames.TryGetValue(optionalDeclaration.Id, out var optionalName))
+            {
+                reason = $"optional return type '{optionalInner}' has no generated wrapper";
+                return false;
+            }
+
+            kind = AbiKind.Opaque;
+            nativeType = optionalInner;
+            wrapperType = "global::" + optionalName.NamespaceName + "." + optionalName.ClassName;
+            owned = true;
+            optional = true;
+            nullable = true;
             return true;
         }
 
@@ -1530,6 +1589,27 @@ internal sealed class AbiPlan
         wrapperType = "global::" + resultName.NamespaceName + "." + resultName.ClassName;
         owned = true;
         return true;
+    }
+
+    private static bool TryParseOptional(string canonical, out string inner)
+    {
+        inner = "";
+        var text = NormalizeTypeName(canonical);
+        const string prefix = "std::optional<";
+        if (!text.StartsWith(prefix, StringComparison.Ordinal)
+            || !text.EndsWith(">", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var arguments = SplitTemplateArguments(text[prefix.Length..^1].Trim()).ToList();
+        if (arguments.Count != 1)
+        {
+            return false;
+        }
+
+        inner = StripTopLevelQualifiers(arguments[0].Trim());
+        return inner.Length > 0;
     }
 
     private static bool TryParseUniquePtr(string canonical, out string pointee)
