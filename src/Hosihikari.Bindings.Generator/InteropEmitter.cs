@@ -11,6 +11,7 @@ internal static class InteropEmitter
     {
         var declarations = records.OfType<DeclarationRecord>()
             .Where(declaration => declaration.Kind is "class" or "struct" or "union")
+            .Where(declaration => declaration.Access == "public")
             .OrderBy(declaration => declaration.Id, StringComparer.Ordinal)
             .ToList();
 
