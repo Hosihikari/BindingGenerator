@@ -42,6 +42,8 @@ internal sealed class AbiParameter
     public bool IsReference { get; init; }
     public bool IsRValueReference { get; init; }
     public bool IsConst { get; init; }
+    public bool IsOptional { get; init; }
+    public string? OptionalInnerType { get; init; }
     public string? WrapperType { get; init; }
     public AbiCallback? Callback { get; init; }
 }
@@ -1776,10 +1778,10 @@ internal sealed class AbiPlan
             return true;
         }
 
-        if (valueParameter.Kind == AbiKind.Callback)
+        if (valueParameter.Kind == AbiKind.Callback || valueParameter.IsOptional)
         {
-            // Callback fields are readable as opaque views; a triple-pointer setter would not
-            // map to a native std::function assignment.
+            // Callback and optional fields are readable as opaque views; a setter would need
+            // the hidden presence flag to be threaded through the field ABI.
             return true;
         }
 
@@ -1830,6 +1832,62 @@ internal sealed class AbiPlan
         }
 
         var text = canonical.Trim();
+        if (TryParseOptional(text, out var optionalInner))
+        {
+            if (IsStringViewType(optionalInner) || IsStringType(optionalInner))
+            {
+                parameter = new AbiParameter
+                {
+                    Name = name,
+                    Kind = AbiKind.StringView,
+                    NativeType = optionalInner,
+                    IsOptional = true,
+                    OptionalInnerType = optionalInner,
+                };
+                return true;
+            }
+
+            if (TryMapEnumUnderlying(optionalInner, enumUnderlyingByName, out var optionalKind)
+                || TryMapFundamental(optionalInner, out optionalKind))
+            {
+                parameter = new AbiParameter
+                {
+                    Name = name,
+                    Kind = optionalKind,
+                    NativeType = optionalInner,
+                    IsOptional = true,
+                    OptionalInnerType = optionalInner,
+                };
+                return true;
+            }
+
+            if (!IsByValueRecordType(optionalInner))
+            {
+                reason = $"optional parameter type '{optionalInner}' is not supported";
+                return false;
+            }
+
+            if (!declarationsByQualifiedName.TryGetValue(optionalInner, out var optionalDeclaration)
+                || optionalDeclaration.Abstract
+                || !optionalDeclaration.CopyConstructible)
+            {
+                reason = $"optional record parameter '{optionalInner}' is abstract or not copy-constructible";
+                return false;
+            }
+
+            parameter = new AbiParameter
+            {
+                Name = name,
+                Kind = AbiKind.Opaque,
+                NativeType = optionalInner,
+                NativePointee = optionalInner,
+                IsOptional = true,
+                OptionalInnerType = optionalInner,
+                WrapperType = LookupWrapperType(optionalInner, declarationsByQualifiedName, declarationNames),
+            };
+            return true;
+        }
+
         if (IsStringViewType(text) || IsStringType(text))
         {
             parameter = new AbiParameter

@@ -488,6 +488,11 @@ internal static class ShimEmitter
             }
         }
 
+        foreach (var parameter in function.Parameters.Where(parameter => parameter.IsOptional))
+        {
+            parameters.Add("bool");
+        }
+
         if (function.ReturnOptional)
         {
             parameters.Add("bool*");
@@ -545,6 +550,15 @@ internal static class ShimEmitter
                 default:
                     parameters.Add($"{AbiPlan.CppType(parameter.Kind)} {name}");
                     break;
+            }
+        }
+
+        for (var index = 0; index < function.Parameters.Count; index++)
+        {
+            var parameter = function.Parameters[index];
+            if (parameter.IsOptional)
+            {
+                parameters.Add($"bool {CppParameterName(parameter, index)}_hasValue");
             }
         }
 
@@ -768,6 +782,25 @@ internal static class ShimEmitter
         string? nameOverride = null)
     {
         var name = nameOverride ?? CppParameterName(parameter, index);
+        if (parameter.IsOptional)
+        {
+            var inner = parameter.OptionalInnerType ?? parameter.NativeType;
+            if (parameter.Kind == AbiKind.StringView)
+            {
+                var stringType = AbiPlan.IsStringViewType(inner)
+                    ? "std::basic_string_view<char>"
+                    : "std::basic_string<char>";
+                return $"({name}_hasValue ? std::optional<{inner}>{{{stringType}({name}_data, {name}_size)}} : std::nullopt)";
+            }
+
+            if (parameter.Kind == AbiKind.Opaque)
+            {
+                return $"({name}_hasValue ? std::optional<{inner}>{{*static_cast<const {inner}*>({name})}} : std::nullopt)";
+            }
+
+            return $"({name}_hasValue ? std::optional<{inner}>{{static_cast<{inner}>({name})}} : std::nullopt)";
+        }
+
         switch (parameter.Kind)
         {
             case AbiKind.StringView:

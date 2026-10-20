@@ -262,6 +262,11 @@ internal static class InteropEmitter
             }
         }
 
+        foreach (var parameter in function.Parameters.Where(parameter => parameter.IsOptional))
+        {
+            types.Add("bool");
+        }
+
         if (function.ReturnOptional)
         {
             types.Add("bool*");
@@ -321,9 +326,11 @@ internal static class InteropEmitter
     }
 
     private static string ParameterKey(AbiParameter parameter) =>
-        parameter.Kind == AbiKind.Callback
-            ? "callback:" + parameter.Callback!.NativeType
-            : AbiPlan.CSharpParameterType(parameter);
+        parameter.IsOptional
+            ? "optional:" + parameter.OptionalInnerType
+            : parameter.Kind == AbiKind.Callback
+                ? "callback:" + parameter.Callback!.NativeType
+                : AbiPlan.CSharpParameterType(parameter);
 
     private static string MemberBaseName(MemberRecord member) => member.Kind switch
     {
@@ -505,7 +512,10 @@ internal static class InteropEmitter
         lines.Add("    {");
         if (stringIndex >= 0)
         {
-            lines.Add($"        var __hs_stringBytes = global::System.Text.Encoding.UTF8.GetBytes({stringName});");
+            var stringExpression = stringIndex >= 0 && create.Parameters[stringIndex].IsOptional
+                ? $"{stringName} ?? string.Empty"
+                : stringName!;
+            lines.Add($"        var __hs_stringBytes = global::System.Text.Encoding.UTF8.GetBytes({stringExpression});");
             lines.Add("        fixed (byte* __hs_stringData = __hs_stringBytes)");
             lines.Add("        {");
             lines.Add($"            var handle = NativeMethods.TablePtr->{create.TableField}({arguments});");
@@ -576,7 +586,10 @@ internal static class InteropEmitter
         }
         if (stringIndex >= 0)
         {
-            lines.Add($"        var __hs_stringBytes = global::System.Text.Encoding.UTF8.GetBytes({stringName});");
+            var stringExpression = stringIndex >= 0 && method.Parameters[stringIndex].IsOptional
+                ? $"{stringName} ?? string.Empty"
+                : stringName!;
+            lines.Add($"        var __hs_stringBytes = global::System.Text.Encoding.UTF8.GetBytes({stringExpression});");
             lines.Add("        fixed (byte* __hs_stringData = __hs_stringBytes)");
             lines.Add("        {");
             EmitMethodBody(lines, method, call, "            ");
@@ -700,7 +713,15 @@ internal static class InteropEmitter
                 continue;
             }
 
-            declarations.Add($"{AbiPlan.CSharpParameterType(parameter)} {CSharpParameterName(parameter, index)}");
+            var type = parameter.IsOptional
+                ? parameter.Kind switch
+                {
+                    AbiKind.StringView => "string?",
+                    AbiKind.Opaque => (parameter.WrapperType ?? "nint") + "?",
+                    _ => AbiPlan.CSharpType(parameter.Kind) + "?",
+                }
+                : AbiPlan.CSharpParameterType(parameter);
+            declarations.Add($"{type} {CSharpParameterName(parameter, index)}");
         }
 
         return string.Join(", ", declarations);
@@ -731,10 +752,21 @@ internal static class InteropEmitter
         IReadOnlyList<AbiParameter> parameters,
         string? stringDataName)
     {
+        var optionalPresence = new List<string>();
         for (var index = 0; index < parameters.Count; index++)
         {
             var parameter = parameters[index];
             var name = CSharpParameterName(parameter, index);
+            if (parameter.IsOptional)
+            {
+                optionalPresence.Add(parameter.Kind switch
+                {
+                    AbiKind.StringView => $"{name} is not null",
+                    AbiKind.Opaque => $"{name} is not null",
+                    _ => $"{name}.HasValue",
+                });
+            }
+
             switch (parameter.Kind)
             {
                 case AbiKind.StringView:
@@ -742,9 +774,19 @@ internal static class InteropEmitter
                     yield return "(nuint)__hs_stringBytes.Length";
                     break;
                 case AbiKind.Opaque:
-                    yield return parameter.WrapperType is not null
-                        ? $"(void*){name}.Handle"
-                        : $"(void*){name}";
+                    if (parameter.IsOptional)
+                    {
+                        yield return parameter.WrapperType is not null
+                            ? $"(void*)({name}?.Handle ?? 0)"
+                            : $"(void*)({name} ?? 0)";
+                    }
+                    else
+                    {
+                        yield return parameter.WrapperType is not null
+                            ? $"(void*){name}.Handle"
+                            : $"(void*){name}";
+                    }
+
                     break;
                 case AbiKind.Callback:
                 {
@@ -755,9 +797,16 @@ internal static class InteropEmitter
                     break;
                 }
                 default:
-                    yield return name;
+                    yield return parameter.IsOptional
+                        ? $"{name} ?? default({AbiPlan.CSharpType(parameter.Kind)})"
+                        : name;
                     break;
             }
+        }
+
+        foreach (var presence in optionalPresence)
+        {
+            yield return presence;
         }
     }
 
