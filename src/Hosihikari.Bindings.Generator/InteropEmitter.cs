@@ -115,28 +115,6 @@ internal static class InteropEmitter
                 "public static unsafe class NativeMethods",
                 "{",
                 "    [global::System.Runtime.InteropServices.StructLayout(global::System.Runtime.InteropServices.LayoutKind.Sequential)]",
-                "    internal struct StringView",
-                "    {",
-                "        public byte* Data;",
-                "        public nuint Size;",
-                "    }",
-                "",
-                "    [global::System.Runtime.InteropServices.StructLayout(global::System.Runtime.InteropServices.LayoutKind.Sequential)]",
-                "    internal struct ArrayView",
-                "    {",
-                "        public void* Data;",
-                "        public nuint Size;",
-                "    }",
-                "",
-                "    [global::System.Runtime.InteropServices.StructLayout(global::System.Runtime.InteropServices.LayoutKind.Sequential)]",
-                "    internal struct SharedHandle",
-                "    {",
-                "        public void* Holder;",
-                "        public void* Target;",
-                "        public delegate* unmanaged[Cdecl]<void*, void> Release;",
-                "    }",
-                "",
-                "    [global::System.Runtime.InteropServices.StructLayout(global::System.Runtime.InteropServices.LayoutKind.Sequential)]",
                 "    internal struct Table",
                 "    {",
                 "        public uint Version;",
@@ -152,64 +130,38 @@ internal static class InteropEmitter
             [
                 "    }",
                 "",
-                "    private static Table* s_table;",
-                "    private static delegate* unmanaged[Cdecl]<byte*> s_getLastError;",
+                "    private static global::Hosihikari.Bindings.Abi.ShimLibrary? s_library;",
                 "",
-                "    public static string? GetLastError()",
-                "    {",
-                "        if (s_getLastError == null)",
-                "        {",
-                "            return null;",
-                "        }",
-                "",
-                "        var pointer = s_getLastError();",
-                "        return pointer == null ? null : global::System.Runtime.InteropServices.Marshal.PtrToStringUTF8((nint)pointer);",
-                "    }",
+                "    public static string? GetLastError() => s_library?.GetLastError();",
                 "",
                 "    internal static Table* TablePtr",
                 "    {",
                 "        get",
                 "        {",
-                "            if (s_table == null)",
+                "            if (s_library is null)",
                 "            {",
                 "                throw new global::System.InvalidOperationException(\"BindingShim is not loaded. Call NativeMethods.Load(path) first.\");",
                 "            }",
                 "",
-                "            return s_table;",
+                "            return (Table*)s_library.Table;",
                 "        }",
                 "    }",
                 "",
                 "    public static void Load(string nativeLibraryPath)",
                 "    {",
-                "        var library = global::System.Runtime.InteropServices.NativeLibrary.Load(nativeLibraryPath);",
-                "        var export = global::System.Runtime.InteropServices.NativeLibrary.GetExport(library, \"hosihikari_get_binding_table_v1\");",
-                "        var errorExport = global::System.Runtime.InteropServices.NativeLibrary.GetExport(library, \"hosihikari_get_last_error\");",
-                "        s_getLastError = (delegate* unmanaged[Cdecl]<byte*>)errorExport.ToPointer();",
-                "        var getTable = (delegate* unmanaged[Cdecl]<Table*>)export.ToPointer();",
-                "        var table = getTable();",
-                "        if (table->Version != 1)",
-                "        {",
-                "            throw new global::System.InvalidOperationException($\"Unsupported BindingShim table version {table->Version}.\");",
-                "        }",
-                "",
-                "        if (table->Size != (uint)sizeof(Table))",
-                "        {",
-                "            throw new global::System.InvalidOperationException($\"BindingShim table size mismatch: native {table->Size}, managed {sizeof(Table)}.\");",
-                "        }",
-                "",
-                "        s_table = table;",
+                "        s_library = global::Hosihikari.Bindings.Abi.ShimLibrary.Load(nativeLibraryPath, 1, (uint)sizeof(Table));",
                 "    }",
                 "}",
             ]);
 
             if (string.Equals(surface, "endstone", StringComparison.Ordinal))
             {
-                var loadIndex = lines.FindIndex(line => line.Trim() == "s_table = table;");
+                var loadIndex = lines.FindIndex(line => line.Contains("s_library = ", StringComparison.Ordinal));
                 if (loadIndex >= 0)
                 {
                     lines.Insert(
-                        loadIndex,
-                        "        s_getServer = (delegate* unmanaged[Cdecl]<void*>)global::System.Runtime.InteropServices.NativeLibrary.GetExport(library, \"hosihikari_endstone_get_server\").ToPointer();");
+                        loadIndex + 1,
+                        "        s_getServer = (delegate* unmanaged[Cdecl]<void*>)s_library.GetExport(\"hosihikari_endstone_get_server\");");
                 }
 
                 lines.InsertRange(lines.Count - 1,
@@ -238,46 +190,6 @@ internal static class InteropEmitter
             var path = Path.Combine(outputDirectory, "interop", surface, "NativeMethods.g.cs");
             Directory.CreateDirectory(Path.GetDirectoryName(path)!);
             File.WriteAllText(path, string.Join("\n", lines) + "\n", new UTF8Encoding(false));
-
-            var sharedLines = new List<string>
-            {
-                "// <auto-generated/>",
-                "#nullable enable",
-                "",
-                $"namespace {namespaceName};",
-                "",
-                "public sealed unsafe class SharedHandle : global::System.IDisposable",
-                "{",
-                "    private nint _holder;",
-                "    private delegate* unmanaged[Cdecl]<void*, void> _release;",
-                "",
-                "    internal SharedHandle(nint holder, nint target, delegate* unmanaged[Cdecl]<void*, void> release)",
-                "    {",
-                "        _holder = holder;",
-                "        _release = release;",
-                "        Target = target;",
-                "    }",
-                "",
-                "    public nint Target { get; }",
-                "",
-                "    public nint Handle => Target;",
-                "",
-                "    public bool IsDisposed => _holder == 0;",
-                "",
-                "    public void Dispose()",
-                "    {",
-                "        if (_holder != 0)",
-                "        {",
-                "            _release((void*)_holder);",
-                "            _holder = 0;",
-                "        }",
-                "    }",
-                "}",
-            };
-            File.WriteAllText(
-                Path.Combine(outputDirectory, "interop", surface, "SharedHandle.g.cs"),
-                string.Join("\n", sharedLines) + "\n",
-                new UTF8Encoding(false));
         }
     }
 
@@ -462,7 +374,7 @@ internal static class InteropEmitter
         foreach (var parameter in function.Parameters.Where(parameter => parameter.IsVector))
         {
             types.Add(parameter.VectorElementKind == AbiKind.StringView
-                ? "NativeMethods.StringView*"
+                ? "global::Hosihikari.Bindings.Abi.StringView*"
                 : AbiPlan.CSharpType(parameter.VectorElementKind) + "*");
             types.Add("nuint");
         }
@@ -777,7 +689,7 @@ internal static class InteropEmitter
             AbiKind.ArrayView => method.ArrayElementKind == AbiKind.StringView
                 ? "string[]"
                 : AbiPlan.CSharpType(method.ArrayElementKind) + "[]",
-            AbiKind.Shared => $"global::Hosihikari.Bindings.{TypeNames.SurfaceNamespace(method.Surface)}.Interop.SharedHandle?",
+            AbiKind.Shared => "global::Hosihikari.Bindings.Abi.SharedHandle?",
             _ => AbiPlan.CSharpType(method.ReturnKind) + (method.ReturnOptional ? "?" : ""),
         };
 
@@ -838,7 +750,7 @@ internal static class InteropEmitter
                 lines.Add(indent + $"var __hs_view = {call};");
                 if (method.ArrayElementKind == AbiKind.StringView)
                 {
-                    lines.Add(indent + "var __hs_items = (NativeMethods.StringView*)__hs_view.Data;");
+                    lines.Add(indent + "var __hs_items = (global::Hosihikari.Bindings.Abi.StringView*)__hs_view.Data;");
                     lines.Add(indent + "var __hs_result = new string[checked((int)__hs_view.Size)];");
                     lines.Add(indent + "for (var __hs_i = 0; __hs_i < __hs_result.Length; __hs_i++)");
                     lines.Add(indent + "{");
@@ -860,7 +772,7 @@ internal static class InteropEmitter
                 break;
             case AbiKind.Shared:
                 lines.Add(indent + $"var __hs_shared = {call};");
-                lines.Add(indent + $"return __hs_shared.Holder == null ? null : new global::Hosihikari.Bindings.{TypeNames.SurfaceNamespace(method.Surface)}.Interop.SharedHandle((nint)__hs_shared.Holder, (nint)__hs_shared.Target, __hs_shared.Release);");
+                lines.Add(indent + "return global::Hosihikari.Bindings.Abi.SharedHandle.FromNative(__hs_shared);");
                 break;
             case AbiKind.Opaque:
                 if (method.ReturnOwned && method.ReturnWrapperType is not null)
@@ -1078,7 +990,7 @@ internal static class InteropEmitter
             {
                 lines.Add(indent + $"var __hs_vectorItems = {vectorName} ?? global::System.Array.Empty<string>();");
                 lines.Add(indent + "var __hs_vectorBytes = new byte[__hs_vectorItems.Length][];");
-                lines.Add(indent + "var __hs_vectorViews = new NativeMethods.StringView[__hs_vectorItems.Length];");
+                lines.Add(indent + "var __hs_vectorViews = new global::Hosihikari.Bindings.Abi.StringView[__hs_vectorItems.Length];");
                 lines.Add(indent + "var __hs_vectorHandles = new nint[__hs_vectorItems.Length];");
                 lines.Add(indent + "try");
                 lines.Add(indent + "{");
@@ -1090,9 +1002,9 @@ internal static class InteropEmitter
                 lines.Add(inner + "    var __hs_ptr = (nint)global::System.Runtime.InteropServices.Marshal.AllocHGlobal(__hs_bytes.Length == 0 ? 1 : __hs_bytes.Length);");
                 lines.Add(inner + "    if (__hs_bytes.Length > 0) { global::System.Runtime.InteropServices.Marshal.Copy(__hs_bytes, 0, (nint)__hs_ptr, __hs_bytes.Length); }");
                 lines.Add(inner + "    __hs_vectorHandles[__hs_i] = __hs_ptr;");
-                lines.Add(inner + "    __hs_vectorViews[__hs_i] = new NativeMethods.StringView { Data = (byte*)__hs_ptr, Size = (nuint)__hs_bytes.Length };");
+                lines.Add(inner + "    __hs_vectorViews[__hs_i] = new global::Hosihikari.Bindings.Abi.StringView { Data = (byte*)__hs_ptr, Size = (nuint)__hs_bytes.Length };");
                 lines.Add(inner + "}");
-                lines.Add(inner + "fixed (NativeMethods.StringView* __hs_vectorData = __hs_vectorViews)");
+                lines.Add(inner + "fixed (global::Hosihikari.Bindings.Abi.StringView* __hs_vectorData = __hs_vectorViews)");
                 lines.Add(inner + "{");
                 EmitStringAndBody(lines, parameters, stringIndex, stringName, inner + "    ", emitBody);
                 lines.Add(inner + "}");

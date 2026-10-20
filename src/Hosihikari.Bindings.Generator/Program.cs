@@ -39,11 +39,12 @@ switch (args[0])
         if (args.Length < 4)
         {
             Console.Error.WriteLine(
-                "usage: emit <ir-manifest.json> <shard-directory> <output-directory> [--native-root <path>] [--link-carrier] [--ll-allocator] [--virtual-dispatch]");
+                "usage: emit <ir-manifest.json> <shard-directory> <output-directory> --abi-header <path> [--native-root <path>] [--link-carrier] [--ll-allocator] [--virtual-dispatch]");
             return 2;
         }
 
         string? nativeRoot = null;
+        string? abiHeader = null;
         var linkCarrier = false;
         var llAllocator = false;
         var virtualDispatch = false;
@@ -53,6 +54,9 @@ switch (args[0])
             {
                 case "--native-root" when index + 1 < args.Length:
                     nativeRoot = Path.GetFullPath(args[++index]);
+                    break;
+                case "--abi-header" when index + 1 < args.Length:
+                    abiHeader = Path.GetFullPath(args[++index]);
                     break;
                 case "--link-carrier":
                     linkCarrier = true;
@@ -67,6 +71,12 @@ switch (args[0])
                     Console.Error.WriteLine($"unknown option: {args[index]}");
                     return 2;
             }
+        }
+
+        if (abiHeader is null || !File.Exists(abiHeader))
+        {
+            Console.Error.WriteLine("--abi-header must point to an existing hosihikari_abi.h.");
+            return 2;
         }
 
         if (linkCarrier && nativeRoot is null)
@@ -106,7 +116,7 @@ switch (args[0])
 
         Directory.CreateDirectory(output);
         InteropEmitter.Emit(records, output, plan);
-        ShimEmitter.Emit(manifest, records, output, manifestHash, plan);
+        ShimEmitter.Emit(manifest, records, output, manifestHash, plan, abiHeader);
         CoverageEmitter.Emit(manifest, records, output, manifestHash, plan);
         Console.WriteLine(
             $"emitted {records.Count} records to {output} ({plan.Functions.Count} BindingShim functions)");
@@ -204,7 +214,7 @@ static void PrintHelp()
           version
           validate-ir <ir-manifest.json> <shard-directory>
           validate-coverage <coverage-summary.json> <coverage-manifest.jsonl>
-          emit <ir-manifest.json> <shard-directory> <output-directory>
+          emit <ir-manifest.json> <shard-directory> <output-directory> --abi-header <path>
         """
     );
 }

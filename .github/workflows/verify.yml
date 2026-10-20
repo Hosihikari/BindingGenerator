@@ -20,6 +20,12 @@ jobs:
           repository: Hosihikari/Bindings.Ir
           path: Ir
 
+      - name: ABI contract
+        uses: actions/checkout@v4
+        with:
+          repository: Hosihikari/Bindings.Abi
+          path: Abi
+
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '10.0.x'
@@ -34,7 +40,7 @@ jobs:
 
       - name: Emit fixture
         working-directory: Generator
-        run: dotnet run --project src/Hosihikari.Bindings.Generator/Hosihikari.Bindings.Generator.csproj -c Release -- emit tests/fixtures/basic/ir-manifest.json tests/fixtures/basic artifacts/emitted
+        run: dotnet run --project src/Hosihikari.Bindings.Generator/Hosihikari.Bindings.Generator.csproj -c Release -- emit tests/fixtures/basic/ir-manifest.json tests/fixtures/basic artifacts/emitted --abi-header ../Abi/native/hosihikari_abi.h
 
       - name: Validate emitted coverage
         working-directory: Generator
@@ -50,7 +56,7 @@ jobs:
 
       - name: Emit real-shim fixture
         working-directory: Generator
-        run: dotnet run --project src/Hosihikari.Bindings.Generator/Hosihikari.Bindings.Generator.csproj -c Release -- emit tests/fixtures/real-shim/ir-manifest.json tests/fixtures/real-shim artifacts/emitted-real --native-root tests/fixtures/real-shim/native
+        run: dotnet run --project src/Hosihikari.Bindings.Generator/Hosihikari.Bindings.Generator.csproj -c Release -- emit tests/fixtures/real-shim/ir-manifest.json tests/fixtures/real-shim artifacts/emitted-real --abi-header ../Abi/native/hosihikari_abi.h --native-root tests/fixtures/real-shim/native
 
       - name: Compile real BindingShim
         working-directory: Generator
@@ -62,7 +68,7 @@ jobs:
 
       - name: Emit link-carrier fixture
         working-directory: Generator
-        run: dotnet run --project src/Hosihikari.Bindings.Generator/Hosihikari.Bindings.Generator.csproj -c Release -- emit tests/fixtures/real-shim/ir-manifest.json tests/fixtures/real-shim artifacts/emitted-linked --native-root tests/fixtures/real-shim/native --link-carrier
+        run: dotnet run --project src/Hosihikari.Bindings.Generator/Hosihikari.Bindings.Generator.csproj -c Release -- emit tests/fixtures/real-shim/ir-manifest.json tests/fixtures/real-shim artifacts/emitted-linked --abi-header ../Abi/native/hosihikari_abi.h --native-root tests/fixtures/real-shim/native --link-carrier
 
       - name: Link carrier BindingShim
         working-directory: Generator

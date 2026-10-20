@@ -6,6 +6,7 @@ param(
     [string]$LeviLaminaRoot = "C:\Users\root\source\repos\hosihikari\LeviLamina",
     [switch]$LinkCarrier,
     [string]$CarrierImportLibrary = "",
+    [string]$AbiRoot = "",
     [string[]]$AdditionalLinkLibrary = @(),
     [switch]$SkipRun
 )
@@ -20,7 +21,17 @@ if (-not (Test-Path $Manifest)) {
     throw "ir-manifest.json was not found under $IrDirectory."
 }
 
-$EmitArgs = @("--native-root", $LeviLaminaRoot)
+$AbiRoot = if ([string]::IsNullOrWhiteSpace($AbiRoot)) {
+    Join-Path (Split-Path $GeneratorRoot -Parent) "Abi"
+} else {
+    (Resolve-Path $AbiRoot).Path
+}
+$AbiHeader = Join-Path $AbiRoot "native\hosihikari_abi.h"
+if (-not (Test-Path $AbiHeader)) {
+    throw "hosihikari_abi.h was not found under $AbiRoot."
+}
+
+$EmitArgs = @("--native-root", $LeviLaminaRoot, "--abi-header", $AbiHeader)
 if ($LinkCarrier) {
     $EmitArgs += "--link-carrier"
     $EmitArgs += "--ll-allocator"

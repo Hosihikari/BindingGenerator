@@ -26,7 +26,7 @@ The generator turns the versioned IR into the C ABI **BindingShim** and the nati
 ```shell
 dotnet run --project src/Hosihikari.Bindings.Generator/Hosihikari.Bindings.Generator.csproj -c Release -- version
 dotnet run --project src/Hosihikari.Bindings.Generator/Hosihikari.Bindings.Generator.csproj -c Release -- validate-ir tests/fixtures/basic/ir-manifest.json tests/fixtures/basic
-dotnet run --project src/Hosihikari.Bindings.Generator/Hosihikari.Bindings.Generator.csproj -c Release -- emit tests/fixtures/basic/ir-manifest.json tests/fixtures/basic artifacts/emitted
+dotnet run --project src/Hosihikari.Bindings.Generator/Hosihikari.Bindings.Generator.csproj -c Release -- emit tests/fixtures/basic/ir-manifest.json tests/fixtures/basic artifacts/emitted --abi-header ../Abi/native/hosihikari_abi.h
 ```
 
 `validate-ir` reads the manifest and every `*.jsonl` under the shard directory, then runs the IR validator. `validate-coverage` does the same for `coverage/summary.json` + `coverage/manifest.jsonl`.
@@ -36,8 +36,10 @@ dotnet run --project src/Hosihikari.Bindings.Generator/Hosihikari.Bindings.Gener
 ```shell
 dotnet run --project src/Hosihikari.Bindings.Generator/Hosihikari.Bindings.Generator.csproj -c Release -- emit \
   artifacts/llapi-full-ir/ir-manifest.json artifacts/llapi-full-ir artifacts/llapi-real-shim \
-  --native-root C:/path/to/LeviLamina
+  --native-root C:/path/to/LeviLamina --abi-header ../Abi/native/hosihikari_abi.h
 ```
+
+`--abi-header` points at `Hosihikari/Bindings.Abi`'s `native/hosihikari_abi.h`; the emitter copies it into every shim directory so the shim build stays self-contained. Generated C# references `Hosihikari.Bindings.Abi` for `StringView`, `ArrayView`, `SharedHandle`, and the version-checking `ShimLibrary` loader.
 
 Without `--native-root`, `emit` writes the contract stubs used by the fixture CI.
 
@@ -67,7 +69,14 @@ The complete LLAPI umbrella currently selects 214 link-safe functions, or 2,930 
 
 ## Endstone surface
 
-`frontend/run-endstone.ps1` parses the Endstone public umbrella (`include/endstone/endstone.hpp`) with expected-lite and nlohmann_json headers. `--virtual-dispatch` emits a link-free shim for the header-only virtual interfaces: inline members and virtual methods are called through the host-provided vtables, while non-virtual out-of-line members remain stubs. `frontend/build-endstone-shim.ps1` compiles the generated table against the Endstone headers. The Endstone 0.11.14 surface currently selects 1,466 functions, including eligible template instances and inline/constexpr static fields.
+`frontend/run-endstone.ps1` parses the Endstone public umbrella (`include/endstone/endstone.hpp`) with expected-lite and nlohmann_json headers. `--virtual-dispatch` emits a link-free shim for the header-only virtual interfaces: inline members and virtual methods are called through the host-provided vtables, while non-virtual out-of-line members remain stubs. `frontend/build-endstone-shim.ps1` compiles the generated table against the Endstone headers. The Endstone 0.11.14 surface currently selects 1,621 functions, including eligible template instances and inline/constexpr static fields.
+
+## Related repositories
+
+- `Hosihikari/Bindings.Ir`: schema, models, reader/writer, validator.
+- `Hosihikari/Bindings.Abi`: shared ABI value types, loader, and native header.
+- `Hosihikari/Bindings.Endstone`: the Endstone surface.
+- `Hosihikari/Bindings.LeviLamina`: the LeviLamina surface.
 
 ## Licence
 

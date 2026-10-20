@@ -766,10 +766,10 @@ internal sealed class AbiPlan
     public static string CSharpTableType(AbiKind kind) => kind switch
     {
         AbiKind.Opaque => "void*",
-        AbiKind.StringView => "NativeMethods.StringView",
-        AbiKind.ArrayView => "NativeMethods.ArrayView",
+        AbiKind.StringView => "global::Hosihikari.Bindings.Abi.StringView",
+        AbiKind.ArrayView => "global::Hosihikari.Bindings.Abi.ArrayView",
         AbiKind.Vector => "nint",
-        AbiKind.Shared => "NativeMethods.SharedHandle",
+        AbiKind.Shared => "global::Hosihikari.Bindings.Abi.SharedHandleData",
         _ => CSharpType(kind),
     };
 

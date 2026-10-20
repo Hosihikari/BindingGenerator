@@ -26,7 +26,7 @@
 ```shell
 dotnet run --project src/Hosihikari.Bindings.Generator/Hosihikari.Bindings.Generator.csproj -c Release -- version
 dotnet run --project src/Hosihikari.Bindings.Generator/Hosihikari.Bindings.Generator.csproj -c Release -- validate-ir tests/fixtures/basic/ir-manifest.json tests/fixtures/basic
-dotnet run --project src/Hosihikari.Bindings.Generator/Hosihikari.Bindings.Generator.csproj -c Release -- emit tests/fixtures/basic/ir-manifest.json tests/fixtures/basic artifacts/emitted
+dotnet run --project src/Hosihikari.Bindings.Generator/Hosihikari.Bindings.Generator.csproj -c Release -- emit tests/fixtures/basic/ir-manifest.json tests/fixtures/basic artifacts/emitted --abi-header ../Abi/native/hosihikari_abi.h
 ```
 
 `validate-ir` 读取 manifest 与分片目录下所有 `*.jsonl`，然后运行 IR 校验器。`validate-coverage` 对 `coverage/summary.json` + `coverage/manifest.jsonl` 做同样的事。
@@ -36,8 +36,10 @@ dotnet run --project src/Hosihikari.Bindings.Generator/Hosihikari.Bindings.Gener
 ```shell
 dotnet run --project src/Hosihikari.Bindings.Generator/Hosihikari.Bindings.Generator.csproj -c Release -- emit `
   artifacts/llapi-full-ir/ir-manifest.json artifacts/llapi-full-ir artifacts/llapi-real-shim `
-  --native-root C:/path/to/LeviLamina --link-carrier --ll-allocator
+  --native-root C:/path/to/LeviLamina --abi-header ../Abi/native/hosihikari_abi.h --link-carrier --ll-allocator
 ```
+
+`--abi-header` 指向 `Hosihikari/Bindings.Abi` 的 `native/hosihikari_abi.h`；发射器把它复制到每个 shim 目录，使 shim 构建保持自包含。生成的 C# 引用 `Hosihikari.Bindings.Abi` 提供的 `StringView`、`ArrayView`、`SharedHandle` 与负责版本校验的 `ShimLibrary` 加载器。
 
 不传 `--native-root` 时写出 fixture CI 使用的契约 stub。
 
@@ -67,7 +69,14 @@ powershell -File frontend/smoke-shim.ps1 -IrDirectory artifacts/llapi-full-ir -L
 
 ## Endstone 表面
 
-`frontend/run-endstone.ps1` 解析 Endstone 公共伞头（`include/endstone/endstone.hpp`）并提供 expected-lite 与 nlohmann_json 头。`--virtual-dispatch` 为 header-only 虚接口发射免链接 shim：inline 成员与虚方法经宿主提供的 vtable 调用，非虚 out-of-line 成员保留 stub。`frontend/build-endstone-shim.ps1` 用 Endstone 头编译生成的表。Endstone 0.11.14 表面当前选出 1,466 个函数，包含符合条件的模板实例与 inline/constexpr 静态字段。
+`frontend/run-endstone.ps1` 解析 Endstone 公共伞头（`include/endstone/endstone.hpp`）并提供 expected-lite 与 nlohmann_json 头。`--virtual-dispatch` 为 header-only 虚接口发射免链接 shim：inline 成员与虚方法经宿主提供的 vtable 调用，非虚 out-of-line 成员保留 stub。`frontend/build-endstone-shim.ps1` 用 Endstone 头编译生成的表。Endstone 0.11.14 表面当前选出 1,621 个函数，包含符合条件的模板实例与 inline/constexpr 静态字段。
+
+## 相关仓库
+
+- `Hosihikari/Bindings.Ir`：schema、模型、读写器与校验器。
+- `Hosihikari/Bindings.Abi`：共享 ABI 值类型、加载器与原生头文件。
+- `Hosihikari/Bindings.Endstone`：Endstone 表面。
+- `Hosihikari/Bindings.LeviLamina`：LeviLamina 表面。
 
 ## 许可证
 

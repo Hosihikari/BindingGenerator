@@ -13,7 +13,8 @@ internal static class ShimEmitter
         IReadOnlyList<IrRecord> records,
         string outputDirectory,
         string manifestHash,
-        AbiPlan plan)
+        AbiPlan plan,
+        string abiHeader)
     {
         foreach (var configuration in manifest.Configurations.OrderBy(configuration => configuration.Id, StringComparer.Ordinal))
         {
@@ -48,7 +49,8 @@ internal static class ShimEmitter
                     functions,
                     declarations,
                     plan.LinkCarrier,
-                    plan.LlAllocator);
+                    plan.LlAllocator,
+                    abiHeader);
             }
         }
     }
@@ -107,10 +109,12 @@ internal static class ShimEmitter
         IReadOnlyList<AbiFunction> functions,
         IReadOnlyDictionary<string, DeclarationRecord> declarations,
         bool linkCarrier,
-        bool llAllocator)
+        bool llAllocator,
+        string abiHeader)
     {
         var directory = Path.Combine(outputDirectory, "shim", configuration, surface);
         Directory.CreateDirectory(directory);
+        File.Copy(abiHeader, Path.Combine(directory, "hosihikari_abi.h"), true);
 
         var header = new List<string>
         {
@@ -118,34 +122,12 @@ internal static class ShimEmitter
             $"// ir-manifest-sha256: {manifestHash}",
             "#pragma once",
             "",
+            "#include \"hosihikari_abi.h\"",
+            "",
             "#include <cstddef>",
             "#include <cstdint>",
             "",
-            "#if defined(_WIN32)",
-            "#define HOSIHIKARI_SHIM_EXPORT __declspec(dllexport)",
-            "#else",
-            "#define HOSIHIKARI_SHIM_EXPORT __attribute__((visibility(\"default\")))",
-            "#endif",
-            "",
             "extern \"C\" {",
-            "",
-            "struct HosihikariStringView {",
-            "    const char* data;",
-            "    std::size_t size;",
-            "};",
-            "",
-            "struct HosihikariArrayView {",
-            "    const void* data;",
-            "    std::size_t size;",
-            "};",
-            "",
-            "typedef void (*HosihikariSharedRelease)(void*);",
-            "",
-            "struct HosihikariSharedHandle {",
-            "    void* holder;",
-            "    void* target;",
-            "    HosihikariSharedRelease release;",
-            "};",
             "",
             "struct HosihikariBindingTableV1 {",
             "    std::uint32_t version;",
@@ -259,13 +241,8 @@ internal static class ShimEmitter
         source.Add("");
         source.Add("namespace {");
         source.Add("");
-        source.Add("thread_local std::string g_lastError;");
+        source.Add("using hosihikari::abi::setLastError;");
         source.Add("thread_local std::string g_stringResult;");
-        source.Add("");
-        source.Add("void setLastError(char const* message) noexcept");
-        source.Add("{");
-        source.Add("    try { g_lastError = message ? message : \"unknown native error\"; } catch (...) {}");
-        source.Add("}");
         source.Add("");
         source.Add("template <class T, class U>");
         source.Add("std::vector<T> hs_make_vector(U const* data, std::size_t count)");
@@ -337,7 +314,7 @@ internal static class ShimEmitter
         source.Add("");
         source.Add("extern \"C\" HOSIHIKARI_SHIM_EXPORT const char* hosihikari_get_last_error() noexcept");
         source.Add("{");
-        source.Add("    return g_lastError.c_str();");
+        source.Add("    return hosihikari::abi::lastError();");
         source.Add("}");
 
         if (string.Equals(surface, "endstone", StringComparison.Ordinal))
