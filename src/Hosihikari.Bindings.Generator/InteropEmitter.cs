@@ -373,9 +373,12 @@ internal static class InteropEmitter
 
         foreach (var parameter in function.Parameters.Where(parameter => parameter.IsVector))
         {
-            types.Add(parameter.VectorElementKind == AbiKind.StringView
-                ? "global::Hosihikari.Bindings.Abi.StringView*"
-                : AbiPlan.CSharpType(parameter.VectorElementKind) + "*");
+            types.Add(parameter.VectorElementKind switch
+            {
+                AbiKind.StringView => "global::Hosihikari.Bindings.Abi.StringView*",
+                AbiKind.Opaque => "void**",
+                _ => AbiPlan.CSharpType(parameter.VectorElementKind) + "*",
+            });
             types.Add("nuint");
         }
 
@@ -868,9 +871,12 @@ internal static class InteropEmitter
             }
 
             var type = parameter.IsVector
-                ? parameter.VectorElementKind == AbiKind.StringView
-                    ? "string[]"
-                    : AbiPlan.CSharpType(parameter.VectorElementKind) + "[]"
+                ? parameter.VectorElementWrapperType is not null
+                    ? parameter.VectorElementWrapperType
+                        + (parameter.VectorElementOwnership == ArrayElementOwnership.OptionalRecordCopy ? "?[]" : "[]")
+                    : parameter.VectorElementKind == AbiKind.StringView
+                        ? "string[]"
+                        : AbiPlan.CSharpType(parameter.VectorElementKind) + "[]"
                 : parameter.IsOptional
                     ? parameter.Kind switch
                     {
@@ -1035,6 +1041,23 @@ internal static class InteropEmitter
                 lines.Add(indent + "finally");
                 lines.Add(indent + "{");
                 lines.Add(indent + "    for (var __hs_i = 0; __hs_i < __hs_vectorHandles.Length; __hs_i++) { if (__hs_vectorHandles[__hs_i] != 0) { global::System.Runtime.InteropServices.Marshal.FreeHGlobal((nint)__hs_vectorHandles[__hs_i]); } }");
+                lines.Add(indent + "}");
+                return;
+            }
+
+            if (vector.VectorElementKind == AbiKind.Opaque)
+            {
+                lines.Add(indent + $"var __hs_vectorItems = {vectorName};");
+                lines.Add(indent + "var __hs_vectorHandles = new nint[__hs_vectorItems?.Length ?? 0];");
+                lines.Add(indent + "for (var __hs_i = 0; __hs_i < __hs_vectorHandles.Length; __hs_i++)");
+                lines.Add(indent + "{");
+                lines.Add(indent + "    __hs_vectorHandles[__hs_i] = __hs_vectorItems![__hs_i]?.Handle ?? 0;");
+                lines.Add(indent + "}");
+                EmitStringBuffers(lines, parameters, stringIndices, indent);
+                lines.Add(indent + "fixed (nint* __hs_vectorHandleData = __hs_vectorHandles)");
+                lines.Add(indent + "{");
+                lines.Add(indent + "    var __hs_vectorData = (void**)__hs_vectorHandleData;");
+                EmitStringFixes(lines, parameters, stringIndices, 0, indent + "    ", emitBody);
                 lines.Add(indent + "}");
                 return;
             }

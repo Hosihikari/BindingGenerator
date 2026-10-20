@@ -277,6 +277,31 @@ internal static class ShimEmitter
         source.Add("    return HosihikariSharedHandle{holder, const_cast<void*>(static_cast<void const*>(holder->value.get())), &hs_release_shared_holder<T>};");
         source.Add("}");
         source.Add("");
+        source.Add("template <class T>");
+        source.Add("std::vector<T> hs_make_record_vector(void const* const* data, std::size_t count)");
+        source.Add("{");
+        source.Add("    std::vector<T> result;");
+        source.Add("    result.reserve(count);");
+        source.Add("    for (std::size_t i = 0; i < count; ++i) { result.push_back(*static_cast<T const*>(data[i])); }");
+        source.Add("    return result;");
+        source.Add("}");
+        source.Add("template <class T>");
+        source.Add("std::vector<std::optional<T>> hs_make_optional_record_vector(void const* const* data, std::size_t count)");
+        source.Add("{");
+        source.Add("    std::vector<std::optional<T>> result;");
+        source.Add("    result.reserve(count);");
+        source.Add("    for (std::size_t i = 0; i < count; ++i) { result.push_back(data[i] ? std::optional<T>(*static_cast<T const*>(data[i])) : std::nullopt); }");
+        source.Add("    return result;");
+        source.Add("}");
+        source.Add("template <class V>");
+        source.Add("std::vector<V> hs_make_variant_vector(void const* const* data, std::size_t count)");
+        source.Add("{");
+        source.Add("    std::vector<V> result;");
+        source.Add("    result.reserve(count);");
+        source.Add("    for (std::size_t i = 0; i < count; ++i) { result.push_back(*static_cast<V const*>(data[i])); }");
+        source.Add("    return result;");
+        source.Add("}");
+        source.Add("");
         source.Add("inline std::vector<std::basic_string_view<char>> hs_make_string_view_vector(HosihikariStringView const* data, std::size_t count)");
         source.Add("{");
         source.Add("    std::vector<std::basic_string_view<char>> result;");
@@ -816,6 +841,11 @@ internal static class ShimEmitter
                             var recordType = function.ArrayElementNativeType ?? "void";
                             yield return $"    for (auto const& item : result) {{ hs_arrayResult.push_back(item ? static_cast<void*>(new {recordType}(*item)) : nullptr); }}";
                         }
+                        else if (function.ArrayElementOwnership == ArrayElementOwnership.VariantCopy)
+                        {
+                            var variantType = function.ArrayElementNativeType ?? "void";
+                            yield return $"    for (auto const& item : result) {{ hs_arrayResult.push_back(static_cast<void*>(new {variantType}(item))); }}";
+                        }
                         else
                         {
                             yield return $"    for (auto const& item : result) {{ hs_arrayResult.push_back(static_cast<{elementType}>(item)); }}";
@@ -1045,7 +1075,16 @@ internal static class ShimEmitter
                 return $"{helper}({name}_data, {name}_count)";
             }
 
-            return $"hs_make_vector<{parameter.VectorElementType}>({name}_data, {name}_count)";
+            return parameter.VectorElementOwnership switch
+            {
+                ArrayElementOwnership.RecordCopy =>
+                    $"hs_make_record_vector<{parameter.VectorElementNativeType}>({name}_data, {name}_count)",
+                ArrayElementOwnership.OptionalRecordCopy =>
+                    $"hs_make_optional_record_vector<{parameter.VectorElementNativeType}>({name}_data, {name}_count)",
+                ArrayElementOwnership.VariantCopy =>
+                    $"hs_make_variant_vector<{parameter.VectorElementNativeType}>({name}_data, {name}_count)",
+                _ => $"hs_make_vector<{parameter.VectorElementType}>({name}_data, {name}_count)",
+            };
         }
 
         if (parameter.IsOptionalRef)

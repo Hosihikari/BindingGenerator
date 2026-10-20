@@ -51,6 +51,9 @@ internal sealed class AbiParameter
     public bool IsVector { get; init; }
     public AbiKind VectorElementKind { get; init; }
     public string? VectorElementType { get; init; }
+    public string? VectorElementWrapperType { get; init; }
+    public ArrayElementOwnership VectorElementOwnership { get; init; }
+    public string? VectorElementNativeType { get; init; }
     public string? WrapperType { get; init; }
     public AbiCallback? Callback { get; init; }
     public VariantAbiInfo? VariantInfo { get; init; }
@@ -139,6 +142,7 @@ internal enum ArrayElementOwnership
     UniquePtr,
     RecordCopy,
     OptionalRecordCopy,
+    VariantCopy,
 }
 
 internal sealed class AbiFunction
@@ -1854,6 +1858,20 @@ internal sealed class AbiPlan
                 return true;
             }
 
+            if (variants.TryGet(surface, NormalizeTypeName(sequenceElement), out var sequenceVariant))
+            {
+                var sequenceVariantType = NormalizeTypeName(sequenceElement);
+                kind = AbiKind.ArrayView;
+                arrayElementKind = AbiKind.Opaque;
+                arrayElementType = sequenceVariantType;
+                arrayElementOwnership = ArrayElementOwnership.VariantCopy;
+                arrayElementWrapperType = sequenceVariant.WrapperType;
+                arrayElementNativeType = sequenceVariantType;
+                returnVariant = sequenceVariant;
+                array = true;
+                return true;
+            }
+
             if (TryParseUniquePtr(sequenceElement, out var uniqueElement)
                 && TryResolveRecordWrapper(
                     uniqueElement,
@@ -2857,6 +2875,68 @@ internal sealed class AbiPlan
                 return true;
             }
 
+            if (variants.TryGet(surface, NormalizeTypeName(vectorElement), out var vectorVariant))
+            {
+                var vectorVariantType = NormalizeTypeName(vectorElement);
+                parameter = new AbiParameter
+                {
+                    Name = name,
+                    Kind = AbiKind.Vector,
+                    NativeType = text,
+                    IsVector = true,
+                    VectorElementKind = AbiKind.Opaque,
+                    VectorElementType = vectorVariantType,
+                    VectorElementWrapperType = vectorVariant.WrapperType,
+                    VectorElementOwnership = ArrayElementOwnership.VariantCopy,
+                    VectorElementNativeType = vectorVariantType,
+                    VariantInfo = vectorVariant,
+                };
+                return true;
+            }
+
+            if (TryParseOptional(vectorElement, out var optionalVectorRecord)
+                && TryResolveInputRecordWrapper(
+                    optionalVectorRecord,
+                    declarationsByQualifiedName,
+                    declarationNames,
+                    out var optionalVectorWrapper))
+            {
+                parameter = new AbiParameter
+                {
+                    Name = name,
+                    Kind = AbiKind.Vector,
+                    NativeType = text,
+                    IsVector = true,
+                    VectorElementKind = AbiKind.Opaque,
+                    VectorElementType = optionalVectorRecord,
+                    VectorElementWrapperType = optionalVectorWrapper,
+                    VectorElementOwnership = ArrayElementOwnership.OptionalRecordCopy,
+                    VectorElementNativeType = optionalVectorRecord,
+                };
+                return true;
+            }
+
+            if (TryResolveInputRecordWrapper(
+                    vectorElement,
+                    declarationsByQualifiedName,
+                    declarationNames,
+                    out var vectorRecordWrapper))
+            {
+                parameter = new AbiParameter
+                {
+                    Name = name,
+                    Kind = AbiKind.Vector,
+                    NativeType = text,
+                    IsVector = true,
+                    VectorElementKind = AbiKind.Opaque,
+                    VectorElementType = vectorElement,
+                    VectorElementWrapperType = vectorRecordWrapper,
+                    VectorElementOwnership = ArrayElementOwnership.RecordCopy,
+                    VectorElementNativeType = vectorElement,
+                };
+                return true;
+            }
+
             reason = $"vector parameter type '{vectorElement}' is not supported";
             return false;
         }
@@ -3120,6 +3200,26 @@ internal sealed class AbiPlan
 
         reason = $"parameter type '{text}' is not supported";
         return false;
+    }
+
+    private static bool TryResolveInputRecordWrapper(
+        string nativeType,
+        IReadOnlyDictionary<string, DeclarationRecord> declarationsByQualifiedName,
+        IReadOnlyDictionary<string, DeclarationName> declarationNames,
+        out string wrapperType)
+    {
+        wrapperType = "";
+        if (!declarationsByQualifiedName.TryGetValue(nativeType, out var declaration)
+            || declaration.Access != "public"
+            || declaration.Abstract
+            || !declaration.CopyConstructible
+            || !declarationNames.TryGetValue(declaration.Id, out var declarationName))
+        {
+            return false;
+        }
+
+        wrapperType = "global::" + declarationName.NamespaceName + "." + declarationName.ClassName;
+        return true;
     }
 
     private static bool TryResolveRecordWrapper(
