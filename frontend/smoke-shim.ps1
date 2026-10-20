@@ -23,6 +23,7 @@ if (-not (Test-Path $Manifest)) {
 $EmitArgs = @("--native-root", $LeviLaminaRoot)
 if ($LinkCarrier) {
     $EmitArgs += "--link-carrier"
+    $EmitArgs += "--ll-allocator"
 }
 
 $GeneratorProject = Join-Path $GeneratorRoot "src\Hosihikari.Bindings.Generator\Hosihikari.Bindings.Generator.csproj"

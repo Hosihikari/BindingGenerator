@@ -36,7 +36,7 @@ dotnet run --project src/Hosihikari.Bindings.Generator/Hosihikari.Bindings.Gener
 ```shell
 dotnet run --project src/Hosihikari.Bindings.Generator/Hosihikari.Bindings.Generator.csproj -c Release -- emit `
   artifacts/llapi-full-ir/ir-manifest.json artifacts/llapi-full-ir artifacts/llapi-real-shim `
-  --native-root C:/path/to/LeviLamina
+  --native-root C:/path/to/LeviLamina --link-carrier --ll-allocator
 ```
 
 不传 `--native-root` 时写出 fixture CI 使用的契约 stub。
@@ -47,6 +47,8 @@ dotnet run --project src/Hosihikari.Bindings.Generator/Hosihikari.Bindings.Gener
 - 投影构造函数、析构函数、公共字段与受支持的方法。构造函数与方法接受多个参数。方法可返回 `void`、基础类型、枚举、不透明指针、字符串或符合条件的按值 record；字符串结果被复制到 shim 的线程局部缓冲区，托管包装立即复制。每次调用最多固定一个字符串参数。枚举使用底层整数 ABI。按值 record 参数由调用方句柄解引用传入；按值 record 结果复制为 shim 持有、托管包装可释放的对象。record 与容器字段以借用地址视图暴露；数组字段只生成 getter。
 - 默认 link-safe 模式投影 public、非模板、源文件存在于 native root、所有方法 inline 且基类 link-safe 的类。`--link-carrier` 另外接纳 public 的具体模板实例，并链接 carrier import library、fmt 与 prelink 生成的 Bedrock 导入。模板实参必须可访问；不完整实参只对标准库或受支持的第三方类型放行。成员模板、右值限定成员与变量模板不投影；模板析构函数需有可见定义才生成释放器。静态方法与静态字段不传 `self`。抽象类与含借用字符串构造函数的类不生成工厂。
 - 每个表函数都是 C++ function-try-block。原生异常被捕获到由 `hosihikari_get_last_error` 暴露的线程局部消息中，C++ 异常不会跨越托管边界。工厂失败返回空句柄，生成的 `Create` 抛出带该消息的 `InvalidOperationException`。
+- `std::function<R(Args...)>` 参数暴露为 `(invoke, userData, release)` 三元组。shim 用共享回调状态包装成 `std::function`；最后一个副本销毁时调用 `release(userData)`。v1 支持基础类型/枚举返回，参数支持基础类型、枚举、字符串、指针、引用与按值 record。
+- `--ll-allocator` 把 shim 的全局 `operator new`/`delete` 交给 `ll::memory::getDefaultAllocator()`。LeviLamina 等替换全局分配器的 carrier 需要此开关；mock carrier fixture 不启用。
 - `NativeMethods.Load(path)` 在使用前校验导出的表版本与 `sizeof(Table)`；表的前两个字段是 `version` 与 `size`。
 
 `frontend/build-shim.ps1` 用 clang-cl 与 `/MD` 针对 LeviLamina 的 include 环境编译生成的 shim。用 `-AdditionalLinkLibrary` 传入 carrier/包库，用 `-DelayLoadLibrary LeviLamina.dll` 构建可独立加载的 smoke 版本。`frontend/build-carrier-shim.ps1` 先编译对象，运行 `prelink` 生成 Bedrock runtime 导入库，再链接 carrier shim。`frontend/smoke-shim.ps1` 发射、构建并运行 `tests/BindingShimSmoke`；加 `-LinkCarrier` 会使用 carrier 构建与 delay-load。
@@ -61,7 +63,7 @@ powershell -File frontend/smoke-shim.ps1 -IrDirectory artifacts/llapi-full-ir
 powershell -File frontend/smoke-shim.ps1 -IrDirectory artifacts/llapi-full-ir -LinkCarrier
 ```
 
-完整 LLAPI 伞头当前选出 298 个 link-safe 函数；用 `--link-carrier` 链接 `LeviLamina.lib` 时为 2,861 个函数。切片覆盖 `ll::event::EventId`、`ll::event::EventIdView`、`ll::hash_utils::HashedIdBase`、`ll::hash_utils::HashCombiner`、`ll::data::Version` 以及其他符合条件的类。Smoke test 从托管字符串创建原生 `EventId`，读取名称与哈希，比较两个 `HashedIdBase` 视图，调用 `HashCombiner::hash()`，并让 `ll::data::Version` 经过字符串构造、`to_string()`、字段读取、`valid(string)` 与 `isIdenticalTo(Version)` 往返。其余成员保留 Interop stub，并在覆盖清单中只记录 `interop` 发射器。
+完整 LLAPI 伞头当前选出 214 个 link-safe 函数；用 `--link-carrier` 链接 `LeviLamina.lib` 时为 2,879 个函数。切片覆盖 `ll::event::EventId`、`ll::event::EventIdView`、`ll::hash_utils::HashedIdBase`、`ll::hash_utils::HashCombiner`、`ll::data::Version` 以及其他符合条件的类。Smoke test 从托管字符串创建原生 `EventId`，读取名称与哈希，比较两个 `HashedIdBase` 视图，调用 `HashCombiner::hash()`，并让 `ll::data::Version` 经过字符串构造、`to_string()`、字段读取、`valid(string)` 与 `isIdenticalTo(Version)` 往返。其余成员保留 Interop stub，并在覆盖清单中只记录 `interop` 发射器。
 
 ## 许可证
 

@@ -46,7 +46,9 @@ internal static class ShimEmitter
                     surface,
                     manifestHash,
                     functions,
-                    declarations);
+                    declarations,
+                    plan.LinkCarrier,
+                    plan.LlAllocator);
             }
         }
     }
@@ -103,7 +105,9 @@ internal static class ShimEmitter
         string surface,
         string manifestHash,
         IReadOnlyList<AbiFunction> functions,
-        IReadOnlyDictionary<string, DeclarationRecord> declarations)
+        IReadOnlyDictionary<string, DeclarationRecord> declarations,
+        bool linkCarrier,
+        bool llAllocator)
     {
         var directory = Path.Combine(outputDirectory, "shim", configuration, surface);
         Directory.CreateDirectory(directory);
@@ -159,14 +163,62 @@ internal static class ShimEmitter
             "#include <cstddef>",
             "#include <cstdint>",
             "#include <exception>",
+            "#include <functional>",
+            "#include <memory>",
             "#include <new>",
             "#include <string>",
             "#include <string_view>",
         };
+        if (llAllocator)
+        {
+            source.Add("#include \"ll/api/memory/Memory.h\"");
+            source.Add("#include \"mc/deps/core/memory/IMemoryAllocator.h\"");
+        }
 
         foreach (var include in BuildIncludes(functions, declarations))
         {
             source.Add($"#include \"{include}\"");
+        }
+
+        if (llAllocator)
+        {
+            source.Add("");
+            source.Add("void* operator new(std::size_t size)");
+            source.Add("{");
+            source.Add("    if (void* block = ::ll::memory::getDefaultAllocator()._allocate(size)) { return block; }");
+            source.Add("    throw std::bad_alloc();");
+            source.Add("}");
+            source.Add("void* operator new[](std::size_t size) { return ::operator new(size); }");
+            source.Add("void* operator new(std::size_t size, std::nothrow_t const&) noexcept");
+            source.Add("{");
+            source.Add("    return ::ll::memory::getDefaultAllocator()._allocate(size);");
+            source.Add("}");
+            source.Add("void* operator new[](std::size_t size, std::nothrow_t const& tag) noexcept");
+            source.Add("{");
+            source.Add("    return ::operator new(size, tag);");
+            source.Add("}");
+            source.Add("void* operator new(std::size_t size, std::align_val_t alignment)");
+            source.Add("{");
+            source.Add("    if (void* block = ::ll::memory::getDefaultAllocator()._alignedAllocate(size, static_cast<std::size_t>(alignment))) { return block; }");
+            source.Add("    throw std::bad_alloc();");
+            source.Add("}");
+            source.Add("void* operator new[](std::size_t size, std::align_val_t alignment) { return ::operator new(size, alignment); }");
+            source.Add("void operator delete(void* block) noexcept");
+            source.Add("{");
+            source.Add("    if (block) { ::ll::memory::getDefaultAllocator()._release(block); }");
+            source.Add("}");
+            source.Add("void operator delete[](void* block) noexcept { ::operator delete(block); }");
+            source.Add("void operator delete(void* block, std::size_t) noexcept { ::operator delete(block); }");
+            source.Add("void operator delete[](void* block, std::size_t) noexcept { ::operator delete(block); }");
+            source.Add("void operator delete(void* block, std::nothrow_t const&) noexcept { ::operator delete(block); }");
+            source.Add("void operator delete[](void* block, std::nothrow_t const&) noexcept { ::operator delete(block); }");
+            source.Add("void operator delete(void* block, std::align_val_t alignment) noexcept");
+            source.Add("{");
+            source.Add("    if (block) { ::ll::memory::getDefaultAllocator()._alignedRelease(block); }");
+            source.Add("}");
+            source.Add("void operator delete[](void* block, std::align_val_t alignment) noexcept { ::operator delete(block, alignment); }");
+            source.Add("void operator delete(void* block, std::size_t, std::align_val_t alignment) noexcept { ::operator delete(block, alignment); }");
+            source.Add("void operator delete[](void* block, std::size_t, std::align_val_t alignment) noexcept { ::operator delete(block, alignment); }");
         }
 
         source.Add("");
@@ -183,7 +235,7 @@ internal static class ShimEmitter
 
         foreach (var function in functions)
         {
-            foreach (var line in EmitFunction(function))
+            foreach (var line in EmitFunction(function, llAllocator))
             {
                 source.Add(line);
             }
@@ -389,6 +441,11 @@ internal static class ShimEmitter
                 case AbiKind.Opaque:
                     parameters.Add("void*");
                     break;
+                case AbiKind.Callback:
+                    parameters.Add("void*");
+                    parameters.Add("void*");
+                    parameters.Add("void*");
+                    break;
                 default:
                     parameters.Add(AbiPlan.CppType(parameter.Kind));
                     break;
@@ -399,9 +456,25 @@ internal static class ShimEmitter
         return $"{returnType} (*{function.TableField})({parameterList})";
     }
 
-    private static IEnumerable<string> EmitFunction(AbiFunction function)
+    private static IEnumerable<string> EmitFunction(AbiFunction function, bool llAllocator)
     {
         var returnType = AbiPlan.CppType(function.ReturnKind);
+        for (var index = 0; index < function.Parameters.Count; index++)
+        {
+            var callbackParameter = function.Parameters[index];
+            if (callbackParameter.Kind != AbiKind.Callback)
+            {
+                continue;
+            }
+
+            foreach (var line in EmitCallbackSupport(function, index, callbackParameter))
+            {
+                yield return line;
+            }
+
+            yield return "";
+        }
+
         var parameters = new List<string>();
         if (function.Kind != AbiFunctionKind.Create && !function.Static)
         {
@@ -422,6 +495,11 @@ internal static class ShimEmitter
                     break;
                 case AbiKind.Opaque:
                     parameters.Add($"void* {name}");
+                    break;
+                case AbiKind.Callback:
+                    parameters.Add($"void* {name}_invoke");
+                    parameters.Add($"void* {name}_userData");
+                    parameters.Add($"void* {name}_release");
                     break;
                 default:
                     parameters.Add($"{AbiPlan.CppType(parameter.Kind)} {name}");
@@ -472,7 +550,7 @@ internal static class ShimEmitter
                 var target = FieldTarget(function);
                 var value = function.Parameters.Count == 0
                     ? "value"
-                    : NativeArgument(function.Parameters[0], 0, "value");
+                    : NativeArgument(function, function.Parameters[0], 0, "value");
                 yield return $"    {target} = static_cast<{function.Parameters[0].NativeType}>({value});";
                 break;
             }
@@ -553,11 +631,15 @@ internal static class ShimEmitter
     {
         for (var index = 0; index < function.Parameters.Count; index++)
         {
-            yield return NativeArgument(function.Parameters[index], index);
+            yield return NativeArgument(function, function.Parameters[index], index);
         }
     }
 
-    private static string NativeArgument(AbiParameter parameter, int index, string? nameOverride = null)
+    private static string NativeArgument(
+        AbiFunction function,
+        AbiParameter parameter,
+        int index,
+        string? nameOverride = null)
     {
         var name = nameOverride ?? CppParameterName(parameter, index);
         switch (parameter.Kind)
@@ -579,9 +661,134 @@ internal static class ShimEmitter
                     : $"static_cast<{constPrefix}{pointee}*>({name})";
             }
 
+            case AbiKind.Callback:
+                return BuildCallbackArgument(function, parameter, index, name);
+
             default:
                 return $"static_cast<{parameter.NativeType}>({name})";
         }
+    }
+
+    private static string CallbackSuffix(AbiFunction function, int index) =>
+        function.CppName + "_cb" + index.ToString(CultureInfo.InvariantCulture);
+
+    private static string BuildCallbackArgument(
+        AbiFunction function,
+        AbiParameter parameter,
+        int index,
+        string name)
+    {
+        var suffix = CallbackSuffix(function, index);
+        return parameter.Callback!.NativeType
+            + "(hs_cb_closure_" + suffix
+            + "{std::make_shared<hs_cb_state_" + suffix
+            + ">(reinterpret_cast<hs_cb_invoke_" + suffix + ">(" + name + "_invoke), "
+            + name + "_userData, reinterpret_cast<hs_cb_release_" + suffix + ">(" + name + "_release))})";
+    }
+
+    private static IEnumerable<string> EmitCallbackSupport(
+        AbiFunction function,
+        int index,
+        AbiParameter parameter)
+    {
+        var callback = parameter.Callback!;
+        var suffix = CallbackSuffix(function, index);
+        var invokeReturn = callback.ReturnKind == AbiKind.Void
+            ? "void"
+            : AbiPlan.CppType(callback.ReturnKind);
+        var abiParameters = new List<string> { "void* userData" };
+        for (var argumentIndex = 0; argumentIndex < callback.Arguments.Count; argumentIndex++)
+        {
+            var argument = callback.Arguments[argumentIndex];
+            switch (argument.Kind)
+            {
+                case AbiKind.StringView:
+                    abiParameters.Add($"const char* arg{argumentIndex}_data");
+                    abiParameters.Add($"std::size_t arg{argumentIndex}_size");
+                    break;
+                case AbiKind.Opaque:
+                    abiParameters.Add($"void* arg{argumentIndex}");
+                    break;
+                default:
+                    abiParameters.Add($"{AbiPlan.CppType(argument.Kind)} arg{argumentIndex}");
+                    break;
+            }
+        }
+
+        yield return $"using hs_cb_invoke_{suffix} = {invokeReturn} (*)({string.Join(", ", abiParameters)});";
+        yield return $"using hs_cb_release_{suffix} = void (*)(void*);";
+        yield return $"struct hs_cb_state_{suffix}";
+        yield return "{";
+        yield return $"    hs_cb_invoke_{suffix} invoke;";
+        yield return "    void* userData;";
+        yield return $"    hs_cb_release_{suffix} release;";
+        yield return $"    hs_cb_state_{suffix}(hs_cb_invoke_{suffix} invoke_, void* userData_, hs_cb_release_{suffix} release_)";
+        yield return "        : invoke(invoke_), userData(userData_), release(release_) {}";
+        yield return $"    ~hs_cb_state_{suffix}() {{ if (release) {{ release(userData); }} }}";
+        yield return "};";
+        yield return $"struct hs_cb_closure_{suffix}";
+        yield return "{";
+        yield return $"    std::shared_ptr<hs_cb_state_{suffix}> state;";
+        var nativeParameters = new List<string>();
+        for (var argumentIndex = 0; argumentIndex < callback.Arguments.Count; argumentIndex++)
+        {
+            nativeParameters.Add($"{callback.Arguments[argumentIndex].NativeType} arg{argumentIndex}");
+        }
+
+        yield return $"    {callback.ReturnNativeType} operator()({string.Join(", ", nativeParameters)}) const";
+        yield return "    {";
+        for (var argumentIndex = 0; argumentIndex < callback.Arguments.Count; argumentIndex++)
+        {
+            if (callback.Arguments[argumentIndex].Kind == AbiKind.StringView)
+            {
+                yield return $"        HosihikariStringView hs_arg{argumentIndex}{{arg{argumentIndex}.data(), arg{argumentIndex}.size()}};";
+            }
+        }
+
+        var callArguments = new List<string> { "state->userData" };
+        for (var argumentIndex = 0; argumentIndex < callback.Arguments.Count; argumentIndex++)
+        {
+            var argument = callback.Arguments[argumentIndex];
+            var argumentName = "arg" + argumentIndex.ToString(CultureInfo.InvariantCulture);
+            switch (argument.Kind)
+            {
+                case AbiKind.StringView:
+                    callArguments.Add($"hs_arg{argumentIndex}.data");
+                    callArguments.Add($"hs_arg{argumentIndex}.size");
+                    break;
+                case AbiKind.Opaque:
+                    if (argument.IsPointer)
+                    {
+                        callArguments.Add(argument.IsConst
+                            ? $"const_cast<void*>(static_cast<void const*>({argumentName}))"
+                            : $"static_cast<void*>({argumentName})");
+                    }
+                    else
+                    {
+                        callArguments.Add(argument.IsConst
+                            ? $"const_cast<void*>(static_cast<void const*>(std::addressof({argumentName})))"
+                            : $"static_cast<void*>(std::addressof({argumentName}))");
+                    }
+
+                    break;
+                default:
+                    callArguments.Add($"static_cast<{AbiPlan.CppType(argument.Kind)}>({argumentName})");
+                    break;
+            }
+        }
+
+        var invoke = $"state->invoke({string.Join(", ", callArguments)})";
+        if (callback.ReturnKind == AbiKind.Void)
+        {
+            yield return $"        {invoke};";
+        }
+        else
+        {
+            yield return $"        return static_cast<{callback.ReturnNativeType}>({invoke});";
+        }
+
+        yield return "    }";
+        yield return "};";
     }
 
     private static string CppParameterName(AbiParameter parameter, int index)

@@ -206,6 +206,11 @@ internal static class InteropEmitter
                 case AbiKind.Opaque:
                     types.Add("void*");
                     break;
+                case AbiKind.Callback:
+                    types.Add("void*");
+                    types.Add("void*");
+                    types.Add("void*");
+                    break;
                 default:
                     types.Add(AbiPlan.CSharpType(parameter.Kind));
                     break;
@@ -245,13 +250,13 @@ internal static class InteropEmitter
     {
         if (member.Kind == "constructor" && plan.CreateByMember.TryGetValue(member.Id, out var create))
         {
-            return "constructor:" + string.Join(",", create.Parameters.Select(AbiPlan.CSharpParameterType));
+            return "constructor:" + string.Join(",", create.Parameters.Select(ParameterKey));
         }
 
         if (member.Kind is "method" or "operator"
             && plan.MethodByMember.TryGetValue(member.Id, out var method))
         {
-            return member.Kind + ":" + string.Join(",", method.Parameters.Select(AbiPlan.CSharpParameterType));
+            return member.Kind + ":" + string.Join(",", method.Parameters.Select(ParameterKey));
         }
 
         if (member.Kind is "method" or "function" or "operator" or "constructor" or "destructor")
@@ -264,6 +269,11 @@ internal static class InteropEmitter
 
         return "field";
     }
+
+    private static string ParameterKey(AbiParameter parameter) =>
+        parameter.Kind == AbiKind.Callback
+            ? "callback:" + parameter.Callback!.NativeType
+            : AbiPlan.CSharpParameterType(parameter);
 
     private static string MemberBaseName(MemberRecord member) => member.Kind switch
     {
@@ -550,10 +560,31 @@ internal static class InteropEmitter
 
     private static string ParameterDeclarations(IReadOnlyList<AbiParameter> parameters)
     {
-        return string.Join(
-            ", ",
-            parameters.Select((parameter, index) =>
-                $"{AbiPlan.CSharpParameterType(parameter)} {CSharpParameterName(parameter, index)}"));
+        var declarations = new List<string>();
+        for (var index = 0; index < parameters.Count; index++)
+        {
+            var parameter = parameters[index];
+            if (parameter.Kind == AbiKind.Callback)
+            {
+                var (invoke, userData, release) = CallbackNames(parameter, index);
+                declarations.Add($"nint {invoke}");
+                declarations.Add($"nint {userData}");
+                declarations.Add($"nint {release}");
+                continue;
+            }
+
+            declarations.Add($"{AbiPlan.CSharpParameterType(parameter)} {CSharpParameterName(parameter, index)}");
+        }
+
+        return string.Join(", ", declarations);
+    }
+
+    private static (string Invoke, string UserData, string Release) CallbackNames(
+        AbiParameter parameter,
+        int index)
+    {
+        var name = CSharpParameterName(parameter, index);
+        return (name + "Invoke", name + "UserData", name + "Release");
     }
 
     private static int FindStringParameter(IReadOnlyList<AbiParameter> parameters)
@@ -588,6 +619,14 @@ internal static class InteropEmitter
                         ? $"(void*){name}.Handle"
                         : $"(void*){name}";
                     break;
+                case AbiKind.Callback:
+                {
+                    var (invoke, userData, release) = CallbackNames(parameter, index);
+                    yield return $"(void*){invoke}";
+                    yield return $"(void*){userData}";
+                    yield return $"(void*){release}";
+                    break;
+                }
                 default:
                     yield return name;
                     break;
