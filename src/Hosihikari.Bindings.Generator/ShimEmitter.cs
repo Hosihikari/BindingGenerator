@@ -822,6 +822,44 @@ internal static class ShimEmitter
                         yield return "    return HosihikariStringView{g_stringResult.data(), g_stringResult.size()};";
                     }
                 }
+                else if (function.ReturnKind == AbiKind.MapView)
+                {
+                    yield return "    thread_local std::vector<HosihikariMapEntry> hs_mapEntries;";
+                    yield return "    thread_local std::vector<std::string> hs_mapStrings;";
+                    yield return $"    auto result = {call};";
+                    yield return "    hs_mapEntries.clear();";
+                    yield return "    hs_mapEntries.reserve(result.size());";
+                    yield return "    hs_mapStrings.clear();";
+                    yield return "    hs_mapStrings.reserve(result.size() * 2);";
+                    yield return "    for (auto const& item : result)";
+                    yield return "    {";
+                    yield return "        HosihikariMapEntry entry{};";
+                    foreach (var line in EmitMapEncode(
+                        function.MapKeyKind,
+                        ArrayElementOwnership.None,
+                        null,
+                        "entry.key",
+                        "entry.keySize",
+                        "item.first"))
+                    {
+                        yield return "        " + line;
+                    }
+
+                    foreach (var line in EmitMapEncode(
+                        function.MapValueKind,
+                        function.MapValueOwnership,
+                        function.MapValueNativeType,
+                        "entry.value",
+                        "entry.valueSize",
+                        "item.second"))
+                    {
+                        yield return "        " + line;
+                    }
+
+                    yield return "        hs_mapEntries.push_back(entry);";
+                    yield return "    }";
+                    yield return "    return HosihikariArrayView{hs_mapEntries.data(), hs_mapEntries.size()};";
+                }
                 else if (function.ReturnKind == AbiKind.ArrayView)
                 {
                     if (function.ArrayElementKind == AbiKind.StringView)
@@ -1047,6 +1085,43 @@ internal static class ShimEmitter
         }
     }
 
+    private static bool IsSignedScalar(AbiKind kind) =>
+        kind is AbiKind.I8 or AbiKind.I16 or AbiKind.I32 or AbiKind.I64 or AbiKind.ISize;
+
+    private static IEnumerable<string> EmitMapEncode(
+        AbiKind kind,
+        ArrayElementOwnership ownership,
+        string? nativeType,
+        string target,
+        string sizeTarget,
+        string expression)
+    {
+        if (kind == AbiKind.StringView)
+        {
+            yield return $"hs_mapStrings.emplace_back({expression}.data(), {expression}.size());";
+            yield return "auto const& hs_stored = hs_mapStrings.back();";
+            yield return $"{target} = reinterpret_cast<std::uint64_t>(hs_stored.data());";
+            yield return $"{sizeTarget} = static_cast<std::uint64_t>(hs_stored.size());";
+            yield break;
+        }
+
+        if (kind == AbiKind.Opaque && ownership != ArrayElementOwnership.None)
+        {
+            yield return $"{target} = reinterpret_cast<std::uint64_t>(static_cast<void*>(new {nativeType}({expression})));";
+            yield break;
+        }
+
+        if (kind == AbiKind.Opaque)
+        {
+            yield return $"{target} = reinterpret_cast<std::uint64_t>(const_cast<void*>(static_cast<void const*>({expression})));";
+            yield break;
+        }
+
+        yield return IsSignedScalar(kind)
+            ? $"{target} = static_cast<std::uint64_t>(static_cast<std::int64_t>({expression}));"
+            : $"{target} = static_cast<std::uint64_t>({expression});";
+    }
+
     private static string SpecialParameterExpression(AbiParameter parameter, string name) =>
         parameter.SpecialValue switch
         {
@@ -1106,6 +1181,7 @@ internal static class ShimEmitter
         AbiKind.StringView => "return HosihikariStringView{nullptr, 0};",
         AbiKind.ArrayView => "return HosihikariArrayView{nullptr, 0};",
         AbiKind.Shared => "return HosihikariSharedHandle{nullptr, nullptr, nullptr};",
+        AbiKind.MapView => "return HosihikariArrayView{nullptr, 0};",
         AbiKind.F32 => "return 0.0f;",
         AbiKind.F64 => "return 0.0;",
         _ => "return 0;",

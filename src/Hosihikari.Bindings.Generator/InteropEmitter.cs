@@ -194,6 +194,54 @@ internal static class InteropEmitter
         }
     }
 
+    private static string MapKeyType(AbiFunction function) =>
+        function.MapKeyKind switch
+        {
+            AbiKind.StringView => "string",
+            AbiKind.Opaque => "nint",
+            _ => AbiPlan.CSharpType(function.MapKeyKind),
+        };
+
+    private static string MapValueType(AbiFunction function) =>
+        function.MapValueKind switch
+        {
+            AbiKind.StringView => "string",
+            AbiKind.Opaque => function.MapValueOwnership == ArrayElementOwnership.None
+                ? "nint"
+                : function.MapValueWrapperType!,
+            _ => AbiPlan.CSharpType(function.MapValueKind),
+        };
+
+    private static string MapDecodeExpression(
+        AbiKind kind,
+        ArrayElementOwnership ownership,
+        string? wrapperType,
+        string valueField,
+        string sizeField)
+    {
+        if (kind == AbiKind.StringView)
+        {
+            return $"global::System.Runtime.InteropServices.Marshal.PtrToStringUTF8((nint)__hs_entry.{valueField}, checked((int)__hs_entry.{sizeField}))!";
+        }
+
+        if (kind == AbiKind.Opaque)
+        {
+            return ownership == ArrayElementOwnership.None
+                ? $"(nint)__hs_entry.{valueField}"
+                : $"new {wrapperType}((nint)__hs_entry.{valueField})";
+        }
+
+        if (kind == AbiKind.Bool)
+        {
+            return $"__hs_entry.{valueField} != 0";
+        }
+
+        var type = AbiPlan.CSharpType(kind);
+        return kind is AbiKind.I8 or AbiKind.I16 or AbiKind.I32 or AbiKind.I64 or AbiKind.ISize
+            ? $"unchecked(({type})(long)__hs_entry.{valueField})"
+            : $"unchecked(({type})__hs_entry.{valueField})";
+    }
+
     private static void EmitCallableWrappers(string outputDirectory, AbiPlan plan)
     {
         foreach (var callable in plan.UsedCallables)
@@ -718,6 +766,7 @@ internal static class InteropEmitter
                         ? "global::Hosihikari.Bindings.Abi.SharedHandle[]"
                         : AbiPlan.CSharpType(method.ArrayElementKind) + "[]",
             AbiKind.Shared => "global::Hosihikari.Bindings.Abi.SharedHandle?",
+            AbiKind.MapView => $"global::System.Collections.Generic.Dictionary<{MapKeyType(method)}, {MapValueType(method)}>",
             _ => AbiPlan.CSharpType(method.ReturnKind) + (method.ReturnOptional ? "?" : ""),
         };
 
@@ -773,6 +822,23 @@ internal static class InteropEmitter
                 }
 
                 break;
+            case AbiKind.MapView:
+            {
+                var keyType = MapKeyType(method);
+                var valueType = MapValueType(method);
+                lines.Add(indent + $"var __hs_view = {call};");
+                lines.Add(indent + "var __hs_items = (global::Hosihikari.Bindings.Abi.MapEntry*)__hs_view.Data;");
+                lines.Add(indent + $"var __hs_result = new global::System.Collections.Generic.Dictionary<{keyType}, {valueType}>(checked((int)__hs_view.Size));");
+                lines.Add(indent + "for (var __hs_i = 0; __hs_i < checked((int)__hs_view.Size); __hs_i++)");
+                lines.Add(indent + "{");
+                lines.Add(indent + "    var __hs_entry = __hs_items[__hs_i];");
+                lines.Add(indent + $"    var __hs_key = {MapDecodeExpression(method.MapKeyKind, ArrayElementOwnership.None, null, "Key", "KeySize")};");
+                lines.Add(indent + $"    var __hs_value = {MapDecodeExpression(method.MapValueKind, method.MapValueOwnership, method.MapValueWrapperType, "Value", "ValueSize")};");
+                lines.Add(indent + "    __hs_result[__hs_key] = __hs_value;");
+                lines.Add(indent + "}");
+                lines.Add(indent + "return __hs_result;");
+                break;
+            }
             case AbiKind.ArrayView:
                 lines.Add(indent + $"var __hs_view = {call};");
                 if (method.ArrayElementKind == AbiKind.StringView)

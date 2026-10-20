@@ -24,6 +24,7 @@ internal enum AbiKind
     ArrayView,
     Vector,
     Shared,
+    MapView,
 }
 
 internal enum AbiFunctionKind
@@ -182,6 +183,11 @@ internal sealed class AbiFunction
     public string? ArrayElementWrapperType { get; init; }
     public string? ArrayElementNativeType { get; init; }
     public SharedWrapperKind SharedWrapper { get; init; }
+    public AbiKind MapKeyKind { get; init; }
+    public AbiKind MapValueKind { get; init; }
+    public string? MapValueWrapperType { get; init; }
+    public ArrayElementOwnership MapValueOwnership { get; init; }
+    public string? MapValueNativeType { get; init; }
     public bool ReturnNullable { get; init; }
     public bool ReturnExpected { get; init; }
     public string? ExpectedErrorType { get; init; }
@@ -860,6 +866,7 @@ internal sealed class AbiPlan
         AbiKind.ArrayView => "HosihikariArrayView",
         AbiKind.Vector => "void",
         AbiKind.Shared => "HosihikariSharedHandle",
+        AbiKind.MapView => "HosihikariArrayView",
         _ => "void",
     };
 
@@ -885,6 +892,7 @@ internal sealed class AbiPlan
         AbiKind.ArrayView => "nint",
         AbiKind.Vector => "nint",
         AbiKind.Shared => "nint",
+        AbiKind.MapView => "nint",
         _ => "nint",
     };
 
@@ -895,6 +903,7 @@ internal sealed class AbiPlan
         AbiKind.ArrayView => "global::Hosihikari.Bindings.Abi.ArrayView",
         AbiKind.Vector => "nint",
         AbiKind.Shared => "global::Hosihikari.Bindings.Abi.SharedHandleData",
+        AbiKind.MapView => "global::Hosihikari.Bindings.Abi.ArrayView",
         _ => CSharpType(kind),
     };
 
@@ -1609,6 +1618,11 @@ internal sealed class AbiPlan
                 out var timeDurationType,
                 out var specialValue,
                 out var specialValueType,
+                out var mapKeyKind,
+                out var mapValueKind,
+                out var mapValueWrapperType,
+                out var mapValueOwnership,
+                out var mapValueNativeType,
                 out var returnNullable,
                 out var returnExpected,
                 out var expectedErrorType,
@@ -1690,6 +1704,11 @@ internal sealed class AbiPlan
             TimeDurationType = timeDurationType,
             SpecialValue = specialValue,
             SpecialValueType = specialValueType,
+            MapKeyKind = mapKeyKind,
+            MapValueKind = mapValueKind,
+            MapValueWrapperType = mapValueWrapperType,
+            MapValueOwnership = mapValueOwnership,
+            MapValueNativeType = mapValueNativeType,
             ReturnNullable = returnNullable,
             ReturnExpected = returnExpected,
             ExpectedErrorType = expectedErrorType,
@@ -1730,6 +1749,11 @@ internal sealed class AbiPlan
         out string? timeDurationType,
         out SpecialValueKind specialValue,
         out string? specialValueType,
+        out AbiKind mapKeyKind,
+        out AbiKind mapValueKind,
+        out string? mapValueWrapperType,
+        out ArrayElementOwnership mapValueOwnership,
+        out string? mapValueNativeType,
         out bool nullable,
         out bool returnExpected,
         out string? expectedErrorType,
@@ -1756,6 +1780,11 @@ internal sealed class AbiPlan
         timeDurationType = null;
         specialValue = SpecialValueKind.None;
         specialValueType = null;
+        mapKeyKind = AbiKind.Void;
+        mapValueKind = AbiKind.Void;
+        mapValueWrapperType = null;
+        mapValueOwnership = ArrayElementOwnership.None;
+        mapValueNativeType = null;
         nullable = false;
         returnExpected = false;
         expectedErrorType = null;
@@ -1820,6 +1849,11 @@ internal sealed class AbiPlan
                     out timeDurationType,
                     out specialValue,
                     out specialValueType,
+                    out mapKeyKind,
+                    out mapValueKind,
+                    out mapValueWrapperType,
+                    out mapValueOwnership,
+                    out mapValueNativeType,
                     out nullable,
                     out var nestedExpected,
                     out _,
@@ -1921,6 +1955,79 @@ internal sealed class AbiPlan
             wrapperType = variantInfo.WrapperType;
             owned = true;
             returnVariant = variantInfo;
+            return true;
+        }
+
+        if (TryParseUnorderedMap(nativeType, out var mapKey, out var mapValue))
+        {
+            AbiKind keyKind;
+            if (IsStringViewType(mapKey) || IsStringType(mapKey))
+            {
+                keyKind = AbiKind.StringView;
+            }
+            else if (!TryMapEnumUnderlying(mapKey, enumUnderlyingByName, out keyKind)
+                && !TryMapFundamental(mapKey, out keyKind))
+            {
+                if (!IsPointerType(mapKey))
+                {
+                    reason = $"map key type '{mapKey}' is not supported";
+                    return false;
+                }
+
+                keyKind = AbiKind.Opaque;
+            }
+
+            AbiKind valueKind;
+            var valueOwnership = ArrayElementOwnership.None;
+            string? valueWrapper = null;
+            string? valueNative = null;
+            VariantAbiInfo? mapVariant = null;
+            if (IsStringViewType(mapValue) || IsStringType(mapValue))
+            {
+                valueKind = AbiKind.StringView;
+            }
+            else if (TryMapEnumUnderlying(mapValue, enumUnderlyingByName, out valueKind)
+                || TryMapFundamental(mapValue, out valueKind))
+            {
+            }
+            else if (IsPointerType(mapValue))
+            {
+                valueKind = AbiKind.Opaque;
+            }
+            else if (variants.TryGet(surface, NormalizeTypeName(mapValue), out var mapValueVariant))
+            {
+                valueKind = AbiKind.Opaque;
+                valueOwnership = ArrayElementOwnership.VariantCopy;
+                valueWrapper = mapValueVariant.WrapperType;
+                valueNative = NormalizeTypeName(mapValue);
+                mapVariant = mapValueVariant;
+            }
+            else if (TryResolveRecordWrapper(
+                    mapValue,
+                    declarationsByQualifiedName,
+                    declarationNames,
+                    destroyableDeclarationIds,
+                    false,
+                    out var mapRecordWrapper))
+            {
+                valueKind = AbiKind.Opaque;
+                valueOwnership = ArrayElementOwnership.RecordCopy;
+                valueWrapper = mapRecordWrapper;
+                valueNative = mapValue;
+            }
+            else
+            {
+                reason = $"map value type '{mapValue}' is not supported";
+                return false;
+            }
+
+            kind = AbiKind.MapView;
+            mapKeyKind = keyKind;
+            mapValueKind = valueKind;
+            mapValueWrapperType = valueWrapper;
+            mapValueOwnership = valueOwnership;
+            mapValueNativeType = valueNative;
+            returnVariant = mapVariant;
             return true;
         }
 
@@ -2884,6 +2991,29 @@ internal sealed class AbiPlan
 
     private static bool IsFilesystemPath(string canonical) =>
         string.Equals(NormalizeTypeName(canonical), "std::filesystem::path", StringComparison.Ordinal);
+
+    private static bool TryParseUnorderedMap(string canonical, out string key, out string value)
+    {
+        key = "";
+        value = "";
+        var text = NormalizeTypeName(canonical);
+        const string prefix = "std::unordered_map<";
+        if (!text.StartsWith(prefix, StringComparison.Ordinal)
+            || !text.EndsWith(">", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var arguments = SplitTemplateArguments(text[prefix.Length..^1].Trim()).ToList();
+        if (arguments.Count != 2)
+        {
+            return false;
+        }
+
+        key = StripTopLevelQualifiers(arguments[0].Trim());
+        value = StripTopLevelQualifiers(arguments[1].Trim());
+        return key.Length > 0 && value.Length > 0;
+    }
 
     private static bool TryParseUnorderedSet(string canonical, out string element)
     {
