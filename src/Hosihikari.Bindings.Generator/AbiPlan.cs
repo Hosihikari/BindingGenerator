@@ -55,6 +55,13 @@ internal sealed class AbiParameter
     public string? VectorElementWrapperType { get; init; }
     public ArrayElementOwnership VectorElementOwnership { get; init; }
     public string? VectorElementNativeType { get; init; }
+    public bool IsMap { get; init; }
+    public AbiKind MapKeyKind { get; init; }
+    public AbiKind MapValueKind { get; init; }
+    public string MapKeyNativeType { get; init; } = "";
+    public string MapValueNativeType { get; init; } = "";
+    public string? MapValueWrapperType { get; init; }
+    public ArrayElementOwnership MapValueOwnership { get; init; }
     public string? WrapperType { get; init; }
     public AbiCallback? Callback { get; init; }
     public VariantAbiInfo? VariantInfo { get; init; }
@@ -680,6 +687,7 @@ internal sealed class AbiPlan
                         constructor,
                         publicDeclarationsByQualifiedName,
                         declarationNames,
+                        destroyableDeclarationIds,
                         enumUnderlyingByName,
                         allowOwnedByValue,
                         variants,
@@ -740,6 +748,7 @@ internal sealed class AbiPlan
                         field,
                         publicDeclarationsByQualifiedName,
                         declarationNames,
+                        destroyableDeclarationIds,
                         enumUnderlyingByName,
                         allowOwnedByValue,
                         variants,
@@ -929,11 +938,30 @@ internal sealed class AbiPlan
         _ => CSharpType(kind),
     };
 
-    public static string CSharpParameterType(AbiParameter parameter) => parameter.Kind switch
+    public static string CSharpParameterType(AbiParameter parameter) =>
+        parameter.IsMap
+            ? $"global::System.Collections.Generic.Dictionary<{CSharpMapKeyType(parameter.MapKeyKind)}, {CSharpMapValueType(parameter)}>"
+            : parameter.Kind switch
+            {
+                AbiKind.StringView => "string",
+                AbiKind.Opaque => parameter.WrapperType ?? "nint",
+                _ => CSharpType(parameter.Kind),
+            };
+
+    public static string CSharpMapKeyType(AbiKind kind) => kind switch
     {
         AbiKind.StringView => "string",
-        AbiKind.Opaque => parameter.WrapperType ?? "nint",
-        _ => CSharpType(parameter.Kind),
+        AbiKind.Opaque => "nint",
+        _ => CSharpType(kind),
+    };
+
+    public static string CSharpMapValueType(AbiParameter parameter) => parameter.MapValueKind switch
+    {
+        AbiKind.StringView => "string",
+        AbiKind.Opaque => parameter.MapValueOwnership == ArrayElementOwnership.None
+            ? "nint"
+            : parameter.MapValueWrapperType!,
+        _ => CSharpType(parameter.MapValueKind),
     };
 
     public static string CSharpPropertyType(AbiKind kind) => kind switch
@@ -1462,6 +1490,7 @@ internal sealed class AbiPlan
         MemberRecord constructor,
         IReadOnlyDictionary<string, DeclarationRecord> declarationsByQualifiedName,
         IReadOnlyDictionary<string, DeclarationName> declarationNames,
+        IReadOnlySet<string> destroyableDeclarationIds,
         IReadOnlyDictionary<string, string> enumUnderlyingByName,
         bool linkCarrier,
         VariantRegistry variants,
@@ -1498,6 +1527,7 @@ internal sealed class AbiPlan
                     parameter.Type,
                     declarationsByQualifiedName,
                     declarationNames,
+                    destroyableDeclarationIds,
                     enumUnderlyingByName,
                     linkCarrier,
                     variants,
@@ -1666,6 +1696,7 @@ internal sealed class AbiPlan
                     parameter.Type,
                     declarationsByQualifiedName,
                     declarationNames,
+                    destroyableDeclarationIds,
                     enumUnderlyingByName,
                     linkCarrier,
                     variants,
@@ -1914,6 +1945,48 @@ internal sealed class AbiPlan
             return true;
         }
 
+        var mapType = NormalizeTypeName(nativeType);
+        if (!IsPointerType(nativeType) && TryParseUnorderedMap(mapType, out var mapKey, out var mapValue))
+        {
+            if (!TryMapMapEntryKinds(
+                    surface,
+                    mapKey,
+                    mapValue,
+                    declarationsByQualifiedName,
+                    declarationNames,
+                    destroyableDeclarationIds,
+                    enumUnderlyingByName,
+                    variants,
+                    out var keyKind,
+                    out var valueKind,
+                    out var valueWrapper,
+                    out var valueOwnership,
+                    out var valueNative,
+                    out var mapVariant,
+                    out var mapReason))
+            {
+                if (IsPointerOrReferenceType(nativeType))
+                {
+                    // Keep reference and pointer maps whose entries cannot be projected as
+                    // borrowed handles instead of dropping the member entirely.
+                    kind = AbiKind.Opaque;
+                    return true;
+                }
+
+                reason = mapReason;
+                return false;
+            }
+
+            kind = AbiKind.MapView;
+            mapKeyKind = keyKind;
+            mapValueKind = valueKind;
+            mapValueWrapperType = valueWrapper;
+            mapValueOwnership = valueOwnership;
+            mapValueNativeType = valueNative;
+            returnVariant = mapVariant;
+            return true;
+        }
+
         if (IsPointerOrReferenceType(nativeType))
         {
             kind = AbiKind.Opaque;
@@ -1977,79 +2050,6 @@ internal sealed class AbiPlan
             wrapperType = variantInfo.WrapperType;
             owned = true;
             returnVariant = variantInfo;
-            return true;
-        }
-
-        if (TryParseUnorderedMap(nativeType, out var mapKey, out var mapValue))
-        {
-            AbiKind keyKind;
-            if (IsStringViewType(mapKey) || IsStringType(mapKey))
-            {
-                keyKind = AbiKind.StringView;
-            }
-            else if (!TryMapEnumUnderlying(mapKey, enumUnderlyingByName, out keyKind)
-                && !TryMapFundamental(mapKey, out keyKind))
-            {
-                if (!IsPointerType(mapKey))
-                {
-                    reason = $"map key type '{mapKey}' is not supported";
-                    return false;
-                }
-
-                keyKind = AbiKind.Opaque;
-            }
-
-            AbiKind valueKind;
-            var valueOwnership = ArrayElementOwnership.None;
-            string? valueWrapper = null;
-            string? valueNative = null;
-            VariantAbiInfo? mapVariant = null;
-            if (IsStringViewType(mapValue) || IsStringType(mapValue))
-            {
-                valueKind = AbiKind.StringView;
-            }
-            else if (TryMapEnumUnderlying(mapValue, enumUnderlyingByName, out valueKind)
-                || TryMapFundamental(mapValue, out valueKind))
-            {
-            }
-            else if (IsPointerType(mapValue))
-            {
-                valueKind = AbiKind.Opaque;
-            }
-            else if (variants.TryGet(surface, NormalizeTypeName(mapValue), out var mapValueVariant))
-            {
-                valueKind = AbiKind.Opaque;
-                valueOwnership = ArrayElementOwnership.VariantCopy;
-                valueWrapper = mapValueVariant.WrapperType;
-                valueNative = NormalizeTypeName(mapValue);
-                mapVariant = mapValueVariant;
-            }
-            else if (TryResolveRecordWrapper(
-                    mapValue,
-                    declarationsByQualifiedName,
-                    declarationNames,
-                    destroyableDeclarationIds,
-                    false,
-                    out var mapRecordWrapper))
-            {
-                valueKind = AbiKind.Opaque;
-                valueOwnership = ArrayElementOwnership.RecordCopy;
-                valueWrapper = mapRecordWrapper;
-                valueNative = mapValue;
-            }
-            else
-            {
-                reason = $"map value type '{mapValue}' is not supported";
-                return false;
-            }
-
-            kind = AbiKind.MapView;
-            mapKeyKind = keyKind;
-            mapValueKind = valueKind;
-            mapValueWrapperType = valueWrapper;
-            mapValueOwnership = valueOwnership;
-            mapValueNativeType = valueNative;
-            returnVariant = mapVariant;
             return true;
         }
 
@@ -2649,6 +2649,13 @@ internal sealed class AbiPlan
                 return;
             }
 
+            if (TryParseUnorderedMap(normalized, out var mapKey, out var mapValue))
+            {
+                Consider(mapKey);
+                Consider(mapValue);
+                return;
+            }
+
             if (TryParseOptional(normalized, out var inner)
                 || TryParseOptionalRef(normalized, out inner)
                 || TryParseExpected(normalized, out inner, out _)
@@ -2700,6 +2707,13 @@ internal sealed class AbiPlan
             if (TryParseVariant(normalized, out _))
             {
                 Register(surface, normalized);
+                return;
+            }
+
+            if (TryParseUnorderedMap(normalized, out var mapKey, out var mapValue))
+            {
+                Consider(surface, mapKey);
+                Consider(surface, mapValue);
                 return;
             }
 
@@ -3071,6 +3085,89 @@ internal sealed class AbiPlan
     private static bool IsFilesystemPath(string canonical) =>
         string.Equals(NormalizeTypeName(canonical), "std::filesystem::path", StringComparison.Ordinal);
 
+    private static bool TryMapMapEntryKinds(
+        string surface,
+        string mapKey,
+        string mapValue,
+        IReadOnlyDictionary<string, DeclarationRecord> declarationsByQualifiedName,
+        IReadOnlyDictionary<string, DeclarationName> declarationNames,
+        IReadOnlySet<string> destroyableDeclarationIds,
+        IReadOnlyDictionary<string, string> enumUnderlyingByName,
+        VariantRegistry variants,
+        out AbiKind keyKind,
+        out AbiKind valueKind,
+        out string? valueWrapper,
+        out ArrayElementOwnership valueOwnership,
+        out string? valueNative,
+        out VariantAbiInfo? valueVariant,
+        out string? reason)
+    {
+        keyKind = AbiKind.Void;
+        valueKind = AbiKind.Void;
+        valueWrapper = null;
+        valueOwnership = ArrayElementOwnership.None;
+        valueNative = null;
+        valueVariant = null;
+        reason = null;
+
+        if (IsStringViewType(mapKey) || IsStringType(mapKey))
+        {
+            keyKind = AbiKind.StringView;
+        }
+        else if (!TryMapEnumUnderlying(mapKey, enumUnderlyingByName, out keyKind)
+            && !TryMapFundamental(mapKey, out keyKind))
+        {
+            if (!IsPointerType(mapKey))
+            {
+                reason = $"map key type '{mapKey}' is not supported";
+                return false;
+            }
+
+            keyKind = AbiKind.Opaque;
+        }
+
+        if (IsStringViewType(mapValue) || IsStringType(mapValue))
+        {
+            valueKind = AbiKind.StringView;
+        }
+        else if (TryMapEnumUnderlying(mapValue, enumUnderlyingByName, out valueKind)
+            || TryMapFundamental(mapValue, out valueKind))
+        {
+        }
+        else if (IsPointerType(mapValue))
+        {
+            valueKind = AbiKind.Opaque;
+        }
+        else if (variants.TryGet(surface, NormalizeTypeName(mapValue), out var mapValueVariant))
+        {
+            valueKind = AbiKind.Opaque;
+            valueOwnership = ArrayElementOwnership.VariantCopy;
+            valueWrapper = mapValueVariant.WrapperType;
+            valueNative = NormalizeTypeName(mapValue);
+            valueVariant = mapValueVariant;
+        }
+        else if (TryResolveRecordWrapper(
+                mapValue,
+                declarationsByQualifiedName,
+                declarationNames,
+                destroyableDeclarationIds,
+                false,
+                out var mapRecordWrapper))
+        {
+            valueKind = AbiKind.Opaque;
+            valueOwnership = ArrayElementOwnership.RecordCopy;
+            valueWrapper = mapRecordWrapper;
+            valueNative = mapValue;
+        }
+        else
+        {
+            reason = $"map value type '{mapValue}' is not supported";
+            return false;
+        }
+
+        return true;
+    }
+
     private static bool TryParseUnorderedMap(string canonical, out string key, out string value)
     {
         key = "";
@@ -3205,6 +3302,7 @@ internal sealed class AbiPlan
         MemberRecord field,
         IReadOnlyDictionary<string, DeclarationRecord> declarationsByQualifiedName,
         IReadOnlyDictionary<string, DeclarationName> declarationNames,
+        IReadOnlySet<string> destroyableDeclarationIds,
         IReadOnlyDictionary<string, string> enumUnderlyingByName,
         bool linkCarrier,
         VariantRegistry variants,
@@ -3270,6 +3368,7 @@ internal sealed class AbiPlan
                 text,
                 declarationsByQualifiedName,
                 declarationNames,
+                destroyableDeclarationIds,
                 enumUnderlyingByName,
                 linkCarrier,
                 variants,
@@ -3281,7 +3380,8 @@ internal sealed class AbiPlan
 
         if (valueParameter.Kind == AbiKind.Callback
             || valueParameter.IsOptional
-            || valueParameter.IsVector)
+            || valueParameter.IsVector
+            || valueParameter.IsMap)
         {
             // Callback and optional fields are readable as opaque views; a setter would need
             // the hidden presence flag to be threaded through the field ABI.
@@ -3322,6 +3422,7 @@ internal sealed class AbiPlan
         string canonical,
         IReadOnlyDictionary<string, DeclarationRecord> declarationsByQualifiedName,
         IReadOnlyDictionary<string, DeclarationName> declarationNames,
+        IReadOnlySet<string> destroyableDeclarationIds,
         IReadOnlyDictionary<string, string> enumUnderlyingByName,
         bool linkCarrier,
         VariantRegistry variants,
@@ -3350,6 +3451,49 @@ internal sealed class AbiPlan
                 IsConst = true,
                 WrapperType = variantInfo.WrapperType,
                 VariantInfo = variantInfo,
+            };
+            return true;
+        }
+
+        var mapType = NormalizeTypeName(text);
+        if (TryParseUnorderedMap(mapType, out var mapKey, out var mapValue))
+        {
+            if (!TryMapMapEntryKinds(
+                    surface,
+                    mapKey,
+                    mapValue,
+                    declarationsByQualifiedName,
+                    declarationNames,
+                    destroyableDeclarationIds,
+                    enumUnderlyingByName,
+                    variants,
+                    out var mapKeyKind,
+                    out var mapValueKind,
+                    out var mapValueWrapper,
+                    out var mapValueOwnership,
+                    out var mapValueNative,
+                    out var mapVariant,
+                    out var mapReason))
+            {
+                reason = mapReason;
+                return false;
+            }
+
+            parameter = new AbiParameter
+            {
+                Name = name,
+                Kind = AbiKind.MapView,
+                NativeType = mapType,
+                IsMap = true,
+                IsReference = IsReferenceType(text),
+                IsConst = IsConstType(text),
+                MapKeyKind = mapKeyKind,
+                MapValueKind = mapValueKind,
+                MapKeyNativeType = mapKey,
+                MapValueNativeType = mapValueNative ?? mapValue,
+                MapValueWrapperType = mapValueWrapper,
+                MapValueOwnership = mapValueOwnership,
+                VariantInfo = mapVariant,
             };
             return true;
         }

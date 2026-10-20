@@ -426,7 +426,7 @@ internal static class InteropEmitter
 
         foreach (var parameter in function.Parameters)
         {
-            if (parameter.IsVector)
+            if (parameter.IsVector || parameter.IsMap)
             {
                 continue;
             }
@@ -460,6 +460,11 @@ internal static class InteropEmitter
                 _ => AbiPlan.CSharpType(parameter.VectorElementKind) + "*",
             });
             types.Add("nuint");
+        }
+
+        foreach (var _ in function.Parameters.Where(parameter => parameter.IsMap))
+        {
+            types.Add("global::Hosihikari.Bindings.Abi.ArrayView");
         }
 
         foreach (var parameter in function.Parameters.Where(parameter => parameter.IsOptional))
@@ -526,7 +531,9 @@ internal static class InteropEmitter
     }
 
     private static string ParameterKey(AbiParameter parameter) =>
-        parameter.IsVector
+        parameter.IsMap
+            ? "map:" + parameter.NativeType
+            : parameter.IsVector
             ? "vector:" + parameter.VectorElementType
             : parameter.IsOptionalRef
                 ? "optional_ref:" + parameter.OptionalRefInnerType
@@ -968,21 +975,23 @@ internal static class InteropEmitter
                 continue;
             }
 
-            var type = parameter.IsVector
-                ? parameter.VectorElementWrapperType is not null
-                    ? parameter.VectorElementWrapperType
-                        + (parameter.VectorElementOwnership == ArrayElementOwnership.OptionalRecordCopy ? "?[]" : "[]")
-                    : parameter.VectorElementKind == AbiKind.StringView
-                        ? "string[]"
-                        : AbiPlan.CSharpType(parameter.VectorElementKind) + "[]"
-                : parameter.IsOptional
-                    ? parameter.Kind switch
-                    {
-                        AbiKind.StringView => "string?",
-                        AbiKind.Opaque => (parameter.WrapperType ?? "nint") + "?",
-                        _ => AbiPlan.CSharpType(parameter.Kind) + "?",
-                    }
-                    : AbiPlan.CSharpParameterType(parameter);
+            var type = parameter.IsMap
+                ? $"global::System.Collections.Generic.Dictionary<{AbiPlan.CSharpMapKeyType(parameter.MapKeyKind)}, {AbiPlan.CSharpMapValueType(parameter)}>?"
+                : parameter.IsVector
+                    ? parameter.VectorElementWrapperType is not null
+                        ? parameter.VectorElementWrapperType
+                            + (parameter.VectorElementOwnership == ArrayElementOwnership.OptionalRecordCopy ? "?[]" : "[]")
+                        : parameter.VectorElementKind == AbiKind.StringView
+                            ? "string[]"
+                            : AbiPlan.CSharpType(parameter.VectorElementKind) + "[]"
+                    : parameter.IsOptional
+                        ? parameter.Kind switch
+                        {
+                            AbiKind.StringView => "string?",
+                            AbiKind.Opaque => (parameter.WrapperType ?? "nint") + "?",
+                            _ => AbiPlan.CSharpType(parameter.Kind) + "?",
+                        }
+                        : AbiPlan.CSharpParameterType(parameter);
             declarations.Add($"{type} {CSharpParameterName(parameter, index)}");
         }
 
@@ -1016,6 +1025,7 @@ internal static class InteropEmitter
     {
         var optionalPresence = new List<string>();
         var vectorArguments = new List<string>();
+        var mapArguments = new List<string>();
         for (var index = 0; index < parameters.Count; index++)
         {
             var parameter = parameters[index];
@@ -1036,6 +1046,12 @@ internal static class InteropEmitter
                 vectorArguments.Add(parameter.VectorElementKind == AbiKind.StringView
                     ? "(nuint)__hs_vectorViews.Length"
                     : $"(nuint)({name}?.Length ?? 0)");
+                continue;
+            }
+
+            if (parameter.IsMap)
+            {
+                mapArguments.Add($"__hs_map{index}View");
                 continue;
             }
 
@@ -1081,6 +1097,11 @@ internal static class InteropEmitter
             yield return argument;
         }
 
+        foreach (var argument in mapArguments)
+        {
+            yield return argument;
+        }
+
         foreach (var presence in optionalPresence)
         {
             yield return presence;
@@ -1101,6 +1122,161 @@ internal static class InteropEmitter
     }
 
     private static void EmitPinnedBody(
+        List<string> lines,
+        IReadOnlyList<AbiParameter> parameters,
+        IReadOnlyList<int> stringIndices,
+        int vectorIndex,
+        string indent,
+        Action<string> emitBody)
+    {
+        var mapIndices = FindMapParameters(parameters);
+        if (mapIndices.Count == 0)
+        {
+            EmitPinnedBodyCore(lines, parameters, stringIndices, vectorIndex, indent, emitBody);
+            return;
+        }
+
+        EmitMapBuffers(lines, parameters, mapIndices, indent);
+        lines.Add(indent + "try");
+        lines.Add(indent + "{");
+        EmitPinnedBodyCore(lines, parameters, stringIndices, vectorIndex, indent + "    ", emitBody);
+        lines.Add(indent + "}");
+        lines.Add(indent + "finally");
+        lines.Add(indent + "{");
+        EmitMapCleanup(lines, mapIndices, indent + "    ");
+        lines.Add(indent + "}");
+    }
+
+    private static List<int> FindMapParameters(IReadOnlyList<AbiParameter> parameters)
+    {
+        var indices = new List<int>();
+        for (var index = 0; index < parameters.Count; index++)
+        {
+            if (parameters[index].IsMap)
+            {
+                indices.Add(index);
+            }
+        }
+
+        return indices;
+    }
+
+    private static void EmitMapBuffers(
+        List<string> lines,
+        IReadOnlyList<AbiParameter> parameters,
+        IReadOnlyList<int> mapIndices,
+        string indent)
+    {
+        foreach (var index in mapIndices)
+        {
+            var parameter = parameters[index];
+            var name = CSharpParameterName(parameter, index);
+            var valueHasStrings = parameter.MapValueKind == AbiKind.StringView;
+            var keyHasStrings = parameter.MapKeyKind == AbiKind.StringView;
+            var stringSlots = (keyHasStrings ? 1 : 0) + (valueHasStrings ? 1 : 0);
+            lines.Add(indent + $"var __hs_map{index}Items = {name};");
+            lines.Add(indent + $"var __hs_map{index}Count = __hs_map{index}Items?.Count ?? 0;");
+            lines.Add(indent + $"var __hs_map{index}Entries = (global::Hosihikari.Bindings.Abi.MapEntry*)global::System.Runtime.InteropServices.Marshal.AllocHGlobal((__hs_map{index}Count == 0 ? 1 : __hs_map{index}Count) * sizeof(global::Hosihikari.Bindings.Abi.MapEntry));");
+            lines.Add(indent + $"var __hs_map{index}Strings = new nint[__hs_map{index}Count * {stringSlots}];");
+            lines.Add(indent + $"var __hs_map{index}StringCount = 0;");
+            lines.Add(indent + $"var __hs_map{index}Index = 0;");
+            lines.Add(indent + $"if (__hs_map{index}Items is not null)");
+            lines.Add(indent + "{");
+            var inner = indent + "    ";
+            lines.Add(inner + $"foreach (var __hs_pair in __hs_map{index}Items)");
+            lines.Add(inner + "{");
+            lines.Add(inner + "    var __hs_entry = new global::Hosihikari.Bindings.Abi.MapEntry();");
+            EmitMapManagedEncode(
+                lines,
+                inner + "    ",
+                "Key",
+                "KeySize",
+                parameter.MapKeyKind,
+                ArrayElementOwnership.None,
+                "__hs_pair.Key",
+                index);
+            EmitMapManagedEncode(
+                lines,
+                inner + "    ",
+                "Value",
+                "ValueSize",
+                parameter.MapValueKind,
+                parameter.MapValueOwnership,
+                "__hs_pair.Value",
+                index);
+            lines.Add(inner + $"    __hs_map{index}Entries[__hs_map{index}Index++] = __hs_entry;");
+            lines.Add(inner + "}");
+            lines.Add(indent + "}");
+            lines.Add(indent + $"var __hs_map{index}View = new global::Hosihikari.Bindings.Abi.ArrayView {{ Data = __hs_map{index}Entries, Size = (nuint)__hs_map{index}Count }};");
+        }
+    }
+
+    private static void EmitMapManagedEncode(
+        List<string> lines,
+        string indent,
+        string field,
+        string sizeField,
+        AbiKind kind,
+        ArrayElementOwnership ownership,
+        string expression,
+        int mapIndex)
+    {
+        if (kind == AbiKind.StringView)
+        {
+            lines.Add(indent + $"var __hs_{field}Bytes = global::System.Text.Encoding.UTF8.GetBytes({expression} ?? string.Empty);");
+            lines.Add(indent + $"var __hs_{field}Ptr = global::System.Runtime.InteropServices.Marshal.AllocHGlobal(__hs_{field}Bytes.Length == 0 ? 1 : __hs_{field}Bytes.Length);");
+            lines.Add(indent + $"if (__hs_{field}Bytes.Length > 0) {{ global::System.Runtime.InteropServices.Marshal.Copy(__hs_{field}Bytes, 0, __hs_{field}Ptr, __hs_{field}Bytes.Length); }}");
+            lines.Add(indent + $"__hs_map{mapIndex}Strings[__hs_map{mapIndex}StringCount++] = __hs_{field}Ptr;");
+            lines.Add(indent + $"__hs_entry.{field} = (ulong)__hs_{field}Ptr;");
+            lines.Add(indent + $"__hs_entry.{sizeField} = (ulong)__hs_{field}Bytes.Length;");
+            return;
+        }
+
+        if (kind == AbiKind.Opaque)
+        {
+            lines.Add(indent + (ownership == ArrayElementOwnership.None
+                ? $"__hs_entry.{field} = unchecked((ulong)(nint)({expression}));"
+                : $"__hs_entry.{field} = unchecked((ulong)({expression}).Handle);"));
+            return;
+        }
+
+        if (kind == AbiKind.Bool)
+        {
+            lines.Add(indent + $"__hs_entry.{field} = ({expression}) ? 1UL : 0UL;");
+            return;
+        }
+
+        if (kind == AbiKind.F32)
+        {
+            lines.Add(indent + $"__hs_entry.{field} = global::System.BitConverter.SingleToUInt32Bits({expression});");
+            return;
+        }
+
+        if (kind == AbiKind.F64)
+        {
+            lines.Add(indent + $"__hs_entry.{field} = global::System.BitConverter.DoubleToUInt64Bits({expression});");
+            return;
+        }
+
+        var signed = kind is AbiKind.I8 or AbiKind.I16 or AbiKind.I32 or AbiKind.I64 or AbiKind.ISize;
+        lines.Add(indent + (signed
+            ? $"__hs_entry.{field} = unchecked((ulong)(long)({expression}));"
+            : $"__hs_entry.{field} = unchecked((ulong)({expression}));"));
+    }
+
+    private static void EmitMapCleanup(
+        List<string> lines,
+        IReadOnlyList<int> mapIndices,
+        string indent)
+    {
+        foreach (var index in mapIndices)
+        {
+            lines.Add(indent + $"for (var __hs_i = 0; __hs_i < __hs_map{index}StringCount; __hs_i++) {{ if (__hs_map{index}Strings[__hs_i] != 0) {{ global::System.Runtime.InteropServices.Marshal.FreeHGlobal(__hs_map{index}Strings[__hs_i]); }} }}");
+            lines.Add(indent + $"global::System.Runtime.InteropServices.Marshal.FreeHGlobal((nint)__hs_map{index}Entries);");
+        }
+    }
+
+    private static void EmitPinnedBodyCore(
         List<string> lines,
         IReadOnlyList<AbiParameter> parameters,
         IReadOnlyList<int> stringIndices,

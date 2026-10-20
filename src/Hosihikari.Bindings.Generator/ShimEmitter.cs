@@ -163,6 +163,7 @@ internal static class ShimEmitter
             $"// ir-manifest-sha256: {manifestHash}",
             "#include \"binding_table.h\"",
             "",
+            "#include <bit>",
             "#include <chrono>",
             "#include <cstddef>",
             "#include <cstdint>",
@@ -174,6 +175,7 @@ internal static class ShimEmitter
             "#include <optional>",
             "#include <string>",
             "#include <string_view>",
+            "#include <unordered_map>",
             "#include <utility>",
             "#include <variant>",
             "#include <vector>",
@@ -522,7 +524,7 @@ internal static class ShimEmitter
 
         foreach (var parameter in function.Parameters)
         {
-            if (parameter.IsVector)
+            if (parameter.IsVector || parameter.IsMap)
             {
                 continue;
             }
@@ -553,6 +555,11 @@ internal static class ShimEmitter
                 ? "HosihikariStringView"
                 : AbiPlan.CppType(parameter.VectorElementKind)) + "*");
             parameters.Add("std::size_t");
+        }
+
+        foreach (var _ in function.Parameters.Where(parameter => parameter.IsMap))
+        {
+            parameters.Add("HosihikariArrayView");
         }
 
         foreach (var parameter in function.Parameters.Where(parameter => parameter.IsOptional))
@@ -597,7 +604,7 @@ internal static class ShimEmitter
         for (var index = 0; index < function.Parameters.Count; index++)
         {
             var parameter = function.Parameters[index];
-            if (parameter.IsVector)
+            if (parameter.IsVector || parameter.IsMap)
             {
                 continue;
             }
@@ -642,6 +649,15 @@ internal static class ShimEmitter
         for (var index = 0; index < function.Parameters.Count; index++)
         {
             var parameter = function.Parameters[index];
+            if (parameter.IsMap)
+            {
+                parameters.Add($"HosihikariArrayView {CppParameterName(parameter, index)}_map");
+            }
+        }
+
+        for (var index = 0; index < function.Parameters.Count; index++)
+        {
+            var parameter = function.Parameters[index];
             if (parameter.IsOptional)
             {
                 parameters.Add($"bool {CppParameterName(parameter, index)}_hasValue");
@@ -655,6 +671,20 @@ internal static class ShimEmitter
 
         yield return $"static {returnType} {function.CppName}({string.Join(", ", parameters)}) try";
         yield return "{";
+
+        for (var index = 0; index < function.Parameters.Count; index++)
+        {
+            var parameter = function.Parameters[index];
+            if (!parameter.IsMap)
+            {
+                continue;
+            }
+
+            foreach (var line in EmitMapParameterConstruction(parameter, index))
+            {
+                yield return "    " + line;
+            }
+        }
 
         switch (function.Kind)
         {
@@ -1122,6 +1152,63 @@ internal static class ShimEmitter
             : $"{target} = static_cast<std::uint64_t>({expression});";
     }
 
+    private static IEnumerable<string> EmitMapParameterConstruction(AbiParameter parameter, int index)
+    {
+        var name = CppParameterName(parameter, index);
+        yield return $"{parameter.NativeType} hs_map{index};";
+        yield return $"hs_map{index}.reserve({name}_map.size);";
+        yield return $"auto const* hs_map{index}Items = static_cast<HosihikariMapEntry const*>({name}_map.data);";
+        yield return $"for (std::size_t hs_map{index}Index = 0; hs_map{index}Index < {name}_map.size; ++hs_map{index}Index)";
+        yield return "{";
+        yield return $"    auto const& hs_entry = hs_map{index}Items[hs_map{index}Index];";
+        yield return $"    hs_map{index}.emplace(";
+        yield return $"        {MapEntryDecodeExpression(parameter.MapKeyKind, ArrayElementOwnership.None, parameter.MapKeyNativeType, "key", "keySize")},";
+        yield return $"        {MapEntryDecodeExpression(parameter.MapValueKind, parameter.MapValueOwnership, parameter.MapValueNativeType, "value", "valueSize")});";
+        yield return "}";
+    }
+
+    private static string MapEntryDecodeExpression(
+        AbiKind kind,
+        ArrayElementOwnership ownership,
+        string? nativeType,
+        string field,
+        string sizeField)
+    {
+        nativeType ??= "";
+        if (kind == AbiKind.StringView)
+        {
+            var stringType = AbiPlan.IsStringViewType(nativeType) ? "std::string_view" : "std::string";
+            return $"{stringType}(reinterpret_cast<char const*>(hs_entry.{field}), hs_entry.{sizeField})";
+        }
+
+        if (kind == AbiKind.Opaque)
+        {
+            return ownership == ArrayElementOwnership.None
+                ? $"reinterpret_cast<{nativeType}>(hs_entry.{field})"
+                : $"*static_cast<{nativeType} const*>(reinterpret_cast<void const*>(hs_entry.{field}))";
+        }
+
+        if (kind == AbiKind.Bool)
+        {
+            return $"hs_entry.{field} != 0";
+        }
+
+        if (kind == AbiKind.F32)
+        {
+            return $"std::bit_cast<float>(static_cast<std::uint32_t>(hs_entry.{field}))";
+        }
+
+        if (kind == AbiKind.F64)
+        {
+            return $"std::bit_cast<double>(hs_entry.{field})";
+        }
+
+        var type = nativeType.Length > 0 ? nativeType : AbiPlan.CppType(kind);
+        return IsSignedScalar(kind)
+            ? $"static_cast<{type}>(static_cast<std::int64_t>(hs_entry.{field}))"
+            : $"static_cast<{type}>(hs_entry.{field})";
+    }
+
     private static string SpecialParameterExpression(AbiParameter parameter, string name) =>
         parameter.SpecialValue switch
         {
@@ -1211,6 +1298,12 @@ internal static class ShimEmitter
         string? nameOverride = null)
     {
         var name = nameOverride ?? CppParameterName(parameter, index);
+        if (parameter.IsMap)
+        {
+            var mapName = $"hs_map{index}";
+            return parameter.IsReference ? mapName : $"std::move({mapName})";
+        }
+
         if (parameter.IsVector)
         {
             if (parameter.VectorElementKind == AbiKind.StringView)
