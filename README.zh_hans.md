@@ -57,7 +57,7 @@ dotnet run --project src/Hosihikari.Bindings.Generator/Hosihikari.Bindings.Gener
 
 ## 本地 LLAPI 切片
 
-`frontend/run-local.ps1` 解析 `ll/api/event/Event.h`，把 IR 写到 `artifacts/llapi-ir` 并校验；`frontend/run-umbrella.ps1 -Module ll/api` 解析完整的 `src/ll/api` + `src-server/ll/api` 伞头，复用 LeviLamina 的 `compile_commands.json`，当前在 IR 1.2.0 产出 1,514 声明 / 6,114 成员。IR 为每个方法记录 `inline`/`defined`/`consteval`，并记录成员模板、引用限定符、枚举底层类型与类特性（`abstract`、`copyConstructible`），BindingShim 规划器据此判断资格与所有权。
+`frontend/run-local.ps1` 解析 `ll/api/event/Event.h`，把 IR 写到 `artifacts/llapi-ir` 并校验；`frontend/run-umbrella.ps1 -Module ll/api` 解析完整的 `src/ll/api` + `src-server/ll/api` 伞头，复用 LeviLamina 的 `compile_commands.json`，当前在 IR 1.2.0 产出 1,521 声明 / 6,114 成员。IR 为每个方法记录 `inline`/`defined`/`consteval`，并记录成员模板、引用限定符、枚举底层类型与类特性（`abstract`、`copyConstructible`），BindingShim 规划器据此判断资格与所有权。
 
 ```shell
 powershell -File frontend/run-umbrella.ps1 -Module ll/api -Output artifacts/llapi-full-ir
@@ -65,7 +65,7 @@ powershell -File frontend/smoke-shim.ps1 -IrDirectory artifacts/llapi-full-ir
 powershell -File frontend/smoke-shim.ps1 -IrDirectory artifacts/llapi-full-ir -LinkCarrier
 ```
 
-完整 LLAPI 伞头当前选出 214 个 link-safe 函数；用 `--link-carrier` 链接 `LeviLamina.lib` 时为 3,030 个函数。切片覆盖 `ll::event::EventId`、`ll::event::EventIdView`、`ll::hash_utils::HashedIdBase`、`ll::hash_utils::HashCombiner`、`ll::data::Version` 以及其他符合条件的类。Smoke test 从托管字符串创建原生 `EventId`，读取名称与哈希，比较两个 `HashedIdBase` 视图，调用 `HashCombiner::hash()`，并让 `ll::data::Version` 经过字符串构造、`to_string()`、字段读取、`valid(string)` 与 `isIdenticalTo(Version)` 往返。其余成员保留 Interop stub，并在覆盖清单中只记录 `interop` 发射器。
+完整 LLAPI 伞头当前选出 214 个 link-safe 函数；用 `--link-carrier` 链接 `LeviLamina.lib` 时为 3,039 个函数。切片覆盖 `ll::event::EventId`、`ll::event::EventIdView`、`ll::hash_utils::HashedIdBase`、`ll::hash_utils::HashCombiner`、`ll::data::Version` 以及其他符合条件的类。Smoke test 从托管字符串创建原生 `EventId`，读取名称与哈希，比较两个 `HashedIdBase` 视图，调用 `HashCombiner::hash()`，并让 `ll::data::Version` 经过字符串构造、`to_string()`、字段读取、`valid(string)` 与 `isIdenticalTo(Version)` 往返。其余成员保留 Interop stub，并在覆盖清单中只记录 `interop` 发射器。
 
 ## Endstone 表面
 

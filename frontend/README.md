@@ -35,13 +35,20 @@ cmake --build build/frontend --config Release
 
 The frontend parses the full `src/ll/api` umbrella plus the `src-server/ll/api` overlays (1,514 declarations / 6,114 members in the current full IR) and the smaller `ll/api/event` module. It emits JSONL IR plus `ir-manifest.json` and validates the result through the .NET CLI. The visitor covers classes/structs/unions, fields, static fields, methods, constructors, destructors, operators, enums, namespace-scope functions, and concrete template instantiations. Macro provenance is inferred from export/deprecated/nodiscard attributes; uninstantiated template declarations and partial specializations are skipped.
 
-## Dependency enums
-
-Enums are often declared in headers outside a module filter while still appearing in filtered signatures. The visitor records such enums as dependency declarations after the main traversal, so the ABI planner can map their underlying integer type. Run the module that references them and merge the new declarations into the assembled IR:
+## Full IR
 
 ```powershell
-./frontend/run-umbrella.ps1 -Module ll/api/command -Output artifacts/llapi-enum-supplement
-python frontend/merge-ir.py --base artifacts/llapi-full-ir-v15 --supplement artifacts/llapi-enum-supplement --output artifacts/llapi-full-ir-v16 --record-type declaration --kind enum
+./frontend/run-ll-full.ps1 -Output artifacts/llapi-full-ir
+```
+
+`run-ll-full.ps1` wraps `run-umbrella.ps1 -Module ll/api`, which parses the complete `src/ll/api` plus `src-server/ll/api` tree in one translation unit and validates the result. Dependency enums declared outside the filter are emitted automatically.
+
+## Dependency enums
+
+Enums are often declared in headers outside a module filter while still appearing in filtered signatures. The visitor records such enums as dependency declarations after the main traversal, so the ABI planner can map their underlying integer type. When an IR is assembled from separately parsed modules, merge the missing declarations with:
+
+```powershell
+python frontend/merge-ir.py --base <base-ir> --supplement <module-ir> --output <merged-ir> --record-type declaration --kind enum
 ```
 
 `merge-ir.py` copies only records matching the requested type/kind, skips ids already present, and recomputes the shard hash, record count, and manifest counts.
