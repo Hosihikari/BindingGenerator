@@ -12,6 +12,13 @@ internal static class InteropEmitter
             ? $"BindingShim cannot project this member: {reason}."
             : DefaultStubReason;
 
+    private static string CSharpLiteral(string value) =>
+        "\"" + value.Replace("\\", "\\\\", StringComparison.Ordinal)
+            .Replace("\"", "\\\"", StringComparison.Ordinal) + "\"";
+
+    private static void EmitUnsupportedAttribute(List<string> lines, string stubMessage) =>
+        lines.Add($"    [global::System.Obsolete({CSharpLiteral(stubMessage)}, false)]");
+
     public static void Emit(IReadOnlyList<IrRecord> records, string outputDirectory, AbiPlan plan)
     {
         var declarations = records.OfType<DeclarationRecord>()
@@ -618,8 +625,9 @@ internal static class InteropEmitter
                 }
                 else
                 {
+                    EmitUnsupportedAttribute(lines, stubMessage);
                     lines.Add($"    public static {className} {name}({CSharpParameters(member)}) =>");
-                    lines.Add($"        throw new global::System.NotSupportedException(\"{stubMessage}\");");
+                    lines.Add($"        throw new global::System.NotSupportedException({CSharpLiteral(stubMessage)});");
                 }
 
                 break;
@@ -627,8 +635,9 @@ internal static class InteropEmitter
             case "destructor":
                 if (!hasDestroy)
                 {
+                    EmitUnsupportedAttribute(lines, stubMessage);
                     lines.Add($"    public void {name}() =>");
-                    lines.Add($"        throw new global::System.NotSupportedException(\"{stubMessage}\");");
+                    lines.Add($"        throw new global::System.NotSupportedException({CSharpLiteral(stubMessage)});");
                 }
 
                 break;
@@ -669,10 +678,11 @@ internal static class InteropEmitter
         if (!hasGetter && !hasSetter)
         {
             var type = TypeNames.ToCSharpType(member.Type);
+            EmitUnsupportedAttribute(lines, stubMessage);
             lines.Add($"    public {modifier}{type} {name}");
             lines.Add("    {");
-            lines.Add($"        get => throw new global::System.NotSupportedException(\"{stubMessage}\");");
-            lines.Add($"        set => throw new global::System.NotSupportedException(\"{stubMessage}\");");
+            lines.Add($"        get => throw new global::System.NotSupportedException({CSharpLiteral(stubMessage)});");
+            lines.Add($"        set => throw new global::System.NotSupportedException({CSharpLiteral(stubMessage)});");
             lines.Add("    }");
             return;
         }
@@ -963,8 +973,9 @@ internal static class InteropEmitter
         var returnCanonical = member.Signature?.ReturnType ?? member.Type?.Canonical ?? "void";
         var returnType = TypeNames.ToCSharpType(new TypeRef { Kind = "fundamental", Canonical = returnCanonical });
         var modifier = member.Static ? "static " : "";
+        EmitUnsupportedAttribute(lines, stubMessage);
         lines.Add($"    public {modifier}{returnType} {name}({CSharpParameters(member)}) =>");
-        lines.Add($"        throw new global::System.NotSupportedException(\"{stubMessage}\");");
+        lines.Add($"        throw new global::System.NotSupportedException({CSharpLiteral(stubMessage)});");
     }
 
     private static string ParameterDeclarations(IReadOnlyList<AbiParameter> parameters)
