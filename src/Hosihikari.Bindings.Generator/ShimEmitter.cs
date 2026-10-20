@@ -788,6 +788,14 @@ internal static class ShimEmitter
                         yield return "    if (!result) { return nullptr; }";
                         yield return $"    return static_cast<void*>(new {function.NativeReturnType}(std::move(*result)));";
                     }
+                    else if (function.ReturnOptional)
+                    {
+                        // A returned optional_ref borrows an existing object; the presence flag
+                        // distinguishes an empty reference from a null pointer value.
+                        yield return $"    auto result = {call};";
+                        yield return "    *hs_hasValue = static_cast<bool>(result);";
+                        yield return "    return result ? const_cast<void*>(static_cast<void const*>(&*result)) : nullptr;";
+                    }
                     else if (function.ReturnUniquePtr)
                     {
                         yield return $"    auto hs_result = {call};";
@@ -891,6 +899,12 @@ internal static class ShimEmitter
             }
 
             return $"hs_make_vector<{parameter.VectorElementType}>({name}_data, {name}_count)";
+        }
+
+        if (parameter.IsOptionalRef)
+        {
+            var inner = parameter.OptionalRefInnerType ?? parameter.NativeType;
+            return $"({name}_hasValue ? optional_ref<{inner}>{{static_cast<{inner}*>({name})}} : optional_ref<{inner}>{{}})";
         }
 
         if (parameter.IsOptional)

@@ -46,6 +46,8 @@ internal sealed class AbiParameter
     public bool IsConst { get; init; }
     public bool IsOptional { get; init; }
     public string? OptionalInnerType { get; init; }
+    public bool IsOptionalRef { get; init; }
+    public string? OptionalRefInnerType { get; init; }
     public bool IsVector { get; init; }
     public AbiKind VectorElementKind { get; init; }
     public string? VectorElementType { get; init; }
@@ -1550,6 +1552,15 @@ internal sealed class AbiPlan
             return false;
         }
 
+        if (TryParseOptionalRef(nativeType, out var optionalRefInner))
+        {
+            kind = AbiKind.Opaque;
+            nativeType = optionalRefInner;
+            optional = true;
+            nullable = true;
+            return true;
+        }
+
         if (TryParseOptional(nativeType, out var optionalInner))
         {
             if (IsStringViewType(optionalInner) || IsStringType(optionalInner))
@@ -1708,6 +1719,27 @@ internal sealed class AbiPlan
 
         element = StripTopLevelQualifiers(arguments[0].Trim());
         return element.Length > 0;
+    }
+
+    private static bool TryParseOptionalRef(string canonical, out string inner)
+    {
+        inner = "";
+        var text = NormalizeTypeName(canonical);
+        const string prefix = "optional_ref<";
+        if (!text.StartsWith(prefix, StringComparison.Ordinal)
+            || !text.EndsWith(">", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var arguments = SplitTemplateArguments(text[prefix.Length..^1].Trim()).ToList();
+        if (arguments.Count != 1)
+        {
+            return false;
+        }
+
+        inner = StripTopLevelQualifiers(arguments[0].Trim());
+        return inner.Length > 0;
     }
 
     private static bool TryParseOptional(string canonical, out string inner)
@@ -1940,6 +1972,22 @@ internal sealed class AbiPlan
 
             reason = $"vector parameter type '{vectorElement}' is not supported";
             return false;
+        }
+
+        if (TryParseOptionalRef(text, out var optionalRefInner))
+        {
+            parameter = new AbiParameter
+            {
+                Name = name,
+                Kind = AbiKind.Opaque,
+                NativeType = text,
+                NativePointee = optionalRefInner,
+                IsOptional = true,
+                IsOptionalRef = true,
+                OptionalRefInnerType = optionalRefInner,
+                WrapperType = LookupWrapperType(optionalRefInner, declarationsByQualifiedName, declarationNames),
+            };
+            return true;
         }
 
         if (TryParseOptional(text, out var optionalInner))

@@ -389,9 +389,11 @@ internal static class InteropEmitter
     private static string ParameterKey(AbiParameter parameter) =>
         parameter.IsVector
             ? "vector:" + parameter.VectorElementType
-            : parameter.IsOptional
-                ? "optional:" + parameter.OptionalInnerType
-                : parameter.Kind == AbiKind.Callback
+            : parameter.IsOptionalRef
+                ? "optional_ref:" + parameter.OptionalRefInnerType
+                : parameter.IsOptional
+                    ? "optional:" + parameter.OptionalInnerType
+                    : parameter.Kind == AbiKind.Callback
                     ? "callback:" + parameter.Callback!.NativeType
                     : AbiPlan.CSharpParameterType(parameter);
 
@@ -627,7 +629,7 @@ internal static class InteropEmitter
             AbiKind.StringView => method.ReturnOptional ? "string?" : "string",
             AbiKind.Opaque => method.ReturnOwned && method.ReturnWrapperType is not null
                 ? method.ReturnWrapperType + (method.ReturnNullable ? "?" : "")
-                : "nint",
+                : method.ReturnOptional ? "nint?" : "nint",
             AbiKind.ArrayView => method.ArrayElementKind == AbiKind.StringView
                 ? "string[]"
                 : AbiPlan.CSharpType(method.ArrayElementKind) + "[]",
@@ -717,6 +719,11 @@ internal static class InteropEmitter
                     {
                         lines.Add(indent + $"return new {method.ReturnWrapperType}((nint){call});");
                     }
+                }
+                else if (method.ReturnOptional)
+                {
+                    lines.Add(indent + $"var __hs_handle = {call};");
+                    lines.Add(indent + "return __hs_hasValue ? (nint)__hs_handle : null;");
                 }
                 else
                 {
