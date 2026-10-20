@@ -257,6 +257,29 @@ internal static class ShimEmitter
         source.Add("    try { g_lastError = message ? message : \"unknown native error\"; } catch (...) {}");
         source.Add("}");
         source.Add("");
+        source.Add("template <class T, class U>");
+        source.Add("std::vector<T> hs_make_vector(U const* data, std::size_t count)");
+        source.Add("{");
+        source.Add("    std::vector<T> result;");
+        source.Add("    result.reserve(count);");
+        source.Add("    for (std::size_t i = 0; i < count; ++i) { result.push_back(static_cast<T>(data[i])); }");
+        source.Add("    return result;");
+        source.Add("}");
+        source.Add("inline std::vector<std::string> hs_make_string_vector(HosihikariStringView const* data, std::size_t count)");
+        source.Add("{");
+        source.Add("    std::vector<std::string> result;");
+        source.Add("    result.reserve(count);");
+        source.Add("    for (std::size_t i = 0; i < count; ++i) { result.emplace_back(data[i].data, data[i].size); }");
+        source.Add("    return result;");
+        source.Add("}");
+        source.Add("inline std::vector<std::basic_string_view<char>> hs_make_string_view_vector(HosihikariStringView const* data, std::size_t count)");
+        source.Add("{");
+        source.Add("    std::vector<std::basic_string_view<char>> result;");
+        source.Add("    result.reserve(count);");
+        source.Add("    for (std::size_t i = 0; i < count; ++i) { result.emplace_back(data[i].data, data[i].size); }");
+        source.Add("    return result;");
+        source.Add("}");
+        source.Add("");
 
         foreach (var function in functions)
         {
@@ -468,6 +491,11 @@ internal static class ShimEmitter
 
         foreach (var parameter in function.Parameters)
         {
+            if (parameter.IsVector)
+            {
+                continue;
+            }
+
             switch (parameter.Kind)
             {
                 case AbiKind.StringView:
@@ -486,6 +514,14 @@ internal static class ShimEmitter
                     parameters.Add(AbiPlan.CppType(parameter.Kind));
                     break;
             }
+        }
+
+        foreach (var parameter in function.Parameters.Where(parameter => parameter.IsVector))
+        {
+            parameters.Add("const " + (parameter.VectorElementKind == AbiKind.StringView
+                ? "HosihikariStringView"
+                : AbiPlan.CppType(parameter.VectorElementKind)) + "*");
+            parameters.Add("std::size_t");
         }
 
         foreach (var parameter in function.Parameters.Where(parameter => parameter.IsOptional))
@@ -530,6 +566,11 @@ internal static class ShimEmitter
         for (var index = 0; index < function.Parameters.Count; index++)
         {
             var parameter = function.Parameters[index];
+            if (parameter.IsVector)
+            {
+                continue;
+            }
+
             var name = function.Kind == AbiFunctionKind.Set
                 ? "value"
                 : CppParameterName(parameter, index);
@@ -550,6 +591,20 @@ internal static class ShimEmitter
                 default:
                     parameters.Add($"{AbiPlan.CppType(parameter.Kind)} {name}");
                     break;
+            }
+        }
+
+        for (var index = 0; index < function.Parameters.Count; index++)
+        {
+            var parameter = function.Parameters[index];
+            if (parameter.IsVector)
+            {
+                var name = CppParameterName(parameter, index);
+                var elementType = parameter.VectorElementKind == AbiKind.StringView
+                    ? "HosihikariStringView"
+                    : AbiPlan.CppType(parameter.VectorElementKind);
+                parameters.Add($"const {elementType}* {name}_data");
+                parameters.Add($"std::size_t {name}_count");
             }
         }
 
@@ -782,6 +837,19 @@ internal static class ShimEmitter
         string? nameOverride = null)
     {
         var name = nameOverride ?? CppParameterName(parameter, index);
+        if (parameter.IsVector)
+        {
+            if (parameter.VectorElementKind == AbiKind.StringView)
+            {
+                var helper = AbiPlan.IsStringViewType(parameter.VectorElementType ?? "")
+                    ? "hs_make_string_view_vector"
+                    : "hs_make_string_vector";
+                return $"{helper}({name}_data, {name}_count)";
+            }
+
+            return $"hs_make_vector<{parameter.VectorElementType}>({name}_data, {name}_count)";
+        }
+
         if (parameter.IsOptional)
         {
             var inner = parameter.OptionalInnerType ?? parameter.NativeType;

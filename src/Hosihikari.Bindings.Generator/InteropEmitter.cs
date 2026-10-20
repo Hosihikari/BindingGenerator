@@ -242,6 +242,11 @@ internal static class InteropEmitter
 
         foreach (var parameter in function.Parameters)
         {
+            if (parameter.IsVector)
+            {
+                continue;
+            }
+
             switch (parameter.Kind)
             {
                 case AbiKind.StringView:
@@ -260,6 +265,14 @@ internal static class InteropEmitter
                     types.Add(AbiPlan.CSharpType(parameter.Kind));
                     break;
             }
+        }
+
+        foreach (var parameter in function.Parameters.Where(parameter => parameter.IsVector))
+        {
+            types.Add(parameter.VectorElementKind == AbiKind.StringView
+                ? "NativeMethods.StringView*"
+                : AbiPlan.CSharpType(parameter.VectorElementKind) + "*");
+            types.Add("nuint");
         }
 
         foreach (var parameter in function.Parameters.Where(parameter => parameter.IsOptional))
@@ -326,11 +339,13 @@ internal static class InteropEmitter
     }
 
     private static string ParameterKey(AbiParameter parameter) =>
-        parameter.IsOptional
-            ? "optional:" + parameter.OptionalInnerType
-            : parameter.Kind == AbiKind.Callback
-                ? "callback:" + parameter.Callback!.NativeType
-                : AbiPlan.CSharpParameterType(parameter);
+        parameter.IsVector
+            ? "vector:" + parameter.VectorElementType
+            : parameter.IsOptional
+                ? "optional:" + parameter.OptionalInnerType
+                : parameter.Kind == AbiKind.Callback
+                    ? "callback:" + parameter.Callback!.NativeType
+                    : AbiPlan.CSharpParameterType(parameter);
 
     private static string MemberBaseName(MemberRecord member) => member.Kind switch
     {
@@ -510,26 +525,19 @@ internal static class InteropEmitter
             BuildCallArgumentList(create.Parameters, stringIndex >= 0 ? "__hs_stringData" : null));
         lines.Add($"    public static {className} {name}({declarations})");
         lines.Add("    {");
-        if (stringIndex >= 0)
-        {
-            var stringExpression = stringIndex >= 0 && create.Parameters[stringIndex].IsOptional
-                ? $"{stringName} ?? string.Empty"
-                : stringName!;
-            lines.Add($"        var __hs_stringBytes = global::System.Text.Encoding.UTF8.GetBytes({stringExpression});");
-            lines.Add("        fixed (byte* __hs_stringData = __hs_stringBytes)");
-            lines.Add("        {");
-            lines.Add($"            var handle = NativeMethods.TablePtr->{create.TableField}({arguments});");
-            EmitHandleCheck(lines, "            ");
-            lines.Add($"            return new {className}((nint)handle);");
-            lines.Add("        }");
-        }
-        else
-        {
-            lines.Add($"        var handle = NativeMethods.TablePtr->{create.TableField}({arguments});");
-            EmitHandleCheck(lines);
-            lines.Add($"        return new {className}((nint)handle);");
-        }
-
+        EmitPinnedBody(
+            lines,
+            create.Parameters,
+            stringIndex,
+            stringName,
+            FindVectorParameter(create.Parameters),
+            "        ",
+            bodyIndent =>
+            {
+                lines.Add(bodyIndent + $"var handle = NativeMethods.TablePtr->{create.TableField}({arguments});");
+                EmitHandleCheck(lines, bodyIndent);
+                lines.Add(bodyIndent + $"return new {className}((nint)handle);");
+            });
         lines.Add("    }");
     }
 
@@ -584,22 +592,15 @@ internal static class InteropEmitter
         {
             lines.Add("        var __hs_hasValue = false;");
         }
-        if (stringIndex >= 0)
-        {
-            var stringExpression = stringIndex >= 0 && method.Parameters[stringIndex].IsOptional
-                ? $"{stringName} ?? string.Empty"
-                : stringName!;
-            lines.Add($"        var __hs_stringBytes = global::System.Text.Encoding.UTF8.GetBytes({stringExpression});");
-            lines.Add("        fixed (byte* __hs_stringData = __hs_stringBytes)");
-            lines.Add("        {");
-            EmitMethodBody(lines, method, call, "            ");
-            lines.Add("        }");
-        }
-        else
-        {
-            EmitMethodBody(lines, method, call, "        ");
-        }
 
+        EmitPinnedBody(
+            lines,
+            method.Parameters,
+            stringIndex,
+            stringName,
+            FindVectorParameter(method.Parameters),
+            "        ",
+            bodyIndent => EmitMethodBody(lines, method, call, bodyIndent));
         lines.Add("    }");
     }
 
@@ -713,14 +714,18 @@ internal static class InteropEmitter
                 continue;
             }
 
-            var type = parameter.IsOptional
-                ? parameter.Kind switch
-                {
-                    AbiKind.StringView => "string?",
-                    AbiKind.Opaque => (parameter.WrapperType ?? "nint") + "?",
-                    _ => AbiPlan.CSharpType(parameter.Kind) + "?",
-                }
-                : AbiPlan.CSharpParameterType(parameter);
+            var type = parameter.IsVector
+                ? parameter.VectorElementKind == AbiKind.StringView
+                    ? "string[]"
+                    : AbiPlan.CSharpType(parameter.VectorElementKind) + "[]"
+                : parameter.IsOptional
+                    ? parameter.Kind switch
+                    {
+                        AbiKind.StringView => "string?",
+                        AbiKind.Opaque => (parameter.WrapperType ?? "nint") + "?",
+                        _ => AbiPlan.CSharpType(parameter.Kind) + "?",
+                    }
+                    : AbiPlan.CSharpParameterType(parameter);
             declarations.Add($"{type} {CSharpParameterName(parameter, index)}");
         }
 
@@ -796,6 +801,12 @@ internal static class InteropEmitter
                     yield return $"(void*){release}";
                     break;
                 }
+                case AbiKind.Vector:
+                    yield return "__hs_vectorData";
+                    yield return parameter.VectorElementKind == AbiKind.StringView
+                        ? "(nuint)__hs_vectorViews.Length"
+                        : $"(nuint)({name}?.Length ?? 0)";
+                    break;
                 default:
                     yield return parameter.IsOptional
                         ? $"{name} ?? default({AbiPlan.CSharpType(parameter.Kind)})"
@@ -808,6 +819,97 @@ internal static class InteropEmitter
         {
             yield return presence;
         }
+    }
+
+    private static int FindVectorParameter(IReadOnlyList<AbiParameter> parameters)
+    {
+        for (var index = 0; index < parameters.Count; index++)
+        {
+            if (parameters[index].IsVector)
+            {
+                return index;
+            }
+        }
+
+        return -1;
+    }
+
+    private static void EmitPinnedBody(
+        List<string> lines,
+        IReadOnlyList<AbiParameter> parameters,
+        int stringIndex,
+        string? stringName,
+        int vectorIndex,
+        string indent,
+        Action<string> emitBody)
+    {
+        if (vectorIndex >= 0)
+        {
+            var vector = parameters[vectorIndex];
+            var vectorName = CSharpParameterName(vector, vectorIndex);
+            if (vector.VectorElementKind == AbiKind.StringView)
+            {
+                lines.Add(indent + $"var __hs_vectorItems = {vectorName} ?? global::System.Array.Empty<string>();");
+                lines.Add(indent + "var __hs_vectorBytes = new byte[__hs_vectorItems.Length][];");
+                lines.Add(indent + "var __hs_vectorViews = new NativeMethods.StringView[__hs_vectorItems.Length];");
+                lines.Add(indent + "var __hs_vectorHandles = new nint[__hs_vectorItems.Length];");
+                lines.Add(indent + "try");
+                lines.Add(indent + "{");
+                var inner = indent + "    ";
+                lines.Add(inner + "for (var __hs_i = 0; __hs_i < __hs_vectorItems.Length; __hs_i++)");
+                lines.Add(inner + "{");
+                lines.Add(inner + "    __hs_vectorBytes[__hs_i] = global::System.Text.Encoding.UTF8.GetBytes(__hs_vectorItems[__hs_i] ?? string.Empty);");
+                lines.Add(inner + "    var __hs_bytes = __hs_vectorBytes[__hs_i];");
+                lines.Add(inner + "    var __hs_ptr = (nint)global::System.Runtime.InteropServices.Marshal.AllocHGlobal(__hs_bytes.Length == 0 ? 1 : __hs_bytes.Length);");
+                lines.Add(inner + "    if (__hs_bytes.Length > 0) { global::System.Runtime.InteropServices.Marshal.Copy(__hs_bytes, 0, (nint)__hs_ptr, __hs_bytes.Length); }");
+                lines.Add(inner + "    __hs_vectorHandles[__hs_i] = __hs_ptr;");
+                lines.Add(inner + "    __hs_vectorViews[__hs_i] = new NativeMethods.StringView { Data = (byte*)__hs_ptr, Size = (nuint)__hs_bytes.Length };");
+                lines.Add(inner + "}");
+                lines.Add(inner + "fixed (NativeMethods.StringView* __hs_vectorData = __hs_vectorViews)");
+                lines.Add(inner + "{");
+                EmitStringAndBody(lines, parameters, stringIndex, stringName, inner + "    ", emitBody);
+                lines.Add(inner + "}");
+                lines.Add(indent + "}");
+                lines.Add(indent + "finally");
+                lines.Add(indent + "{");
+                lines.Add(indent + "    for (var __hs_i = 0; __hs_i < __hs_vectorHandles.Length; __hs_i++) { if (__hs_vectorHandles[__hs_i] != 0) { global::System.Runtime.InteropServices.Marshal.FreeHGlobal((nint)__hs_vectorHandles[__hs_i]); } }");
+                lines.Add(indent + "}");
+                return;
+            }
+
+            var elementType = AbiPlan.CSharpType(vector.VectorElementKind);
+            lines.Add(indent + $"fixed ({elementType}* __hs_vectorData = {vectorName})");
+            lines.Add(indent + "{");
+            EmitStringAndBody(lines, parameters, stringIndex, stringName, indent + "    ", emitBody);
+            lines.Add(indent + "}");
+            return;
+        }
+
+        EmitStringAndBody(lines, parameters, stringIndex, stringName, indent, emitBody);
+    }
+
+    private static void EmitStringAndBody(
+        List<string> lines,
+        IReadOnlyList<AbiParameter> parameters,
+        int stringIndex,
+        string? stringName,
+        string indent,
+        Action<string> emitBody)
+    {
+        if (stringIndex < 0)
+        {
+            emitBody(indent);
+            return;
+        }
+
+        var expression = parameters[stringIndex].IsOptional
+            ? $"{stringName} ?? string.Empty"
+            : stringName!;
+        lines.Add(indent + $"var __hs_stringBytes = global::System.Text.Encoding.UTF8.GetBytes({expression});");
+        lines.Add(indent + "fixed (byte* __hs_stringData = __hs_stringBytes)");
+        lines.Add(indent + "{");
+        emitBody(indent + "    ");
+        lines.Add(indent + "}");
     }
 
     private static string CSharpParameterName(AbiParameter parameter, int index)

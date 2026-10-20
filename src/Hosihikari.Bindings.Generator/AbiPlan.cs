@@ -22,6 +22,7 @@ internal enum AbiKind
     StringView,
     Callback,
     ArrayView,
+    Vector,
 }
 
 internal enum AbiFunctionKind
@@ -44,6 +45,9 @@ internal sealed class AbiParameter
     public bool IsConst { get; init; }
     public bool IsOptional { get; init; }
     public string? OptionalInnerType { get; init; }
+    public bool IsVector { get; init; }
+    public AbiKind VectorElementKind { get; init; }
+    public string? VectorElementType { get; init; }
     public string? WrapperType { get; init; }
     public AbiCallback? Callback { get; init; }
 }
@@ -639,6 +643,7 @@ internal sealed class AbiPlan
         AbiKind.StringView => "HosihikariStringView",
         AbiKind.Callback => "void*",
         AbiKind.ArrayView => "HosihikariArrayView",
+        AbiKind.Vector => "void",
         _ => "void",
     };
 
@@ -662,6 +667,7 @@ internal sealed class AbiPlan
         AbiKind.StringView => "string",
         AbiKind.Callback => "nint",
         AbiKind.ArrayView => "nint",
+        AbiKind.Vector => "nint",
         _ => "nint",
     };
 
@@ -670,6 +676,7 @@ internal sealed class AbiPlan
         AbiKind.Opaque => "void*",
         AbiKind.StringView => "NativeMethods.StringView",
         AbiKind.ArrayView => "NativeMethods.ArrayView",
+        AbiKind.Vector => "nint",
         _ => CSharpType(kind),
     };
 
@@ -1233,6 +1240,7 @@ internal sealed class AbiPlan
 
         var parameters = new List<AbiParameter>();
         var stringParameters = 0;
+        var vectorParameters = 0;
         foreach (var parameter in constructor.Signature.Parameters)
         {
             if (!TryMapParameter(
@@ -1257,6 +1265,16 @@ internal sealed class AbiPlan
                     // The shim would have to bind a temporary string to a mutable reference,
                     // and v1 pins at most one string buffer per call.
                     reason = "constructors accept at most one string parameter";
+                    return false;
+                }
+            }
+
+            if (abiParameter.IsVector)
+            {
+                vectorParameters++;
+                if (vectorParameters > 1)
+                {
+                    reason = "constructors accept at most one vector parameter";
                     return false;
                 }
             }
@@ -1369,6 +1387,7 @@ internal sealed class AbiPlan
 
         var parameters = new List<AbiParameter>();
         var stringParameters = 0;
+        var vectorParameters = 0;
         foreach (var parameter in method.Signature.Parameters)
         {
             if (!TryMapParameter(
@@ -1391,6 +1410,16 @@ internal sealed class AbiPlan
                 if (stringParameters > 1 || IsNonConstLValueReference(parameter.Type))
                 {
                     reason = "methods accept at most one string parameter";
+                    return false;
+                }
+            }
+
+            if (abiParameter.IsVector)
+            {
+                vectorParameters++;
+                if (vectorParameters > 1)
+                {
+                    reason = "methods accept at most one vector parameter";
                     return false;
                 }
             }
@@ -1778,7 +1807,9 @@ internal sealed class AbiPlan
             return true;
         }
 
-        if (valueParameter.Kind == AbiKind.Callback || valueParameter.IsOptional)
+        if (valueParameter.Kind == AbiKind.Callback
+            || valueParameter.IsOptional
+            || valueParameter.IsVector)
         {
             // Callback and optional fields are readable as opaque views; a setter would need
             // the hidden presence flag to be threaded through the field ABI.
@@ -1832,6 +1863,41 @@ internal sealed class AbiPlan
         }
 
         var text = canonical.Trim();
+        if (TryParseVector(text, out var vectorElement))
+        {
+            if (IsStringViewType(vectorElement) || IsStringType(vectorElement))
+            {
+                parameter = new AbiParameter
+                {
+                    Name = name,
+                    Kind = AbiKind.Vector,
+                    NativeType = text,
+                    IsVector = true,
+                    VectorElementKind = AbiKind.StringView,
+                    VectorElementType = vectorElement,
+                };
+                return true;
+            }
+
+            if (TryMapEnumUnderlying(vectorElement, enumUnderlyingByName, out var vectorKind)
+                || TryMapFundamental(vectorElement, out vectorKind))
+            {
+                parameter = new AbiParameter
+                {
+                    Name = name,
+                    Kind = AbiKind.Vector,
+                    NativeType = text,
+                    IsVector = true,
+                    VectorElementKind = vectorKind,
+                    VectorElementType = vectorElement,
+                };
+                return true;
+            }
+
+            reason = $"vector parameter type '{vectorElement}' is not supported";
+            return false;
+        }
+
         if (TryParseOptional(text, out var optionalInner))
         {
             if (IsStringViewType(optionalInner) || IsStringType(optionalInner))
