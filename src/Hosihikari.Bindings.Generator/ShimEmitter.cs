@@ -719,6 +719,22 @@ internal static class ShimEmitter
 
             case AbiFunctionKind.Method:
             {
+                if (function.CallableOp == CallableOp.Invoke)
+                {
+                    var arguments = string.Join(", ", BuildNativeArguments(function));
+                    var invocation = $"(*static_cast<{function.ClassCppName}*>({SelfParameter}))({arguments})";
+                    if (function.ReturnKind == AbiKind.Void)
+                    {
+                        yield return $"    {invocation};";
+                    }
+                    else
+                    {
+                        yield return $"    return static_cast<{AbiPlan.CppType(function.ReturnKind)}>({invocation});";
+                    }
+
+                    break;
+                }
+
                 if (function.VariantOp is VariantOp.Index or VariantOp.Get)
                 {
                     foreach (var line in EmitVariantRead(function))

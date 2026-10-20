@@ -184,6 +184,38 @@ internal sealed class AbiFunction
     public TimeConversion TimeConversion { get; init; }
     public string? TimeClockType { get; init; }
     public string? TimeDurationType { get; init; }
+    public CallableAbiInfo? CallableInfo { get; init; }
+    public CallableOp CallableOp { get; init; }
+}
+
+internal enum CallableOp
+{
+    None,
+    Invoke,
+}
+
+internal sealed class CallableAbiInfo
+{
+    public string NativeType { get; init; } = "";
+    public string Surface { get; init; } = "";
+    public string ClassName { get; init; } = "";
+    public string NamespaceName => $"Hosihikari.Bindings.{TypeNames.SurfaceNamespace(Surface)}.Interop";
+    public string WrapperType => "global::" + NamespaceName + "." + ClassName;
+    public AbiCallback Signature { get; init; } = new();
+    public AbiFunction? InvokeFunction { get; set; }
+    public AbiFunction? DestroyFunction { get; set; }
+}
+
+internal sealed class CallableRegistry
+{
+    private readonly Dictionary<(string Surface, string Type), CallableAbiInfo> _byKey = [];
+
+    public IEnumerable<CallableAbiInfo> All => _byKey.Values;
+
+    public bool TryGet(string surface, string type, out CallableAbiInfo info) =>
+        _byKey.TryGetValue((surface, type), out info!);
+
+    public void Add(CallableAbiInfo info) => _byKey[(info.Surface, info.NativeType)] = info;
 }
 
 internal sealed class VariantRegistry
@@ -207,7 +239,8 @@ internal sealed class AbiPlan
         bool llAllocator,
         bool virtualDispatch,
         IReadOnlyDictionary<string, string> skipReasons,
-        IReadOnlyList<VariantAbiInfo> usedVariants)
+        IReadOnlyList<VariantAbiInfo> usedVariants,
+        IReadOnlyList<CallableAbiInfo> usedCallables)
     {
         Functions = functions;
         DeclarationNames = declarationNames;
@@ -216,6 +249,7 @@ internal sealed class AbiPlan
         VirtualDispatch = virtualDispatch;
         SkipReasons = skipReasons;
         UsedVariants = usedVariants;
+        UsedCallables = usedCallables;
         CreateByMember = functions
             .Where(function => function.Kind == AbiFunctionKind.Create && function.MemberId is not null)
             .ToDictionary(function => function.MemberId!, StringComparer.Ordinal);
@@ -243,6 +277,7 @@ internal sealed class AbiPlan
     public bool VirtualDispatch { get; }
     public IReadOnlyDictionary<string, string> SkipReasons { get; }
     public IReadOnlyList<VariantAbiInfo> UsedVariants { get; }
+    public IReadOnlyList<CallableAbiInfo> UsedCallables { get; }
 
     public bool TryGetSkipReason(string memberId, out string reason) =>
         SkipReasons.TryGetValue(memberId, out reason!);
@@ -253,7 +288,7 @@ internal sealed class AbiPlan
     public IReadOnlyDictionary<string, AbiFunction> DestroyByDeclaration { get; }
     public IReadOnlyDictionary<string, List<AbiFunction>> FunctionsByDeclaration { get; }
 
-    public static AbiPlan Empty { get; } = new([], new Dictionary<string, DeclarationName>(StringComparer.Ordinal), false, false, false, new Dictionary<string, string>(StringComparer.Ordinal), []);
+    public static AbiPlan Empty { get; } = new([], new Dictionary<string, DeclarationName>(StringComparer.Ordinal), false, false, false, new Dictionary<string, string>(StringComparer.Ordinal), [], []);
 
     public IEnumerable<AbiFunction> FunctionsForSurface(string surface) =>
         Functions.Where(function => string.Equals(function.Surface, surface, StringComparison.Ordinal));
@@ -514,6 +549,7 @@ internal sealed class AbiPlan
             destroyableDeclarationIds,
             enumUnderlyingByName,
             allowOwnedByValue);
+        var callables = BuildCallableRegistry(records, enumUnderlyingByName);
 
         var functions = new List<AbiFunction>();
         foreach (var declaration in declarations)
@@ -726,6 +762,7 @@ internal sealed class AbiPlan
                         enumUnderlyingByName,
                         allowOwnedByValue,
                         variants,
+                        callables,
                         out var function,
                         out reason))
                 {
@@ -750,6 +787,16 @@ internal sealed class AbiPlan
             functions.AddRange(BuildVariantFunctions(variant));
         }
 
+        var usedCallables = functions
+            .Select(function => function.CallableInfo)
+            .OfType<CallableAbiInfo>()
+            .Distinct()
+            .ToList();
+        foreach (var callable in usedCallables)
+        {
+            functions.AddRange(BuildCallableFunctions(callable));
+        }
+
         var ordered = functions
             .GroupBy(function => function.Surface, StringComparer.Ordinal)
             .OrderBy(group => group.Key, StringComparer.Ordinal)
@@ -768,7 +815,15 @@ internal sealed class AbiPlan
             indexBySurface[function.Surface] = index + 1;
         }
 
-        return new AbiPlan(ordered, declarationNames, linkCarrier, llAllocator, virtualDispatch, skipReasons, usedVariants);
+        return new AbiPlan(
+            ordered,
+            declarationNames,
+            linkCarrier,
+            llAllocator,
+            virtualDispatch,
+            skipReasons,
+            usedVariants,
+            usedCallables);
     }
 
     public static string CppType(AbiKind kind) => kind switch
@@ -1483,6 +1538,7 @@ internal sealed class AbiPlan
         IReadOnlyDictionary<string, string> enumUnderlyingByName,
         bool linkCarrier,
         VariantRegistry variants,
+        CallableRegistry callables,
         out AbiFunction function,
         out string? reason)
     {
@@ -1521,6 +1577,7 @@ internal sealed class AbiPlan
                 enumUnderlyingByName,
                 linkCarrier,
                 variants,
+                callables,
                 out var returnKind,
                 out var nativeReturnType,
                 out var returnWrapperType,
@@ -1542,6 +1599,7 @@ internal sealed class AbiPlan
                 out var returnExpected,
                 out var expectedErrorType,
                 out var returnVariant,
+                out var returnCallable,
                 out var returnReason))
         {
             reason = returnReason;
@@ -1620,6 +1678,7 @@ internal sealed class AbiPlan
             ReturnExpected = returnExpected,
             ExpectedErrorType = expectedErrorType,
             VariantInfo = returnVariant,
+            CallableInfo = returnCallable,
             Parameters = parameters,
             Static = method.Static,
         };
@@ -1635,6 +1694,7 @@ internal sealed class AbiPlan
         IReadOnlyDictionary<string, string> enumUnderlyingByName,
         bool linkCarrier,
         VariantRegistry variants,
+        CallableRegistry callables,
         out AbiKind kind,
         out string nativeType,
         out string? wrapperType,
@@ -1656,6 +1716,7 @@ internal sealed class AbiPlan
         out bool returnExpected,
         out string? expectedErrorType,
         out VariantAbiInfo? returnVariant,
+        out CallableAbiInfo? returnCallable,
         out string? reason)
     {
         kind = AbiKind.Void;
@@ -1679,6 +1740,7 @@ internal sealed class AbiPlan
         returnExpected = false;
         expectedErrorType = null;
         returnVariant = null;
+        returnCallable = null;
         reason = null;
         if (nativeType.Length == 0)
         {
@@ -1718,6 +1780,7 @@ internal sealed class AbiPlan
                     enumUnderlyingByName,
                     linkCarrier,
                     variants,
+                    callables,
                     out kind,
                     out nativeType,
                     out wrapperType,
@@ -1739,6 +1802,7 @@ internal sealed class AbiPlan
                     out var nestedExpected,
                     out _,
                     out var nestedVariant,
+                    out var nestedCallable,
                     out var expectedValueReason))
             {
                 reason = $"expected value type '{expectedValueType}': {expectedValueReason}";
@@ -1752,6 +1816,7 @@ internal sealed class AbiPlan
             }
 
             returnVariant = nestedVariant;
+            returnCallable = nestedCallable;
             return true;
         }
 
@@ -1774,6 +1839,17 @@ internal sealed class AbiPlan
         if (IsPointerOrReferenceType(nativeType))
         {
             kind = AbiKind.Opaque;
+            return true;
+        }
+
+        var callableType = NormalizeTypeName(nativeType);
+        if (callables.TryGet(surface, callableType, out var callableInfo))
+        {
+            kind = AbiKind.Opaque;
+            nativeType = callableInfo.NativeType;
+            wrapperType = callableInfo.WrapperType;
+            owned = true;
+            returnCallable = callableInfo;
             return true;
         }
 
@@ -2197,6 +2273,129 @@ internal sealed class AbiPlan
         }
 
         return TypeNames.Sanitize(TypeNames.NativeName(text)) + "Pointer";
+    }
+
+    private static CallableRegistry BuildCallableRegistry(
+        IReadOnlyList<IrRecord> records,
+        IReadOnlyDictionary<string, string> enumUnderlyingByName)
+    {
+        var surfaceByDeclaration = records.OfType<DeclarationRecord>()
+            .ToDictionary(declaration => declaration.Id, declaration => declaration.Surface, StringComparer.Ordinal);
+        var registry = new CallableRegistry();
+        foreach (var member in records.OfType<MemberRecord>())
+        {
+            if (member.Signature is null
+                || IsPointerOrReferenceType(member.Signature.ReturnType)
+                || !surfaceByDeclaration.TryGetValue(member.DeclarationId, out var surface))
+            {
+                continue;
+            }
+
+            var callableType = NormalizeTypeName(member.Signature.ReturnType);
+            if (!callableType.StartsWith("std::function<", StringComparison.Ordinal)
+                || registry.TryGet(surface, callableType, out _))
+            {
+                continue;
+            }
+
+            if (!TryParseStdFunction(callableType, enumUnderlyingByName, out var signature, out _))
+            {
+                continue;
+            }
+
+            registry.Add(new CallableAbiInfo
+            {
+                NativeType = callableType,
+                Surface = surface,
+                ClassName = "Function_" + CSharpNaming.ShortHash(callableType),
+                Signature = signature,
+            });
+        }
+
+        return registry;
+    }
+
+    private static IEnumerable<AbiFunction> BuildCallableFunctions(CallableAbiInfo info)
+    {
+        var hash = CSharpNaming.ShortHash(info.NativeType);
+        var declarationId = "callable:" + info.NativeType;
+        var className = new DeclarationName(info.NamespaceName, "", info.ClassName);
+        var parameters = new List<AbiParameter>();
+        for (var index = 0; index < info.Signature.Arguments.Count; index++)
+        {
+            parameters.Add(ToCallableParameter(info.Signature.Arguments[index], index));
+        }
+
+        var invoke = new AbiFunction
+        {
+            CppName = $"hs_callable_{hash}_invoke",
+            Kind = AbiFunctionKind.Method,
+            Surface = info.Surface,
+            DeclarationId = declarationId,
+            MemberId = declarationId + ":invoke",
+            ClassCppName = info.NativeType,
+            ClassName = className,
+            NativeMemberName = "operator()",
+            CSharpMemberName = "Invoke",
+            ReturnKind = info.Signature.ReturnKind,
+            NativeReturnType = info.Signature.ReturnNativeType,
+            Parameters = parameters,
+            CallableInfo = info,
+            CallableOp = CallableOp.Invoke,
+        };
+        var destroy = new AbiFunction
+        {
+            CppName = $"hs_callable_{hash}_destroy",
+            Kind = AbiFunctionKind.Destroy,
+            Surface = info.Surface,
+            DeclarationId = declarationId,
+            MemberId = declarationId + ":destroy",
+            ClassCppName = info.NativeType,
+            ClassName = className,
+            NativeMemberName = "~function",
+            CSharpMemberName = "Dispose",
+            ReturnKind = AbiKind.Void,
+            Parameters = [],
+            CallableInfo = info,
+        };
+        info.InvokeFunction = invoke;
+        info.DestroyFunction = destroy;
+        return [invoke, destroy];
+    }
+
+    private static AbiParameter ToCallableParameter(AbiCallbackArgument argument, int index)
+    {
+        var name = "arg" + index.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        if (argument.Kind != AbiKind.Opaque)
+        {
+            return new AbiParameter { Name = name, Kind = argument.Kind, NativeType = argument.NativeType };
+        }
+
+        if (!argument.IsPointer
+            && !argument.IsReference
+            && IsByValueRecordType(argument.NativeType))
+        {
+            var recordType = NormalizeTypeName(argument.NativeType);
+            return new AbiParameter
+            {
+                Name = name,
+                Kind = AbiKind.Opaque,
+                NativeType = argument.NativeType,
+                NativePointee = recordType,
+                IsReference = true,
+                IsConst = true,
+            };
+        }
+
+        return new AbiParameter
+        {
+            Name = name,
+            Kind = AbiKind.Opaque,
+            NativeType = argument.NativeType,
+            NativePointee = ExtractPointee(argument.NativeType),
+            IsReference = argument.IsReference,
+            IsConst = argument.IsConst,
+        };
     }
 
     private static VariantRegistry BuildVariantRegistry(
