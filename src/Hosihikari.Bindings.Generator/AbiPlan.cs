@@ -79,6 +79,8 @@ internal sealed class AbiFunction
     public string NativeReturnType { get; init; } = "";
     public string? ReturnWrapperType { get; init; }
     public bool ReturnOwned { get; init; }
+    public bool ReturnUniquePtr { get; init; }
+    public bool ReturnNullable { get; init; }
     public List<AbiParameter> Parameters { get; init; } = [];
     public bool Static { get; init; }
 }
@@ -341,13 +343,27 @@ internal sealed class AbiPlan
         }
 
         var allowOwnedByValue = linkCarrier || virtualDispatch;
+        var uniquePtrOwnedDeclarationIds = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var member in records.OfType<MemberRecord>())
+        {
+            if (member.Signature is null
+                || !TryParseUniquePtr(member.Signature.ReturnType, out var uniquePointee)
+                || !allDeclarationsByQualifiedName.TryGetValue(uniquePointee, out var uniqueDeclaration)
+                || uniqueDeclaration.Access != "public")
+            {
+                continue;
+            }
+
+            uniquePtrOwnedDeclarationIds.Add(uniqueDeclaration.Id);
+        }
+
         var destroyableDeclarationIds = new HashSet<string>(StringComparer.Ordinal);
         foreach (var declaration in allowOwnedByValue ? declarations : [])
         {
             if (!membersByDeclaration.TryGetValue(declaration.Id, out var declarationMembers)
                 || HasImplicitSpecializationMembers(declaration, declarationMembers)
-                || !(linkCarrier || IsLinkSafe(declaration.Id))
-                || declaration.Abstract
+                || !(linkCarrier || virtualDispatch || IsLinkSafe(declaration.Id))
+                || (declaration.Abstract && !uniquePtrOwnedDeclarationIds.Contains(declaration.Id))
                 || !CanDeleteImplicitDestructor(declaration, declarationMembers, out _))
             {
                 continue;
@@ -1329,6 +1345,8 @@ internal sealed class AbiPlan
                 out var nativeReturnType,
                 out var returnWrapperType,
                 out var returnOwned,
+                out var returnUniquePtr,
+                out var returnNullable,
                 out var returnReason))
         {
             reason = returnReason;
@@ -1381,6 +1399,8 @@ internal sealed class AbiPlan
             NativeReturnType = nativeReturnType,
             ReturnWrapperType = returnWrapperType,
             ReturnOwned = returnOwned,
+            ReturnUniquePtr = returnUniquePtr,
+            ReturnNullable = returnNullable,
             Parameters = parameters,
             Static = method.Static,
         };
@@ -1398,12 +1418,16 @@ internal sealed class AbiPlan
         out string nativeType,
         out string? wrapperType,
         out bool owned,
+        out bool uniquePtr,
+        out bool nullable,
         out string? reason)
     {
         kind = AbiKind.Void;
         nativeType = canonical.Trim();
         wrapperType = null;
         owned = false;
+        uniquePtr = false;
+        nullable = false;
         reason = null;
         if (nativeType.Length == 0)
         {
@@ -1430,6 +1454,35 @@ internal sealed class AbiPlan
         if (IsPointerOrReferenceType(nativeType))
         {
             kind = AbiKind.Opaque;
+            return true;
+        }
+
+        if (TryParseUniquePtr(nativeType, out var uniquePointee))
+        {
+            if (!declarationsByQualifiedName.TryGetValue(uniquePointee, out var pointeeDeclaration))
+            {
+                reason = $"unique_ptr return type '{uniquePointee}' is not a known bindable declaration";
+                return false;
+            }
+
+            if (!destroyableDeclarationIds.Contains(pointeeDeclaration.Id))
+            {
+                reason = $"unique_ptr return type '{uniquePointee}' has no accessible destructor";
+                return false;
+            }
+
+            if (!declarationNames.TryGetValue(pointeeDeclaration.Id, out var uniqueName))
+            {
+                reason = $"unique_ptr return type '{uniquePointee}' has no generated wrapper";
+                return false;
+            }
+
+            kind = AbiKind.Opaque;
+            nativeType = uniquePointee;
+            wrapperType = "global::" + uniqueName.NamespaceName + "." + uniqueName.ClassName;
+            owned = true;
+            uniquePtr = true;
+            nullable = true;
             return true;
         }
 
@@ -1477,6 +1530,29 @@ internal sealed class AbiPlan
         wrapperType = "global::" + resultName.NamespaceName + "." + resultName.ClassName;
         owned = true;
         return true;
+    }
+
+    private static bool TryParseUniquePtr(string canonical, out string pointee)
+    {
+        pointee = "";
+        var text = NormalizeTypeName(canonical);
+        const string prefix = "std::unique_ptr<";
+        if (!text.StartsWith(prefix, StringComparison.Ordinal)
+            || !text.EndsWith(">", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var inner = text[prefix.Length..^1].Trim();
+        var arguments = SplitTemplateArguments(inner).ToList();
+        if (arguments.Count != 1)
+        {
+            // A custom deleter owns release semantics the shim cannot reproduce.
+            return false;
+        }
+
+        pointee = StripTopLevelQualifiers(arguments[0].Trim());
+        return pointee.Length > 0;
     }
 
     private static bool TryBuildField(

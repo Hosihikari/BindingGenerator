@@ -618,7 +618,12 @@ internal static class ShimEmitter
                 }
                 else if (function.ReturnKind == AbiKind.Opaque)
                 {
-                    if (function.ReturnOwned)
+                    if (function.ReturnUniquePtr)
+                    {
+                        yield return $"    auto hs_result = {call};";
+                        yield return "    return static_cast<void*>(hs_result.release());";
+                    }
+                    else if (function.ReturnOwned)
                     {
                         yield return $"    return static_cast<void*>(new {function.NativeReturnType}({call}));";
                     }

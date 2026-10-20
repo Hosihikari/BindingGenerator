@@ -542,7 +542,7 @@ internal static class InteropEmitter
         {
             AbiKind.Void => "void",
             AbiKind.Opaque => method.ReturnOwned && method.ReturnWrapperType is not null
-                ? method.ReturnWrapperType
+                ? method.ReturnWrapperType + (method.ReturnNullable ? "?" : "")
                 : "nint",
             _ => AbiPlan.CSharpType(method.ReturnKind),
         };
@@ -579,7 +579,15 @@ internal static class InteropEmitter
             case AbiKind.Opaque:
                 if (method.ReturnOwned && method.ReturnWrapperType is not null)
                 {
-                    lines.Add(indent + $"return new {method.ReturnWrapperType}((nint){call});");
+                    if (method.ReturnNullable)
+                    {
+                        lines.Add(indent + $"var __hs_handle = {call};");
+                        lines.Add(indent + $"return __hs_handle == null ? null : new {method.ReturnWrapperType}((nint)__hs_handle);");
+                    }
+                    else
+                    {
+                        lines.Add(indent + $"return new {method.ReturnWrapperType}((nint){call});");
+                    }
                 }
                 else
                 {
