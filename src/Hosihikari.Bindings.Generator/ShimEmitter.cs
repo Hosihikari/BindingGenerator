@@ -733,7 +733,15 @@ internal static class ShimEmitter
                         yield return $"    auto result = {call};";
                         yield return "    hs_arrayResult.clear();";
                         yield return "    hs_arrayResult.reserve(result.size());";
-                        yield return $"    for (auto const& item : result) {{ hs_arrayResult.push_back(static_cast<{elementType}>(item)); }}";
+                        if (function.ArrayElementKind == AbiKind.Opaque)
+                        {
+                            yield return "    for (auto const& item : result) { hs_arrayResult.push_back(const_cast<void*>(static_cast<void const*>(item))); }";
+                        }
+                        else
+                        {
+                            yield return $"    for (auto const& item : result) {{ hs_arrayResult.push_back(static_cast<{elementType}>(item)); }}";
+                        }
+
                         yield return "    return HosihikariArrayView{hs_arrayResult.data(), hs_arrayResult.size()};";
                     }
                 }

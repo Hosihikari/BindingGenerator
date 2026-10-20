@@ -1533,6 +1533,15 @@ internal sealed class AbiPlan
                 return true;
             }
 
+            if (IsPointerType(vectorElement))
+            {
+                kind = AbiKind.ArrayView;
+                arrayElementKind = AbiKind.Opaque;
+                arrayElementType = vectorElement;
+                array = true;
+                return true;
+            }
+
             reason = $"vector return type '{vectorElement}' is not supported";
             return false;
         }
