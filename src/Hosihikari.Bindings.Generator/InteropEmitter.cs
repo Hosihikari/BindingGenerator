@@ -622,20 +622,14 @@ internal static class InteropEmitter
     private static void EmitCreate(List<string> lines, string className, string name, AbiFunction create)
     {
         var declarations = ParameterDeclarations(create.Parameters);
-        var stringIndex = FindStringParameter(create.Parameters);
-        var stringName = stringIndex >= 0
-            ? CSharpParameterName(create.Parameters[stringIndex], stringIndex)
-            : null;
-        var arguments = string.Join(
-            ", ",
-            BuildCallArgumentList(create.Parameters, stringIndex >= 0 ? "__hs_stringData" : null));
+        var stringIndices = FindStringParameters(create.Parameters);
+        var arguments = string.Join(", ", BuildCallArgumentList(create.Parameters));
         lines.Add($"    public static {className} {name}({declarations})");
         lines.Add("    {");
         EmitPinnedBody(
             lines,
             create.Parameters,
-            stringIndex,
-            stringName,
+            stringIndices,
             FindVectorParameter(create.Parameters),
             "        ",
             bodyIndent =>
@@ -660,19 +654,14 @@ internal static class InteropEmitter
     {
         var modifier = method.Static ? "static " : "";
         var declarations = ParameterDeclarations(method.Parameters);
-        var stringIndex = FindStringParameter(method.Parameters);
-        var stringName = stringIndex >= 0
-            ? CSharpParameterName(method.Parameters[stringIndex], stringIndex)
-            : null;
+        var stringIndices = FindStringParameters(method.Parameters);
         var callArguments = new List<string>();
         if (!method.Static)
         {
             callArguments.Add("(void*)_handle");
         }
 
-        callArguments.AddRange(BuildCallArgumentList(
-            method.Parameters,
-            stringIndex >= 0 ? "__hs_stringData" : null));
+        callArguments.AddRange(BuildCallArgumentList(method.Parameters));
         if (method.NeedsPresenceFlag)
         {
             callArguments.Add("&__hs_hasValue");
@@ -703,8 +692,7 @@ internal static class InteropEmitter
         EmitPinnedBody(
             lines,
             method.Parameters,
-            stringIndex,
-            stringName,
+            stringIndices,
             FindVectorParameter(method.Parameters),
             "        ",
             bodyIndent => EmitMethodBody(lines, method, call, bodyIndent));
@@ -870,22 +858,22 @@ internal static class InteropEmitter
         return (name + "Invoke", name + "UserData", name + "Release");
     }
 
-    private static int FindStringParameter(IReadOnlyList<AbiParameter> parameters)
+    private static List<int> FindStringParameters(IReadOnlyList<AbiParameter> parameters)
     {
+        var indices = new List<int>();
         for (var index = 0; index < parameters.Count; index++)
         {
             if (parameters[index].Kind == AbiKind.StringView)
             {
-                return index;
+                indices.Add(index);
             }
         }
 
-        return -1;
+        return indices;
     }
 
     private static IEnumerable<string> BuildCallArgumentList(
-        IReadOnlyList<AbiParameter> parameters,
-        string? stringDataName)
+        IReadOnlyList<AbiParameter> parameters)
     {
         var optionalPresence = new List<string>();
         var vectorArguments = new List<string>();
@@ -915,8 +903,8 @@ internal static class InteropEmitter
             switch (parameter.Kind)
             {
                 case AbiKind.StringView:
-                    yield return stringDataName ?? name;
-                    yield return "(nuint)__hs_stringBytes.Length";
+                    yield return $"__hs_stringData{index}";
+                    yield return $"(nuint)__hs_stringBytes{index}.Length";
                     break;
                 case AbiKind.Opaque:
                     if (parameter.IsOptional)
@@ -976,8 +964,7 @@ internal static class InteropEmitter
     private static void EmitPinnedBody(
         List<string> lines,
         IReadOnlyList<AbiParameter> parameters,
-        int stringIndex,
-        string? stringName,
+        IReadOnlyList<int> stringIndices,
         int vectorIndex,
         string indent,
         Action<string> emitBody)
@@ -1006,7 +993,7 @@ internal static class InteropEmitter
                 lines.Add(inner + "}");
                 lines.Add(inner + "fixed (global::Hosihikari.Bindings.Abi.StringView* __hs_vectorData = __hs_vectorViews)");
                 lines.Add(inner + "{");
-                EmitStringAndBody(lines, parameters, stringIndex, stringName, inner + "    ", emitBody);
+                EmitStringFixes(lines, parameters, stringIndices, 0, inner + "    ", emitBody);
                 lines.Add(inner + "}");
                 lines.Add(indent + "}");
                 lines.Add(indent + "finally");
@@ -1019,35 +1006,37 @@ internal static class InteropEmitter
             var elementType = AbiPlan.CSharpType(vector.VectorElementKind);
             lines.Add(indent + $"fixed ({elementType}* __hs_vectorData = {vectorName})");
             lines.Add(indent + "{");
-            EmitStringAndBody(lines, parameters, stringIndex, stringName, indent + "    ", emitBody);
+            EmitStringFixes(lines, parameters, stringIndices, 0, indent + "    ", emitBody);
             lines.Add(indent + "}");
             return;
         }
 
-        EmitStringAndBody(lines, parameters, stringIndex, stringName, indent, emitBody);
+        EmitStringFixes(lines, parameters, stringIndices, 0, indent, emitBody);
     }
 
-    private static void EmitStringAndBody(
+    private static void EmitStringFixes(
         List<string> lines,
         IReadOnlyList<AbiParameter> parameters,
-        int stringIndex,
-        string? stringName,
+        IReadOnlyList<int> stringIndices,
+        int position,
         string indent,
         Action<string> emitBody)
     {
-        if (stringIndex < 0)
+        if (position >= stringIndices.Count)
         {
             emitBody(indent);
             return;
         }
 
-        var expression = parameters[stringIndex].IsOptional
-            ? $"{stringName} ?? string.Empty"
-            : stringName!;
-        lines.Add(indent + $"var __hs_stringBytes = global::System.Text.Encoding.UTF8.GetBytes({expression});");
-        lines.Add(indent + "fixed (byte* __hs_stringData = __hs_stringBytes)");
+        var index = stringIndices[position];
+        var name = CSharpParameterName(parameters[index], index);
+        var expression = parameters[index].IsOptional
+            ? $"{name} ?? string.Empty"
+            : name;
+        lines.Add(indent + $"var __hs_stringBytes{index} = global::System.Text.Encoding.UTF8.GetBytes({expression});");
+        lines.Add(indent + $"fixed (byte* __hs_stringData{index} = __hs_stringBytes{index})");
         lines.Add(indent + "{");
-        emitBody(indent + "    ");
+        EmitStringFixes(lines, parameters, stringIndices, position + 1, indent + "    ", emitBody);
         lines.Add(indent + "}");
     }
 

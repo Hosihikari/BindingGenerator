@@ -1333,7 +1333,6 @@ internal sealed class AbiPlan
         }
 
         var parameters = new List<AbiParameter>();
-        var stringParameters = 0;
         var vectorParameters = 0;
         foreach (var parameter in constructor.Signature.Parameters)
         {
@@ -1353,16 +1352,12 @@ internal sealed class AbiPlan
                 return false;
             }
 
-            if (abiParameter.Kind == AbiKind.StringView)
+            if (abiParameter.Kind == AbiKind.StringView
+                && IsNonConstLValueReference(parameter.Type))
             {
-                stringParameters++;
-                if (stringParameters > 1 || IsNonConstLValueReference(parameter.Type))
-                {
-                    // The shim would have to bind a temporary string to a mutable reference,
-                    // and v1 pins at most one string buffer per call.
-                    reason = "constructors accept at most one string parameter";
-                    return false;
-                }
+                // The shim would have to bind a temporary string to a mutable reference.
+                reason = "constructors do not accept mutable string references";
+                return false;
             }
 
             if (abiParameter.IsVector)
@@ -1488,7 +1483,6 @@ internal sealed class AbiPlan
         }
 
         var parameters = new List<AbiParameter>();
-        var stringParameters = 0;
         var vectorParameters = 0;
         foreach (var parameter in method.Signature.Parameters)
         {
@@ -1508,14 +1502,11 @@ internal sealed class AbiPlan
                 return false;
             }
 
-            if (abiParameter.Kind == AbiKind.StringView)
+            if (abiParameter.Kind == AbiKind.StringView
+                && IsNonConstLValueReference(parameter.Type))
             {
-                stringParameters++;
-                if (stringParameters > 1 || IsNonConstLValueReference(parameter.Type))
-                {
-                    reason = "methods accept at most one string parameter";
-                    return false;
-                }
+                reason = "methods do not accept mutable string references";
+                return false;
             }
 
             if (abiParameter.IsVector)
