@@ -979,6 +979,7 @@ internal static class InteropEmitter
                 lines.Add(indent + "var __hs_vectorBytes = new byte[__hs_vectorItems.Length][];");
                 lines.Add(indent + "var __hs_vectorViews = new global::Hosihikari.Bindings.Abi.StringView[__hs_vectorItems.Length];");
                 lines.Add(indent + "var __hs_vectorHandles = new nint[__hs_vectorItems.Length];");
+                EmitStringBuffers(lines, parameters, stringIndices, indent);
                 lines.Add(indent + "try");
                 lines.Add(indent + "{");
                 var inner = indent + "    ";
@@ -1004,6 +1005,7 @@ internal static class InteropEmitter
             }
 
             var elementType = AbiPlan.CSharpType(vector.VectorElementKind);
+            EmitStringBuffers(lines, parameters, stringIndices, indent);
             lines.Add(indent + $"fixed ({elementType}* __hs_vectorData = {vectorName})");
             lines.Add(indent + "{");
             EmitStringFixes(lines, parameters, stringIndices, 0, indent + "    ", emitBody);
@@ -1011,7 +1013,24 @@ internal static class InteropEmitter
             return;
         }
 
+        EmitStringBuffers(lines, parameters, stringIndices, indent);
         EmitStringFixes(lines, parameters, stringIndices, 0, indent, emitBody);
+    }
+
+    private static void EmitStringBuffers(
+        List<string> lines,
+        IReadOnlyList<AbiParameter> parameters,
+        IReadOnlyList<int> stringIndices,
+        string indent)
+    {
+        foreach (var index in stringIndices)
+        {
+            var name = CSharpParameterName(parameters[index], index);
+            var expression = parameters[index].IsOptional
+                ? $"{name} ?? string.Empty"
+                : name;
+            lines.Add(indent + $"var __hs_stringBytes{index} = global::System.Text.Encoding.UTF8.GetBytes({expression});");
+        }
     }
 
     private static void EmitStringFixes(
@@ -1029,11 +1048,6 @@ internal static class InteropEmitter
         }
 
         var index = stringIndices[position];
-        var name = CSharpParameterName(parameters[index], index);
-        var expression = parameters[index].IsOptional
-            ? $"{name} ?? string.Empty"
-            : name;
-        lines.Add(indent + $"var __hs_stringBytes{index} = global::System.Text.Encoding.UTF8.GetBytes({expression});");
         lines.Add(indent + $"fixed (byte* __hs_stringData{index} = __hs_stringBytes{index})");
         lines.Add(indent + "{");
         EmitStringFixes(lines, parameters, stringIndices, position + 1, indent + "    ", emitBody);
