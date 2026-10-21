@@ -192,6 +192,7 @@ internal sealed class AbiFunction
     public string NativeReturnType { get; init; } = "";
     public string? ReturnWrapperType { get; init; }
     public bool ReturnOwned { get; init; }
+    public bool ReturnBorrowed => ReturnKind == AbiKind.Opaque && ReturnWrapperType is not null && !ReturnOwned;
     public bool ReturnUniquePtr { get; init; }
     public bool ReturnOptional { get; init; }
     public bool ReturnArray { get; init; }
@@ -2132,6 +2133,26 @@ internal sealed class AbiPlan
         if (IsPointerOrReferenceType(nativeType))
         {
             kind = AbiKind.Opaque;
+
+            // A single-level pointer or lvalue reference to a public declaration becomes a
+            // typed borrowed wrapper. The native side keeps ownership; the wrapper only aliases it.
+            var pointerText = StripTopLevelQualifiers(nativeType);
+            var isPointer = pointerText.EndsWith("*", StringComparison.Ordinal);
+            var isLValueReference = pointerText.EndsWith("&", StringComparison.Ordinal)
+                && !pointerText.EndsWith("&&", StringComparison.Ordinal);
+            if (isPointer || isLValueReference)
+            {
+                var borrowedPointee = StripTopLevelQualifiers(pointerText[..^1].TrimEnd());
+                if (!borrowedPointee.EndsWith("*", StringComparison.Ordinal)
+                    && !borrowedPointee.EndsWith("&", StringComparison.Ordinal)
+                    && declarationsByQualifiedName.TryGetValue(borrowedPointee, out var borrowedDeclaration)
+                    && declarationNames.TryGetValue(borrowedDeclaration.Id, out var borrowedName))
+                {
+                    wrapperType = "global::" + borrowedName.NamespaceName + "." + borrowedName.ClassName;
+                    nullable = isPointer;
+                }
+            }
+
             return true;
         }
 

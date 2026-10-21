@@ -60,8 +60,15 @@ internal static class InteropEmitter
                 $"public sealed {classModifier}partial class {name.ClassName}{interfaceClause}",
                 "{",
                 "    private nint _handle;",
+                "    private readonly bool _ownsHandle;",
                 "",
-                $"    public {name.ClassName}(nint handle) => _handle = handle;",
+                $"    public {name.ClassName}(nint handle) : this(handle, true) {{ }}",
+                "",
+                $"    internal {name.ClassName}(nint handle, bool ownsHandle)",
+                "    {",
+                "        _handle = handle;",
+                "        _ownsHandle = ownsHandle;",
+                "    }",
                 "",
                 "    public nint Handle => _handle;",
                 "",
@@ -70,6 +77,11 @@ internal static class InteropEmitter
                 "        if (_handle == 0)",
                 "        {",
                 "            throw new global::System.ObjectDisposedException(\"handle\");",
+                "        }",
+                "",
+                "        if (!_ownsHandle)",
+                "        {",
+                "            throw new global::System.InvalidOperationException(\"A borrowed handle cannot be released.\");",
                 "        }",
                 "",
                 "        var __hs_handle = _handle;",
@@ -283,7 +295,7 @@ internal static class InteropEmitter
             };
             EmitMethod(lines, "Invoke", callable.InvokeFunction!);
             lines.Add("");
-            EmitDispose(lines, callable.DestroyFunction!);
+            EmitDispose(lines, callable.DestroyFunction!, ownershipAware: false);
             lines.Add("}");
 
             var path = Path.Combine(outputDirectory, "interop", callable.Surface, callable.ClassName + ".g.cs");
@@ -793,7 +805,8 @@ internal static class InteropEmitter
         {
             AbiKind.Void => "void",
             AbiKind.StringView => method.ReturnOptional ? "string?" : "string",
-            AbiKind.Opaque => method.ReturnOwned && method.ReturnWrapperType is not null
+            AbiKind.Opaque => method.ReturnWrapperType is not null
+                && (method.ReturnOwned || method.ReturnBorrowed)
                 ? method.ReturnWrapperType + (method.ReturnNullable ? "?" : "")
                 : method.ReturnOptional ? "nint?" : "nint",
             AbiKind.ArrayView => method.ArrayElementKind == AbiKind.StringView
@@ -937,15 +950,23 @@ internal static class InteropEmitter
                 lines.Add(indent + "return global::Hosihikari.Bindings.Abi.SharedHandle.FromNative(__hs_shared);");
                 break;
             case AbiKind.Opaque:
-                if (method.ReturnOwned && method.ReturnWrapperType is not null)
+                if (method.ReturnWrapperType is not null
+                    && (method.ReturnOwned || method.ReturnBorrowed))
                 {
+                    var constructor = method.ReturnBorrowed
+                        ? $"new {method.ReturnWrapperType}((nint)__hs_handle, false)"
+                        : $"new {method.ReturnWrapperType}((nint)__hs_handle)";
                     if (method.ReturnNullable)
                     {
                         lines.Add(indent + $"var __hs_handle = {call};");
                         var condition = method.ReturnOptional
                             ? "__hs_hasValue && __hs_handle != null"
                             : "__hs_handle != null";
-                        lines.Add(indent + $"return {condition} ? new {method.ReturnWrapperType}((nint)__hs_handle) : null;");
+                        lines.Add(indent + $"return {condition} ? {constructor} : null;");
+                    }
+                    else if (method.ReturnBorrowed)
+                    {
+                        lines.Add(indent + $"return new {method.ReturnWrapperType}((nint){call}, false);");
                     }
                     else
                     {
@@ -1498,13 +1519,25 @@ internal static class InteropEmitter
                 : parameter.Name);
     }
 
-    private static void EmitDispose(List<string> lines, AbiFunction destroy)
+    private static void EmitDispose(List<string> lines, AbiFunction destroy, bool ownershipAware = true)
     {
         lines.Add("    public void Dispose()");
         lines.Add("    {");
         lines.Add("        if (_handle != 0)");
         lines.Add("        {");
-        lines.Add($"            NativeMethods.TablePtr->{destroy.TableField}((void*)_handle);");
+        if (ownershipAware)
+        {
+            lines.Add("            if (_ownsHandle)");
+            lines.Add("            {");
+            lines.Add($"                NativeMethods.TablePtr->{destroy.TableField}((void*)_handle);");
+            lines.Add("            }");
+            lines.Add("");
+        }
+        else
+        {
+            lines.Add($"            NativeMethods.TablePtr->{destroy.TableField}((void*)_handle);");
+        }
+
         lines.Add("            _handle = 0;");
         lines.Add("        }");
         lines.Add("    }");
