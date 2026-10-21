@@ -61,6 +61,7 @@ if(WIN32)
 endif()
 
 find_package(Clang REQUIRED CONFIG)
+find_package(Threads REQUIRED)
 
 add_executable(hosihikari-ir-frontend src/main.cpp)
 target_include_directories(hosihikari-ir-frontend PRIVATE ${LLVM_INCLUDE_DIRS} ${CLANG_INCLUDE_DIRS})
@@ -82,4 +83,5 @@ target_link_libraries(
     clangAnalysis
     clangAST
     clangBasic
+    Threads::Threads
 )
