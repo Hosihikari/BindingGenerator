@@ -81,7 +81,7 @@ Results are written to `variant.bases` (IR 1.4.1). The PDB publics for this buil
 
 ## Header supplement
 
-`frontend/merge-symbol-ir.py` merges facts from a header-derived IR (for example LiteLoaderBDS `v2/main`) into the symbol IR:
+`frontend/run-levilamina-headers.ps1` generates a header supplement from a LeviLamina v0.13.5 checkout (`bdslibrary 1.21.3.01`). The frontend flattens anonymous unions/structs into named fields, so `ll::math::intN3<BlockPos>` contributes `x`/`y`/`z`. `frontend/merge-symbol-ir.py` then merges the supplement into the symbol IR:
 
 ```powershell
 python frontend/merge-symbol-ir.py `
@@ -97,9 +97,9 @@ The merge:
 - copies a header layout only when it has fields or bases, and drops header vtable slots (the symbol IR keeps per-configuration `vtableIndex`);
 - moves `layout.bases` into `variant.bases`, deduplicating against RTTI results;
 - adds header-only inline methods when no symbol method with the same normalized signature exists;
-- copies base declarations referenced by the header.
+- recursively copies base declarations, their layouts, and their fields.
 
-For the 1.21.3 slice, `BlockPos` gains `x`/`y`/`z` fields, size 12, align 4, and its `VectorBase<...>` base. The LiteLoaderBDS `Actor` header declares only methods and static constants, so `Actor` gains no instance fields and no layout; its static constants are merged as `static_field` members. The header layout is written to both configurations; for these plain-int value types the layout is identical on Windows and Linux, but virtual/inherited classes would need per-configuration confirmation.
+For the 1.21.3 slice, `Actor` gets size 1096, base `ActorStatusProvider`, and its `filler[1088]` field; `Mob : Actor`, `Player : Mob`; `BlockPos` gets size 12 and base `ll::math::intN3<BlockPos>`, whose flattened fields `x`/`y`/`z` sit at 0/32/64. The header layout is written to both configurations; for these plain-int value types the layout is identical on Windows and Linux, but virtual/inherited classes would need per-configuration confirmation. `Actor`'s generated header collapses its instance fields into `filler`, so individual Actor fields are not recoverable from this source.
 
 ## Next steps
 

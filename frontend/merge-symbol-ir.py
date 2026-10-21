@@ -119,6 +119,76 @@ def main():
     copied_fields = 0
     copied_methods = 0
     copied_layouts = 0
+    processed_base_classes = set()
+
+    def ensure_header_class(class_id):
+        nonlocal added_declarations, copied_fields, copied_layouts
+        if class_id in processed_base_classes:
+            return
+        processed_base_classes.add(class_id)
+
+        bases = []
+        for configuration, records in symbol_records.items():
+            for record in records:
+                if record.get("recordType") == "variant" and record.get("declarationId") == class_id:
+                    bases.extend(record.get("bases", []))
+
+        if class_id not in symbol_declarations and class_id in header_declarations:
+            symbol_records[configurations[0]].append(copy.deepcopy(header_declarations[class_id]))
+            symbol_declarations[class_id] = header_declarations[class_id]
+            added_declarations += 1
+
+            header_variant = header_variants.get(class_id, {})
+            layout = header_variant.get("layout")
+            header_class_bases = layout.get("bases", []) if layout else []
+            clean_layout = None
+            if layout and (layout.get("fieldOffsets") or header_class_bases):
+                clean_layout = {
+                    "size": layout.get("size", 0),
+                    "align": layout.get("align", 0),
+                    "fieldOffsets": layout.get("fieldOffsets", []),
+                    "bases": [],
+                }
+
+            for configuration in configurations:
+                has_variant = any(
+                    record.get("recordType") == "variant"
+                    and record.get("declarationId") == class_id
+                    and record.get("configuration") == configuration
+                    for record in symbol_records[configuration]
+                )
+                if not has_variant:
+                    variant = {
+                        "recordType": "variant",
+                        "declarationId": class_id,
+                        "configuration": configuration,
+                        "availability": "present",
+                    }
+                    if clean_layout is not None:
+                        variant["layout"] = copy.deepcopy(clean_layout)
+                        copied_layouts += 1
+                    if header_class_bases:
+                        variant["bases"] = copy.deepcopy(header_class_bases)
+                        bases.extend(header_class_bases)
+                    symbol_records[configuration].append(variant)
+
+                for header_member in header_members.get(class_id, []):
+                    if header_member.get("kind") not in ("field", "static_field"):
+                        continue
+                    if any(
+                        record.get("recordType") == "member"
+                        and record.get("id") == header_member.get("id")
+                        and record.get("configuration") == configuration
+                        for record in symbol_records[configuration]
+                    ):
+                        continue
+                    member = copy.deepcopy(header_member)
+                    member["configuration"] = configuration
+                    symbol_records[configuration].append(member)
+                    copied_fields += 1
+
+        for base in bases:
+            ensure_header_class(base.get("declarationId"))
 
     for class_name in classes:
         declaration_id = "bedrock:" + class_name
@@ -169,17 +239,6 @@ def main():
                             if base.get("declarationId") not in known:
                                 existing.append(copy.deepcopy(base))
                                 known.add(base.get("declarationId"))
-            for base in header_bases:
-                base_id = base.get("declarationId")
-                if base_id and base_id not in symbol_declarations and base_id in header_declarations:
-                    if all(
-                        declaration.get("id") != base_id
-                        for declaration in symbol_records[configurations[0]]
-                        if declaration.get("recordType") == "declaration"
-                    ):
-                        symbol_records[configurations[0]].append(copy.deepcopy(header_declarations[base_id]))
-                        symbol_declarations[base_id] = header_declarations[base_id]
-                        added_declarations += 1
 
         existing_methods = {
             normalize_signature(record.get("id", ""))
@@ -221,6 +280,17 @@ def main():
                     symbol_records[configuration].append(member)
                     existing_keys.add(key)
                     copied_methods += 1
+
+    base_class_ids = [
+        base.get("declarationId")
+        for records in symbol_records.values()
+        for record in records
+        if record.get("recordType") == "variant"
+        for base in record.get("bases", [])
+    ]
+    for base_class_id in base_class_ids:
+        if base_class_id:
+            ensure_header_class(base_class_id)
 
     os.makedirs(args.output, exist_ok=True)
     shard_paths = {}

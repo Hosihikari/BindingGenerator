@@ -56,7 +56,7 @@ The script emits `linux-x64-server` IR and validates it with the .NET CLI. On li
 ./frontend/run-symbols.ps1 -Pdb <pdb> -Exe <pe> -Elf <debug> -Classes Actor,BlockPos
 ```
 
-`frontend/merge-symbol-ir.py` optionally merges fields, layouts, and inline methods from a header-derived IR (LiteLoaderBDS headers) into the symbol IR.
+`frontend/run-levilamina-headers.ps1` generates a header supplement from a LeviLamina v0.13.5 checkout targeting BDS 1.21.3.01. It passes `--flatten-anonymous-fields`, which emits fields nested in anonymous unions/structs with absolute bit offsets; the flag is off by default so existing IRs stay unchanged. `frontend/merge-symbol-ir.py` then merges fields, layouts, inheritance, and inline methods from that IR into the symbol IR.
 
 ## Current state
 

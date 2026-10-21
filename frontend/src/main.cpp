@@ -39,6 +39,7 @@ struct Options {
     std::string Source;
     std::vector<std::string> Filters;
     std::string Module = "ll/api/event";
+    bool FlattenAnonymousFields = false;
     std::vector<std::string> CompilerArgs;
 };
 
@@ -347,6 +348,8 @@ bool parseOptions(int argc, char** argv, Options& Opt) {
             if (!next(Opt.Module)) {
                 return false;
             }
+        } else if (Arg == "--flatten-anonymous-fields") {
+            Opt.FlattenAnonymousFields = true;
         } else {
             llvm::errs() << "unknown option: " << Arg << "\n";
             return false;
@@ -414,6 +417,14 @@ public:
                 collectDependencyEnums(Field);
                 collectDependencyRecords(Field);
                 emitMember(Definition, DeclId, Field, "field", false);
+                if (Opt.FlattenAnonymousFields && Field->isAnonymousStructOrUnion()) {
+                    emitAnonymousFields(
+                        DeclId,
+                        Field,
+                        "field",
+                        Ctx.getASTRecordLayout(Definition).getFieldOffset(Field->getFieldIndex()),
+                        Field->getAccess());
+                }
             } else if (auto* Variable = dyn_cast<VarDecl>(Member)) {
                 collectDependencyEnums(Variable);
                 collectDependencyRecords(Variable);
@@ -1105,6 +1116,80 @@ private:
         return Object;
     }
 
+    void emitAnonymousFields(
+        const std::string& DeclId,
+        FieldDecl* AnonymousField,
+        const std::string& Kind,
+        long BaseBitOffset,
+        AccessSpecifier Access) {
+        auto* Inner = dyn_cast_or_null<CXXRecordDecl>(AnonymousField->getType()->getAsRecordDecl());
+        if (Inner == nullptr || !Inner->isCompleteDefinition()) {
+            return;
+        }
+
+        const ASTRecordLayout& Layout = Ctx.getASTRecordLayout(Inner);
+        for (auto* Member : Inner->decls()) {
+            auto* Field = dyn_cast<FieldDecl>(Member);
+            if (Field == nullptr || Field->isImplicit()) {
+                continue;
+            }
+
+            long Offset = BaseBitOffset + static_cast<long>(Layout.getFieldOffset(Field->getFieldIndex()));
+            if (Field->isAnonymousStructOrUnion()) {
+                emitAnonymousFields(DeclId, Field, Kind, Offset, Access);
+                continue;
+            }
+
+            emitAnonymousField(DeclId, Field, Kind, Offset, Access);
+        }
+    }
+
+    void emitAnonymousField(
+        const std::string& DeclId,
+        FieldDecl* Field,
+        const std::string& Kind,
+        long BitOffset,
+        AccessSpecifier Access) {
+        std::string MemberId = DeclId + "@" + Field->getNameAsString();
+        if (!Emitted.insert(MemberId).second) {
+            return;
+        }
+
+        collectDependencyEnums(Field);
+        collectDependencyRecords(Field);
+
+        llvm::json::Object Object;
+        Object["recordType"] = "member";
+        Object["id"] = MemberId;
+        Object["declarationId"] = DeclId;
+        Object["configuration"] = Opt.Configuration;
+        Object["kind"] = Kind;
+        Object["name"] = Field->getNameAsString();
+        Object["access"] = accessString(Access);
+        Object["static"] = false;
+        Object["type"] = makeType(Field->getType());
+        Object["bitOffset"] = BitOffset;
+        Object["bitWidth"] = Field->isBitField() ? static_cast<int64_t>(Field->getBitWidthValue()) : 0;
+
+        llvm::json::Array Attributes;
+        for (auto* Attribute : Field->attrs()) {
+            llvm::json::Object Item;
+            Item["name"] = Attribute->getSpelling();
+            Attributes.emplace_back(std::move(Item));
+        }
+        if (!Attributes.empty()) {
+            Object["attributes"] = std::move(Attributes);
+        }
+
+        auto Macros = inferMacros(Field);
+        if (!Macros.empty()) {
+            Object["macros"] = std::move(Macros);
+        }
+
+        Records.emplace_back(std::move(Object));
+        ++Members;
+    }
+
     void emitMember(CXXRecordDecl* Owner, const std::string& DeclId, NamedDecl* Member, const std::string& Kind, bool Static) {
         std::string MemberId = idFor(Member, DeclId);
         if (!Emitted.insert(MemberId).second) {
@@ -1193,7 +1278,7 @@ int main(int argc, char** argv) {
     if (!parseOptions(argc, argv, Opt)) {
         llvm::errs() << "usage: hosihikari-ir-frontend --surface <surface> --output <dir> --root <include-root> "
                         "--configuration <id> [--header <header>] [--source <file>] [--filter <path>] "
-                        "[--module <module>] -- <clang args>\n";
+                        "[--module <module>] [--flatten-anonymous-fields] -- <clang args>\n";
         return 2;
     }
 
