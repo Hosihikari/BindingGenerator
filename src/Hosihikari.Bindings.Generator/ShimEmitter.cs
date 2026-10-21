@@ -880,6 +880,34 @@ internal static class ShimEmitter
 
                 break;
 
+            case AbiFunctionKind.FreeFunction:
+            {
+                var call = $"{function.NativeMemberName}({string.Join(", ", BuildNativeArguments(function))})";
+                if (function.ReturnKind == AbiKind.Void)
+                {
+                    yield return $"    {call};";
+                }
+                else if (function.ReturnKind == AbiKind.StringView)
+                {
+                    yield return $"    auto result = {call};";
+                    yield return "    g_stringResult.assign(result.data(), result.size());";
+                    yield return "    return HosihikariStringView{g_stringResult.data(), g_stringResult.size()};";
+                }
+                else if (function.ReturnKind == AbiKind.Opaque)
+                {
+                    var address = function.NativeReturnType.TrimEnd().EndsWith("&", StringComparison.Ordinal)
+                        ? "&" + call
+                        : call;
+                    yield return $"    return const_cast<void*>(static_cast<void const*>({address}));";
+                }
+                else
+                {
+                    yield return $"    return static_cast<{AbiPlan.CppType(function.ReturnKind)}>({call});";
+                }
+
+                break;
+            }
+
             case AbiFunctionKind.Method:
             {
                 if (function.CallableOp == CallableOp.Invoke)

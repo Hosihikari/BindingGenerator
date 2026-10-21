@@ -36,6 +36,7 @@ internal enum AbiFunctionKind
     Method,
     Cast,
     DirectorCreate,
+    FreeFunction,
 }
 
 internal enum AbiCastKind
@@ -1197,6 +1198,258 @@ internal sealed class AbiPlan
                 DirectorReturnNativeType = returnText,
                 DirectorMethodIsConst = callSignature.Const,
             });
+        }
+
+        // Namespace-level inline functions are emitted as static C# classes. Link-safe mode
+        // skips them because an inline body may still reference out-of-line carrier symbols.
+        static bool IsFreeFunctionScalar(AbiKind kind) =>
+            kind is AbiKind.Bool or AbiKind.I8 or AbiKind.U8
+                or AbiKind.I16 or AbiKind.U16 or AbiKind.I32 or AbiKind.U32
+                or AbiKind.I64 or AbiKind.U64 or AbiKind.USize or AbiKind.ISize
+                or AbiKind.F32 or AbiKind.F64;
+
+        static bool IsFreeFunctionParameterSupported(AbiParameter parameter)
+        {
+            if (parameter.IsOptional
+                || parameter.IsOptionalRef
+                || parameter.IsUniquePtrParam
+                || parameter.IsVector
+                || parameter.IsMap)
+            {
+                return false;
+            }
+
+            if (parameter.Kind == AbiKind.StringView)
+            {
+                return !IsNonConstLValueReference(parameter.NativeType);
+            }
+
+            if (parameter.Kind == AbiKind.Opaque)
+            {
+                var core = StripTopLevelQualifiers(parameter.NativeType);
+                var isPointer = core.EndsWith("*", StringComparison.Ordinal);
+                var isReference = core.EndsWith("&", StringComparison.Ordinal)
+                    && !core.EndsWith("&&", StringComparison.Ordinal);
+                if (!isPointer && !isReference)
+                {
+                    return false;
+                }
+
+                var pointee = StripTopLevelQualifiers(core[..^1].TrimEnd());
+                return !pointee.EndsWith("*", StringComparison.Ordinal)
+                    && !pointee.EndsWith("&", StringComparison.Ordinal)
+                    && IsValidCppQualifiedName(pointee);
+            }
+
+            return IsFreeFunctionScalar(parameter.Kind);
+        }
+
+        if (linkCarrier || virtualDispatch)
+        {
+            var occupiedFunctionTypeNames = declarationNames.Values
+                .Select(name => name.NamespaceName + "." + name.ClassName)
+                .ToHashSet(StringComparer.Ordinal);
+            var functionClassNamesByNamespace = new Dictionary<string, DeclarationName>(StringComparer.Ordinal);
+            var freeFunctionCandidates = new List<(DeclarationRecord Function, DeclarationName ClassName, string BaseName)>();
+
+            foreach (var function in records.OfType<DeclarationRecord>()
+                         .Where(declaration => declaration.Kind == "function")
+                         .OrderBy(declaration => declaration.Id, StringComparer.Ordinal))
+            {
+                if (function.Access != "public"
+                    || function.Template is not null
+                    || function.Signature is null
+                    || function.Signature.Variadic
+                    || function.Consteval
+                    || !function.Inline
+                    || !function.Defined
+                    || function.Source is null
+                    || !IsValidCppQualifiedName(function.QualifiedName)
+                    || !IsNativeSourceAvailable(nativeRoot, function.Source.File))
+                {
+                    continue;
+                }
+
+                var parts = TypeNames.SplitQualifiedName(function.QualifiedName).ToList();
+                if (parts.Count == 0)
+                {
+                    continue;
+                }
+
+                var baseName = TypeNames.Sanitize(parts[^1]);
+                if (baseName.Length == 0
+                    || baseName.Contains("operator", StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                var surfaceNamespace = "Hosihikari.Bindings." + TypeNames.SurfaceNamespace(function.Surface) + ".Interop";
+                var namespaceName = parts.Count > 1
+                    ? surfaceNamespace + "." + string.Join(".", parts.Take(parts.Count - 1).Select(TypeNames.Sanitize))
+                    : surfaceNamespace;
+
+                if (!functionClassNamesByNamespace.TryGetValue(namespaceName, out var className))
+                {
+                    var candidate = "Functions";
+                    if (!occupiedFunctionTypeNames.Add(namespaceName + "." + candidate))
+                    {
+                        candidate = "NativeFunctions";
+                        if (!occupiedFunctionTypeNames.Add(namespaceName + "." + candidate))
+                        {
+                            candidate = "NativeFunctions_" + CSharpNaming.ShortHash(namespaceName);
+                            occupiedFunctionTypeNames.Add(namespaceName + "." + candidate);
+                        }
+                    }
+
+                    className = new DeclarationName(namespaceName, namespaceName, candidate);
+                    functionClassNamesByNamespace[namespaceName] = className;
+                }
+
+                freeFunctionCandidates.Add((function, className, baseName));
+            }
+
+            foreach (var group in freeFunctionCandidates.GroupBy(
+                         candidate => (candidate.ClassName.NamespaceName, candidate.ClassName.ClassName, candidate.BaseName)))
+            {
+                var duplicate = group.Count() > 1;
+                foreach (var candidate in group)
+                {
+                    if (!TryMapReturnType(
+                            candidate.Function.Surface,
+                            candidate.Function.Signature!.ReturnType,
+                            publicDeclarationsByQualifiedName,
+                            declarationNames,
+                            destroyableDeclarationIds,
+                            enumUnderlyingByName,
+                            linkCarrier,
+                            variants,
+                            callables,
+                            out var returnKind,
+                            out var nativeReturnType,
+                            out var returnWrapperType,
+                            out var returnOwned,
+                            out var returnUniquePtr,
+                            out var returnOptional,
+                            out var returnArray,
+                            out _,
+                            out _,
+                            out _,
+                            out _,
+                            out _,
+                            out _,
+                            out var sharedWrapper,
+                            out var timeConversion,
+                            out _,
+                            out _,
+                            out var specialValue,
+                            out _,
+                            out var mapKeyKind,
+                            out var mapValueKind,
+                            out _,
+                            out _,
+                            out _,
+                            out var returnNullable,
+                            out var returnExpected,
+                            out _,
+                            out var returnVariant,
+                            out var returnCallable,
+                            out _))
+                    {
+                        continue;
+                    }
+
+                    if (!(returnKind == AbiKind.Void
+                            || returnKind == AbiKind.StringView
+                            || returnKind == AbiKind.Opaque
+                            || IsFreeFunctionScalar(returnKind))
+                        || returnOwned
+                        || returnUniquePtr
+                        || returnOptional
+                        || returnArray
+                        || returnExpected
+                        || sharedWrapper != SharedWrapperKind.None
+                        || timeConversion != TimeConversion.None
+                        || specialValue != SpecialValueKind.None
+                        || mapKeyKind != AbiKind.Void
+                        || mapValueKind != AbiKind.Void
+                        || returnVariant is not null
+                        || returnCallable is not null)
+                    {
+                        continue;
+                    }
+
+                    if (returnKind == AbiKind.Opaque)
+                    {
+                        var returnCore = StripTopLevelQualifiers(nativeReturnType);
+                        var returnIsPointer = returnCore.EndsWith("*", StringComparison.Ordinal);
+                        var returnIsReference = returnCore.EndsWith("&", StringComparison.Ordinal)
+                            && !returnCore.EndsWith("&&", StringComparison.Ordinal);
+                        var returnPointee = returnIsPointer || returnIsReference
+                            ? StripTopLevelQualifiers(returnCore[..^1].TrimEnd())
+                            : "";
+                        if ((!returnIsPointer && !returnIsReference)
+                            || returnPointee.Length == 0
+                            || returnPointee.EndsWith("*", StringComparison.Ordinal)
+                            || returnPointee.EndsWith("&", StringComparison.Ordinal)
+                            || !IsValidCppQualifiedName(returnPointee))
+                        {
+                            continue;
+                        }
+                    }
+
+                    var parameters = new List<AbiParameter>();
+                    var usable = true;
+                    foreach (var parameter in candidate.Function.Signature.Parameters)
+                    {
+                        if (!TryMapParameter(
+                                candidate.Function.Surface,
+                                parameter.Name,
+                                parameter.Type,
+                                publicDeclarationsByQualifiedName,
+                                declarationNames,
+                                destroyableDeclarationIds,
+                                enumUnderlyingByName,
+                                linkCarrier,
+                                variants,
+                                out var mapped,
+                                out _)
+                            || !IsFreeFunctionParameterSupported(mapped))
+                        {
+                            usable = false;
+                            break;
+                        }
+
+                        parameters.Add(mapped);
+                    }
+
+                    if (!usable)
+                    {
+                        continue;
+                    }
+
+                    functions.Add(new AbiFunction
+                    {
+                        CppName = "hs_function_" + CSharpNaming.ShortHash(candidate.Function.Id),
+                        Kind = AbiFunctionKind.FreeFunction,
+                        Surface = candidate.Function.Surface,
+                        DeclarationId = candidate.Function.Id,
+                        MemberId = candidate.Function.Id,
+                        ClassCppName = candidate.Function.QualifiedName,
+                        ClassName = candidate.ClassName,
+                        NativeMemberName = candidate.Function.QualifiedName,
+                        CSharpMemberName = duplicate
+                            ? candidate.BaseName + "_" + CSharpNaming.ShortHash(candidate.Function.Id)
+                            : candidate.BaseName,
+                        ReturnKind = returnKind,
+                        NativeReturnType = nativeReturnType,
+                        ReturnWrapperType = returnWrapperType,
+                        ReturnOwned = false,
+                        ReturnNullable = returnNullable,
+                        Parameters = parameters,
+                        Static = true,
+                    });
+                }
+            }
         }
 
         var usedVariants = functions

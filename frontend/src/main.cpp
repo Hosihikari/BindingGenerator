@@ -778,6 +778,9 @@ private:
 
         if (auto* Function = dyn_cast<FunctionDecl>(Decl)) {
             Object["signature"] = makeSignature(Function);
+            Object["inline"] = Function->isInlined();
+            Object["defined"] = Function->isThisDeclarationADefinition();
+            Object["consteval"] = Function->isConsteval();
         }
 
         if (auto* Enum = dyn_cast<EnumDecl>(Decl)) {
@@ -989,11 +992,11 @@ int main(int argc, char** argv) {
 
     llvm::json::Object Manifest;
     Manifest["schema"] = "hosihikari.bindings.ir/1";
-    Manifest["irVersion"] = "1.2.0";
+    Manifest["irVersion"] = "1.3.0";
 
     llvm::json::Object Frontend;
     Frontend["name"] = "libtooling";
-    Frontend["version"] = "0.2.0";
+    Frontend["version"] = "0.3.0";
     Frontend["llvm"] = "23.1.3";
     Manifest["frontend"] = std::move(Frontend);
 
