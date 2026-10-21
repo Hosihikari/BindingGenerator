@@ -60,6 +60,7 @@ internal sealed class AbiParameter
     public string? VectorPairKeyType { get; init; }
     public string? VectorPairValueType { get; init; }
     public bool IsWeakPtr { get; init; }
+    public bool IsUniquePtrParam { get; init; }
     public bool IsMap { get; init; }
     public AbiKind MapKeyKind { get; init; }
     public AbiKind MapValueKind { get; init; }
@@ -3599,6 +3600,29 @@ internal sealed class AbiPlan
                 NativeType = NormalizeTypeName(text),
                 NativePointee = weakPointee,
                 IsWeakPtr = true,
+            };
+            return true;
+        }
+
+        if (!IsPointerType(text)
+            && !(IsReferenceType(text) && !IsRValueReference(text))
+            && TryParseUniquePtr(text, out var uniquePointee))
+        {
+            var uniqueWrapper = LookupWrapperType(uniquePointee, declarationsByQualifiedName, declarationNames);
+            if (uniqueWrapper is null)
+            {
+                reason = $"unique_ptr parameter pointee '{uniquePointee}' has no generated wrapper";
+                return false;
+            }
+
+            parameter = new AbiParameter
+            {
+                Name = name,
+                Kind = AbiKind.Opaque,
+                NativeType = NormalizeTypeName(text),
+                NativePointee = uniquePointee,
+                IsUniquePtrParam = true,
+                WrapperType = uniqueWrapper,
             };
             return true;
         }

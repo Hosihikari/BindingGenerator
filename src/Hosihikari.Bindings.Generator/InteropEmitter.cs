@@ -64,6 +64,18 @@ internal static class InteropEmitter
                 $"    public {name.ClassName}(nint handle) => _handle = handle;",
                 "",
                 "    public nint Handle => _handle;",
+                "",
+                "    internal nint ReleaseHandle()",
+                "    {",
+                "        if (_handle == 0)",
+                "        {",
+                "            throw new global::System.ObjectDisposedException(\"handle\");",
+                "        }",
+                "",
+                "        var __hs_handle = _handle;",
+                "        _handle = 0;",
+                "        return __hs_handle;",
+                "    }",
             };
 
             if (members.TryGetValue(declaration.Id, out var declarationMembers))
@@ -543,7 +555,9 @@ internal static class InteropEmitter
     }
 
     private static string ParameterKey(AbiParameter parameter) =>
-        parameter.Kind == AbiKind.Shared
+        parameter.IsUniquePtrParam
+            ? "unique_ptr:" + parameter.NativePointee
+            : parameter.Kind == AbiKind.Shared
             ? "shared:" + parameter.NativeType + (parameter.IsWeakPtr ? ":weak" : "")
             : parameter.IsMap
             ? "map:" + parameter.NativeType
@@ -1082,7 +1096,11 @@ internal static class InteropEmitter
                     yield return $"(nuint)__hs_stringBytes{index}.Length";
                     break;
                 case AbiKind.Opaque:
-                    if (parameter.IsOptional)
+                    if (parameter.IsUniquePtrParam)
+                    {
+                        yield return $"(void*){name}.ReleaseHandle()";
+                    }
+                    else if (parameter.IsOptional)
                     {
                         yield return parameter.WrapperType is not null
                             ? $"(void*)({name}?.Handle ?? 0)"

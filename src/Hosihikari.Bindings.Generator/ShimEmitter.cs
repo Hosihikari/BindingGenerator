@@ -1404,6 +1404,12 @@ internal static class ShimEmitter
             };
         }
 
+        if (parameter.IsUniquePtrParam)
+        {
+            var pointee = parameter.NativePointee ?? "void";
+            return $"std::unique_ptr<{pointee}>(static_cast<{pointee}*>({name}))";
+        }
+
         if (parameter.SpecialValue != SpecialValueKind.None)
         {
             if (parameter.IsOptional)
