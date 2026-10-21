@@ -69,6 +69,27 @@ Linux includes local/inline functions that the Windows publics omit, which expla
 }
 ```
 
+## Header supplement
+
+`frontend/merge-symbol-ir.py` merges facts from a header-derived IR (for example LiteLoaderBDS `v2/main`) into the symbol IR:
+
+```powershell
+python frontend/merge-symbol-ir.py `
+  --symbol artifacts/symbol-ir-1.21.3/ir `
+  --header artifacts/llbds-header-ir `
+  --output artifacts/symbol-ir-1.21.3/merged `
+  --classes Actor,BlockPos
+```
+
+The merge:
+
+- copies class traits and instance/static field members into both configurations;
+- copies a header layout only when it has fields or bases, and drops header vtable slots (the symbol IR keeps per-configuration `vtableIndex`);
+- adds header-only inline methods when no symbol method with the same normalized signature exists;
+- copies declarations referenced by `layout.bases`.
+
+For the 1.21.3 slice, `BlockPos` gains `x`/`y`/`z` fields, size 12, align 4, and its `VectorBase<...>` base. The LiteLoaderBDS `Actor` header declares only methods and static constants, so `Actor` gains no instance fields and no layout; its static constants are merged as `static_field` members. The header layout is written to both configurations; for these plain-int value types the layout is identical on Windows and Linux, but virtual/inherited classes would need per-configuration confirmation.
+
 ## Next steps
 
 - Validate class/field facts against LiteLoaderBDS headers as a supplement; symbols remain the primary input.

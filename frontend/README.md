@@ -56,6 +56,8 @@ The script emits `linux-x64-server` IR and validates it with the .NET CLI. On li
 ./frontend/run-symbols.ps1 -Pdb <pdb> -Exe <pe> -Elf <debug> -Classes Actor,BlockPos
 ```
 
+`frontend/merge-symbol-ir.py` optionally merges fields, layouts, and inline methods from a header-derived IR (LiteLoaderBDS headers) into the symbol IR.
+
 ## Current state
 
 The frontend parses the full `src/ll/api` umbrella plus the `src-server/ll/api` overlays (1,530 declarations / 6,145 members in the current full IR) and the smaller `ll/api/event` module. It emits JSONL IR plus `ir-manifest.json` and validates the result through the .NET CLI. The visitor covers classes/structs/unions, fields, static fields, methods, constructors, destructors, operators, enums, namespace-scope functions, and concrete template instantiations. Public record types referenced by value from filtered signatures are emitted with their constructors, destructor, and fields even when declared outside the module filter. Macro provenance is inferred from export/deprecated/nodiscard attributes; uninstantiated template declarations and partial specializations are skipped.
