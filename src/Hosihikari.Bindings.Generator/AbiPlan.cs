@@ -813,6 +813,11 @@ internal sealed class AbiPlan
                 {
                     reason = "rvalue-qualified members are not projected";
                 }
+                else if (string.Equals(method.Name, "operator=", StringComparison.Ordinal)
+                    && declaration.Template is not null)
+                {
+                    reason = "assignment operators on template specializations are not projected";
+                }
 
                 if (reason is not null)
                 {
@@ -1726,12 +1731,6 @@ internal sealed class AbiPlan
         if (method.Consteval)
         {
             reason = "consteval methods cannot be called at runtime";
-            return false;
-        }
-
-        if (string.Equals(method.Name, "operator=", StringComparison.Ordinal))
-        {
-            reason = "assignment operators are not projected";
             return false;
         }
 
