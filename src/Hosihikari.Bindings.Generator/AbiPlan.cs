@@ -173,7 +173,12 @@ internal enum ArrayElementOwnership
 internal sealed class AbiFunction
 {
     public int Index { get; set; }
-    public string TableField => "f" + Index.ToString(System.Globalization.CultureInfo.InvariantCulture);
+
+    /// <summary>
+    /// Stable table field name derived from the function identity. The table order remains
+    /// positional, but adding a function no longer renames every call site.
+    /// </summary>
+    public string TableField => CppName;
     public string CppName { get; init; } = "";
     public AbiFunctionKind Kind { get; init; }
     public string Surface { get; init; } = "";
