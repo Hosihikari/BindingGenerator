@@ -1136,11 +1136,15 @@ internal static class InteropEmitter
                             ? $"(void*)({name}?.Handle ?? 0)"
                             : $"(void*)({name} ?? 0)";
                     }
+                    else if (parameter.WrapperType is not null)
+                    {
+                        yield return parameter.IsPointer
+                            ? $"(void*)({name}?.Handle ?? 0)"
+                            : $"(void*){name}.Handle";
+                    }
                     else
                     {
-                        yield return parameter.WrapperType is not null
-                            ? $"(void*){name}.Handle"
-                            : $"(void*){name}";
+                        yield return $"(void*){name}";
                     }
 
                     break;

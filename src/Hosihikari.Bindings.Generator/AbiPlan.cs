@@ -50,6 +50,7 @@ internal sealed class AbiParameter
     public AbiKind Kind { get; init; }
     public string NativeType { get; init; } = "";
     public string? NativePointee { get; init; }
+    public bool IsPointer => AbiPlan.IsPointerType(NativeType);
     public bool IsReference { get; init; }
     public bool IsRValueReference { get; init; }
     public bool IsConst { get; init; }
@@ -1097,7 +1098,9 @@ internal sealed class AbiPlan
             : parameter.Kind switch
             {
                 AbiKind.StringView => "string",
-                AbiKind.Opaque => parameter.WrapperType ?? "nint",
+                AbiKind.Opaque => parameter.WrapperType is not null && parameter.IsPointer
+                    ? parameter.WrapperType + "?"
+                    : parameter.WrapperType ?? "nint",
                 AbiKind.Shared => "global::Hosihikari.Bindings.Abi.SharedHandle?",
                 _ => CSharpType(parameter.Kind),
             };
@@ -4421,10 +4424,23 @@ internal sealed class AbiPlan
             return false;
         }
 
-        if (declarationsByQualifiedName.TryGetValue(pointee, out var declaration)
-            && declarationNames.TryGetValue(declaration.Id, out var name))
+        // Only a single-level pointer or lvalue reference can carry a typed wrapper; deeper
+        // indirection stays a raw nint so the ABI level is not silently collapsed.
+        var core = StripTopLevelQualifiers(text);
+        var isSinglePointer = core.EndsWith("*", StringComparison.Ordinal);
+        var isRValueReference = core.EndsWith("&&", StringComparison.Ordinal);
+        var isLValueReference = core.EndsWith("&", StringComparison.Ordinal) && !isRValueReference;
+        if (isSinglePointer || isLValueReference || isRValueReference)
         {
-            wrapperType = "global::" + name.NamespaceName + "." + name.ClassName;
+            var suffixLength = isRValueReference ? 2 : 1;
+            var wrapperPointee = StripTopLevelQualifiers(core[..^suffixLength].TrimEnd());
+            if (!wrapperPointee.EndsWith("*", StringComparison.Ordinal)
+                && !wrapperPointee.EndsWith("&", StringComparison.Ordinal)
+                && declarationsByQualifiedName.TryGetValue(wrapperPointee, out var declaration)
+                && declarationNames.TryGetValue(declaration.Id, out var name))
+            {
+                wrapperType = "global::" + name.NamespaceName + "." + name.ClassName;
+            }
         }
 
         return true;
