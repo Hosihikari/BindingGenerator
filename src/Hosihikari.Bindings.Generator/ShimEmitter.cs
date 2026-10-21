@@ -1240,7 +1240,7 @@ internal static class ShimEmitter
 
     private static IEnumerable<string> EmitDirectorCreate(AbiFunction function)
     {
-        var constructorCount = function.Parameters.Count - 3;
+        var constructorCount = function.DirectorConstructorParameterCount;
         var names = function.Parameters
             .Select((parameter, index) => CppParameterName(parameter, index))
             .ToList();
@@ -1251,13 +1251,25 @@ internal static class ShimEmitter
             .Take(constructorCount)
             .Select((parameter, index) => NativeArgument(function, parameter, index, names[index]))
             .ToList();
-        var eventName = "hs_event";
-        var eventArgument = function.DirectorCallbackParameterIsReference ? "&" + eventName : eventName;
+        var callbackTypes = function.DirectorCallbackParameters
+            .Select(DirectorCallbackCppType)
+            .ToList();
+        var invokeReturnType = AbiPlan.CppType(function.DirectorReturnKind);
+        var invokeType = $"{invokeReturnType} (*)(void*{string.Concat(callbackTypes.Select(type => ", " + type))})";
+        var callbackDeclarations = function.DirectorCallbackParameters
+            .Select((parameter, index) => $"{parameter.NativeType} hs_arg{index}")
+            .ToList();
+        var callbackArguments = function.DirectorCallbackParameters
+            .Select(DirectorCallbackArgument)
+            .ToList();
+        var invocation = $"hs_invoke(hs_userData{string.Concat(callbackArguments.Select(argument => ", " + argument))})";
+        var methodConst = function.DirectorMethodIsConst ? " const" : "";
 
         yield return $"    struct hs_director final : {function.ClassCppName}";
         yield return "    {";
+        yield return $"        using hs_invoke_type = {invokeType};";
         yield return "        void* hs_userData;";
-        yield return "        void (*hs_invoke)(void*, void*);";
+        yield return "        hs_invoke_type hs_invoke;";
         yield return "        void (*hs_release)(void*);";
         yield return "";
         yield return $"        hs_director({string.Join(", ", parameterDeclarations)})";
@@ -1267,7 +1279,7 @@ internal static class ShimEmitter
             initializers.Add($"{function.ClassCppName}({string.Join(", ", baseArguments)})");
         }
 
-        initializers.Add($"hs_invoke(static_cast<void (*)(void*, void*)>({names[constructorCount]}))");
+        initializers.Add($"hs_invoke(reinterpret_cast<hs_invoke_type>({names[constructorCount]}))");
         initializers.Add($"hs_userData({names[constructorCount + 1]})");
         initializers.Add($"hs_release(static_cast<void (*)(void*)>({names[constructorCount + 2]}))");
         yield return "            : " + string.Join(", ", initializers);
@@ -1279,12 +1291,37 @@ internal static class ShimEmitter
         yield return "            if (hs_release) { hs_release(hs_userData); }";
         yield return "        }";
         yield return "";
-        yield return $"        void {function.NativeMemberName}({function.DirectorCallbackParameterType} {eventName}) override";
+        yield return $"        {function.DirectorReturnNativeType} {function.NativeMemberName}({string.Join(", ", callbackDeclarations)}){methodConst} override";
         yield return "        {";
-        yield return $"            if (hs_invoke) {{ hs_invoke(hs_userData, {eventArgument}); }}";
+        if (function.DirectorReturnKind == AbiKind.Void)
+        {
+            yield return $"            if (hs_invoke) {{ {invocation}; }}";
+        }
+        else
+        {
+            yield return "            if (!hs_invoke) { return {}; }";
+            yield return $"            return static_cast<{function.DirectorReturnNativeType}>({invocation});";
+        }
+
         yield return "        }";
         yield return "    };";
         yield return $"    return hs_make_shared_handle(std::static_pointer_cast<{function.ClassCppName}>(std::make_shared<hs_director>({string.Join(", ", names)})));";
+    }
+
+    private static string DirectorCallbackCppType(AbiParameter parameter) =>
+        parameter.Kind == AbiKind.Opaque ? "void*" : AbiPlan.CppType(parameter.Kind);
+
+    private static string DirectorCallbackArgument(AbiParameter parameter, int index)
+    {
+        var name = $"hs_arg{index}";
+        if (parameter.Kind == AbiKind.Opaque)
+        {
+            return parameter.IsReference
+                ? $"const_cast<void*>(static_cast<void const*>(&{name}))"
+                : $"const_cast<void*>(static_cast<void const*>({name}))";
+        }
+
+        return $"static_cast<{AbiPlan.CppType(parameter.Kind)}>({name})";
     }
 
     private static string BorrowedStringCallExpression(AbiParameter parameter, string holder, int ordinal)

@@ -194,8 +194,11 @@ internal sealed class AbiFunction
     public AbiCastKind CastKind { get; init; }
     public string? TargetCppName { get; init; }
     public string? TargetDeclarationId { get; init; }
-    public string? DirectorCallbackParameterType { get; init; }
-    public bool DirectorCallbackParameterIsReference { get; init; }
+    public int DirectorConstructorParameterCount { get; init; }
+    public List<AbiParameter> DirectorCallbackParameters { get; init; } = [];
+    public AbiKind DirectorReturnKind { get; init; }
+    public string DirectorReturnNativeType { get; init; } = "void";
+    public bool DirectorMethodIsConst { get; init; }
     public string Surface { get; init; } = "";
     public string DeclarationId { get; init; } = "";
     public string? MemberId { get; init; }
@@ -998,6 +1001,35 @@ internal sealed class AbiPlan
                     or AbiKind.I64 or AbiKind.U64 or AbiKind.USize or AbiKind.ISize
                     or AbiKind.F32 or AbiKind.F64);
 
+        static bool IsDirectorCallbackParameter(AbiParameter parameter)
+        {
+            if (parameter.IsOptional || parameter.IsUniquePtrParam || parameter.IsVector || parameter.IsMap)
+            {
+                return false;
+            }
+
+            if (parameter.Kind == AbiKind.Opaque)
+            {
+                var core = StripTopLevelQualifiers(parameter.NativeType);
+                var isPointer = core.EndsWith("*", StringComparison.Ordinal);
+                var isReference = core.EndsWith("&", StringComparison.Ordinal)
+                    && !core.EndsWith("&&", StringComparison.Ordinal);
+                if (!isPointer && !isReference)
+                {
+                    return false;
+                }
+
+                var pointee = StripTopLevelQualifiers(core[..^1].TrimEnd());
+                return !pointee.EndsWith("*", StringComparison.Ordinal)
+                    && !pointee.EndsWith("&", StringComparison.Ordinal);
+            }
+
+            return parameter.Kind is AbiKind.Bool or AbiKind.I8 or AbiKind.U8
+                or AbiKind.I16 or AbiKind.U16 or AbiKind.I32 or AbiKind.U32
+                or AbiKind.I64 or AbiKind.U64 or AbiKind.USize or AbiKind.ISize
+                or AbiKind.F32 or AbiKind.F64;
+        }
+
         foreach (var declaration in declarations)
         {
             if (!castableDeclarationIds.Contains(declaration.Id)
@@ -1008,7 +1040,9 @@ internal sealed class AbiPlan
             }
 
             var pureMethods = directorMembers
-                .Where(member => member.Pure && member.Kind == "method" && member.Access == "public")
+                .Where(member => member.Pure
+                    && member.Kind == "method"
+                    && member.Access is "public" or "protected")
                 .ToList();
             if (pureMethods.Count != 1)
             {
@@ -1017,31 +1051,49 @@ internal sealed class AbiPlan
 
             var callMethod = pureMethods[0];
             var callSignature = callMethod.Signature;
-            if (callSignature is null
-                || callSignature.Variadic
-                || !string.Equals(callSignature.ReturnType.Trim(), "void", StringComparison.Ordinal)
-                || callSignature.Parameters.Count != 1)
+            if (callSignature is null || callSignature.Variadic)
             {
                 continue;
             }
 
-            var callbackType = callSignature.Parameters[0].Type.Trim();
-            if (!IsPointerOrReferenceType(callbackType) || IsRValueReference(callbackType))
+            var callbackParameters = new List<AbiParameter>();
+            var callbackUsable = true;
+            foreach (var parameter in callSignature.Parameters)
+            {
+                if (!TryMapParameter(
+                        declaration.Surface,
+                        parameter.Name,
+                        parameter.Type,
+                        publicDeclarationsByQualifiedName,
+                        declarationNames,
+                        destroyableDeclarationIds,
+                        enumUnderlyingByName,
+                        linkCarrier,
+                        variants,
+                        out var mapped,
+                        out _)
+                    || !IsDirectorCallbackParameter(mapped))
+                {
+                    callbackUsable = false;
+                    break;
+                }
+
+                callbackParameters.Add(mapped);
+            }
+
+            if (!callbackUsable)
             {
                 continue;
             }
 
-            var callbackCore = StripTopLevelQualifiers(callbackType);
-            var callbackIsReference = callbackCore.EndsWith("&", StringComparison.Ordinal);
-            if (!callbackIsReference && !callbackCore.EndsWith("*", StringComparison.Ordinal))
+            var returnText = callSignature.ReturnType.Trim();
+            AbiKind directorReturnKind;
+            if (string.Equals(returnText, "void", StringComparison.Ordinal))
             {
-                continue;
+                directorReturnKind = AbiKind.Void;
             }
-
-            var callbackPointee = StripTopLevelQualifiers(callbackCore[..^1].TrimEnd());
-            if (callbackPointee.EndsWith("*", StringComparison.Ordinal)
-                || callbackPointee.EndsWith("&", StringComparison.Ordinal)
-                || !publicDeclarationsByQualifiedName.TryGetValue(callbackPointee, out var callbackDeclaration))
+            else if (!(TryMapEnumUnderlying(returnText, enumUnderlyingByName, out directorReturnKind)
+                || TryMapFundamental(returnText, out directorReturnKind)))
             {
                 continue;
             }
@@ -1058,7 +1110,7 @@ internal sealed class AbiPlan
             }
 
             var directorParameters = new List<AbiParameter>();
-            var hasConstructor = false;
+            var hasConstructor = !directorMembers.Any(member => member.Kind == "constructor");
             foreach (var constructor in directorMembers
                          .Where(member => member.Kind == "constructor"
                              && member.Access is "public" or "protected")
@@ -1116,6 +1168,7 @@ internal sealed class AbiPlan
                 continue;
             }
 
+            var constructorCount = directorParameters.Count;
             directorParameters.Add(new AbiParameter { Name = "invoke", Kind = AbiKind.Opaque, NativeType = "void*" });
             directorParameters.Add(new AbiParameter { Name = "userData", Kind = AbiKind.Opaque, NativeType = "void*" });
             directorParameters.Add(new AbiParameter { Name = "release", Kind = AbiKind.Opaque, NativeType = "void*" });
@@ -1138,9 +1191,11 @@ internal sealed class AbiPlan
                 ReturnNullable = true,
                 Parameters = directorParameters,
                 Static = true,
-                TargetDeclarationId = callbackDeclaration.Id,
-                DirectorCallbackParameterType = callbackType,
-                DirectorCallbackParameterIsReference = callbackIsReference,
+                DirectorConstructorParameterCount = constructorCount,
+                DirectorCallbackParameters = callbackParameters,
+                DirectorReturnKind = directorReturnKind,
+                DirectorReturnNativeType = returnText,
+                DirectorMethodIsConst = callSignature.Const,
             });
         }
 
