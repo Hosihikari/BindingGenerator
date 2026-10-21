@@ -920,75 +920,105 @@ internal sealed class AbiPlan
             return suffixed;
         }
 
+        var castPairs = new List<(DeclarationRecord Derived, DeclarationRecord Base)>();
+        var emittedCastPairs = new HashSet<(string Derived, string Base)>();
         foreach (var declaration in declarations)
         {
             if (!castableDeclarationIds.Contains(declaration.Id)
-                || !publicBaseInfosByDeclaration.TryGetValue(declaration.Id, out var baseInfos)
-                || !declarationNames.TryGetValue(declaration.Id, out var derivedName))
+                || !publicBaseInfosByDeclaration.TryGetValue(declaration.Id, out var baseInfos))
             {
                 continue;
             }
 
-            foreach (var baseInfo in baseInfos)
+            var pending = new Stack<string>(baseInfos.Select(baseInfo => baseInfo.DeclarationId));
+            var visited = new HashSet<string>(StringComparer.Ordinal) { declaration.Id };
+            while (pending.Count > 0)
             {
-                if (string.Equals(baseInfo.DeclarationId, declaration.Id, StringComparison.Ordinal)
-                    || !castableDeclarationIds.Contains(baseInfo.DeclarationId)
-                    || !allDeclarationsById.TryGetValue(baseInfo.DeclarationId, out var baseDeclaration)
+                var baseId = pending.Pop();
+                if (!visited.Add(baseId)
+                    || !castableDeclarationIds.Contains(baseId)
+                    || !allDeclarationsById.TryGetValue(baseId, out var baseDeclaration)
                     || baseDeclaration.Kind is not ("class" or "struct" or "union")
                     || baseDeclaration.Access != "public"
                     || !string.Equals(baseDeclaration.Surface, declaration.Surface, StringComparison.Ordinal)
-                    || baseDeclaration.QualifiedName.StartsWith("std::", StringComparison.Ordinal)
-                    || !declarationNames.TryGetValue(baseDeclaration.Id, out var baseName))
+                    || !declarationNames.ContainsKey(baseId))
                 {
                     continue;
                 }
 
-                var upcastId = declaration.Id + "::cast::up::" + baseDeclaration.Id;
-                functions.Add(new AbiFunction
-                {
-                    CppName = "hs_cast_" + CSharpNaming.ShortHash(upcastId),
-                    Kind = AbiFunctionKind.Cast,
-                    CastKind = AbiCastKind.Upcast,
-                    Surface = declaration.Surface,
-                    DeclarationId = declaration.Id,
-                    MemberId = upcastId,
-                    ClassCppName = declaration.QualifiedName,
-                    ClassName = derivedName,
-                    TargetCppName = baseDeclaration.QualifiedName,
-                    TargetDeclarationId = baseDeclaration.Id,
-                    NativeMemberName = "",
-                    CSharpMemberName = CastMemberName(declaration.Id, "As" + baseName.ClassName, baseDeclaration.Id),
-                    ReturnKind = AbiKind.Opaque,
-                    NativeReturnType = baseDeclaration.QualifiedName + " *",
-                    ReturnWrapperType = "global::" + baseName.NamespaceName + "." + baseName.ClassName,
-                });
-
-                if (!polymorphicDeclarationIds.Contains(baseDeclaration.Id))
+                if (baseDeclaration.QualifiedName.StartsWith("std::", StringComparison.Ordinal))
                 {
                     continue;
                 }
 
-                var downcastId = baseDeclaration.Id + "::cast::down::" + declaration.Id;
-                functions.Add(new AbiFunction
+                if (emittedCastPairs.Add((declaration.Id, baseId)))
                 {
-                    CppName = "hs_cast_" + CSharpNaming.ShortHash(downcastId),
-                    Kind = AbiFunctionKind.Cast,
-                    CastKind = AbiCastKind.Downcast,
-                    Surface = baseDeclaration.Surface,
-                    DeclarationId = baseDeclaration.Id,
-                    MemberId = downcastId,
-                    ClassCppName = baseDeclaration.QualifiedName,
-                    ClassName = baseName,
-                    TargetCppName = declaration.QualifiedName,
-                    TargetDeclarationId = declaration.Id,
-                    NativeMemberName = "",
-                    CSharpMemberName = CastMemberName(baseDeclaration.Id, "TryAs" + derivedName.ClassName, declaration.Id),
-                    ReturnKind = AbiKind.Opaque,
-                    NativeReturnType = declaration.QualifiedName + " *",
-                    ReturnWrapperType = "global::" + derivedName.NamespaceName + "." + derivedName.ClassName,
-                    ReturnNullable = true,
-                });
+                    castPairs.Add((declaration, baseDeclaration));
+                }
+
+                if (publicBaseInfosByDeclaration.TryGetValue(baseId, out var nextBases))
+                {
+                    foreach (var next in nextBases)
+                    {
+                        pending.Push(next.DeclarationId);
+                    }
+                }
             }
+        }
+
+        foreach (var (declaration, baseDeclaration) in castPairs)
+        {
+            if (!declarationNames.TryGetValue(declaration.Id, out var derivedName)
+                || !declarationNames.TryGetValue(baseDeclaration.Id, out var baseName))
+            {
+                continue;
+            }
+
+            var upcastId = declaration.Id + "::cast::up::" + baseDeclaration.Id;
+            functions.Add(new AbiFunction
+            {
+                CppName = "hs_cast_" + CSharpNaming.ShortHash(upcastId),
+                Kind = AbiFunctionKind.Cast,
+                CastKind = AbiCastKind.Upcast,
+                Surface = declaration.Surface,
+                DeclarationId = declaration.Id,
+                MemberId = upcastId,
+                ClassCppName = declaration.QualifiedName,
+                ClassName = derivedName,
+                TargetCppName = baseDeclaration.QualifiedName,
+                TargetDeclarationId = baseDeclaration.Id,
+                NativeMemberName = "",
+                CSharpMemberName = CastMemberName(declaration.Id, "As" + baseName.ClassName, baseDeclaration.Id),
+                ReturnKind = AbiKind.Opaque,
+                NativeReturnType = baseDeclaration.QualifiedName + " *",
+                ReturnWrapperType = "global::" + baseName.NamespaceName + "." + baseName.ClassName,
+            });
+
+            if (!polymorphicDeclarationIds.Contains(baseDeclaration.Id))
+            {
+                continue;
+            }
+
+            var downcastId = baseDeclaration.Id + "::cast::down::" + declaration.Id;
+            functions.Add(new AbiFunction
+            {
+                CppName = "hs_cast_" + CSharpNaming.ShortHash(downcastId),
+                Kind = AbiFunctionKind.Cast,
+                CastKind = AbiCastKind.Downcast,
+                Surface = baseDeclaration.Surface,
+                DeclarationId = baseDeclaration.Id,
+                MemberId = downcastId,
+                ClassCppName = baseDeclaration.QualifiedName,
+                ClassName = baseName,
+                TargetCppName = declaration.QualifiedName,
+                TargetDeclarationId = declaration.Id,
+                NativeMemberName = "",
+                CSharpMemberName = CastMemberName(baseDeclaration.Id, "TryAs" + derivedName.ClassName, declaration.Id),
+                ReturnKind = AbiKind.Opaque,
+                NativeReturnType = declaration.QualifiedName + " *",
+                ReturnWrapperType = "global::" + derivedName.NamespaceName + "." + derivedName.ClassName,
+                ReturnNullable = true,
+            });
         }
 
         // A director is generated for an abstract class with exactly one pure virtual method
