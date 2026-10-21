@@ -266,6 +266,13 @@ internal sealed class VariantRegistry
 
 internal sealed class AbiPlan
 {
+    private static readonly string[] CallbackTypePrefixes =
+    [
+        "std::function<",
+        "brstd::move_only_function<",
+        "brstd::function_ref<",
+    ];
+
     private AbiPlan(
         IReadOnlyList<AbiFunction> functions,
         IReadOnlyDictionary<string, DeclarationName> declarationNames,
@@ -4008,8 +4015,7 @@ internal sealed class AbiPlan
             return true;
         }
 
-        if (callbackReason is not null
-            && NormalizeTypeName(text).StartsWith("std::function<", StringComparison.Ordinal))
+        if (callbackReason is not null && IsCallbackTypeName(text))
         {
             reason = callbackReason;
             return false;
@@ -4259,6 +4265,12 @@ internal sealed class AbiPlan
         return true;
     }
 
+    private static bool IsCallbackTypeName(string text)
+    {
+        var core = NormalizeTypeName(text);
+        return CallbackTypePrefixes.Any(prefix => core.StartsWith(prefix, StringComparison.Ordinal));
+    }
+
     private static bool TryParseStdFunction(
         string canonical,
         IReadOnlyDictionary<string, string> enumUnderlyingByName,
@@ -4275,9 +4287,9 @@ internal sealed class AbiPlan
         }
 
         var core = NormalizeTypeName(text);
-        const string prefix = "std::function<";
-        if (!core.StartsWith(prefix, StringComparison.Ordinal)
-            || !core.EndsWith(">", StringComparison.Ordinal))
+        var prefix = CallbackTypePrefixes.FirstOrDefault(candidate =>
+            core.StartsWith(candidate, StringComparison.Ordinal) && core.EndsWith(">", StringComparison.Ordinal));
+        if (prefix is null)
         {
             reason = $"callback type '{canonical}' is not supported";
             return false;
@@ -4388,6 +4400,23 @@ internal sealed class AbiPlan
             return true;
         }
 
+        if (IsReferenceType(text) && IsConstType(text))
+        {
+            var inner = NormalizeTypeName(text);
+            if (IsStringViewType(inner) || IsStringType(inner))
+            {
+                argument = new AbiCallbackArgument { NativeType = text, Kind = AbiKind.StringView };
+                return true;
+            }
+
+            if (TryMapEnumUnderlying(inner, enumUnderlyingByName, out var referenceKind)
+                || TryMapFundamental(inner, out referenceKind))
+            {
+                argument = new AbiCallbackArgument { NativeType = text, Kind = referenceKind };
+                return true;
+            }
+        }
+
         if (IsPointerType(text))
         {
             argument = new AbiCallbackArgument
@@ -4413,7 +4442,7 @@ internal sealed class AbiPlan
         }
 
         if (!IsByValueRecordType(text)
-            || NormalizeTypeName(text).StartsWith("std::function<", StringComparison.Ordinal))
+            || IsCallbackTypeName(text))
         {
             reason = $"callback parameter type '{text}' is not supported";
             return false;
