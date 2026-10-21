@@ -1260,15 +1260,13 @@ internal static class InteropEmitter
             return;
         }
 
-        EmitMapBuffers(lines, parameters, mapIndices, indent);
-        lines.Add(indent + "try");
-        lines.Add(indent + "{");
-        EmitPinnedBodyCore(lines, parameters, stringIndices, vectorIndices, indent + "    ", emitBody);
-        lines.Add(indent + "}");
-        lines.Add(indent + "finally");
-        lines.Add(indent + "{");
-        EmitMapCleanup(lines, mapIndices, indent + "    ");
-        lines.Add(indent + "}");
+        EmitMapBlocks(
+            lines,
+            parameters,
+            mapIndices,
+            0,
+            indent,
+            bodyIndent => EmitPinnedBodyCore(lines, parameters, stringIndices, vectorIndices, bodyIndent, emitBody));
     }
 
     private static List<int> FindMapParameters(IReadOnlyList<AbiParameter> parameters)
@@ -1285,56 +1283,144 @@ internal static class InteropEmitter
         return indices;
     }
 
-    private static void EmitMapBuffers(
+    private static void EmitMapBlocks(
         List<string> lines,
         IReadOnlyList<AbiParameter> parameters,
         IReadOnlyList<int> mapIndices,
-        string indent)
+        int position,
+        string indent,
+        Action<string> emitBody)
     {
-        foreach (var index in mapIndices)
+        if (position >= mapIndices.Count)
         {
-            var parameter = parameters[index];
-            var name = CSharpParameterName(parameter, index);
-            var valueHasStrings = parameter.MapValueKind == AbiKind.StringView;
-            var keyHasStrings = parameter.MapKeyKind == AbiKind.StringView;
-            var stringSlots = (keyHasStrings ? 1 : 0) + (valueHasStrings ? 1 : 0);
-            lines.Add(indent + $"var __hs_map{index}Items = {name};");
-            lines.Add(indent + $"var __hs_map{index}Count = __hs_map{index}Items?.Count ?? 0;");
-            lines.Add(indent + $"var __hs_map{index}Entries = (global::Hosihikari.Bindings.Abi.MapEntry*)global::System.Runtime.InteropServices.Marshal.AllocHGlobal((__hs_map{index}Count == 0 ? 1 : __hs_map{index}Count) * sizeof(global::Hosihikari.Bindings.Abi.MapEntry));");
-            lines.Add(indent + $"var __hs_map{index}Strings = new nint[__hs_map{index}Count * {stringSlots}];");
-            lines.Add(indent + $"var __hs_map{index}StringCount = 0;");
-            lines.Add(indent + $"var __hs_map{index}Index = 0;");
-            lines.Add(indent + $"if (__hs_map{index}Items is not null)");
-            lines.Add(indent + "{");
-            var inner = indent + "    ";
-            lines.Add(inner + $"foreach (var __hs_pair in __hs_map{index}Items)");
-            lines.Add(inner + "{");
-            lines.Add(inner + "    var __hs_entry = new global::Hosihikari.Bindings.Abi.MapEntry();");
+            emitBody(indent);
+            return;
+        }
+
+        var index = mapIndices[position];
+        var parameter = parameters[index];
+        var name = CSharpParameterName(parameter, index);
+        var suffix = index.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        var keyHasStrings = parameter.MapKeyKind == AbiKind.StringView;
+        var valueHasStrings = parameter.MapValueKind == AbiKind.StringView;
+        lines.Add(indent + $"var __hs_map{suffix}Items = {name};");
+        lines.Add(indent + $"var __hs_map{suffix}Count = __hs_map{suffix}Items?.Count ?? 0;");
+        lines.Add(indent + $"var __hs_map{suffix}ByteTotal = 0;");
+        lines.Add(indent + $"if (__hs_map{suffix}Items is not null)");
+        lines.Add(indent + "{");
+        lines.Add(indent + $"    foreach (var __hs_pair in __hs_map{suffix}Items)");
+        lines.Add(indent + "    {");
+        if (keyHasStrings)
+        {
+            lines.Add(indent + $"        __hs_map{suffix}ByteTotal += global::System.Text.Encoding.UTF8.GetByteCount(__hs_pair.Key ?? string.Empty);");
+        }
+
+        if (valueHasStrings)
+        {
+            lines.Add(indent + $"        __hs_map{suffix}ByteTotal += global::System.Text.Encoding.UTF8.GetByteCount(__hs_pair.Value ?? string.Empty);");
+        }
+
+        lines.Add(indent + "    }");
+        lines.Add(indent + "}");
+        lines.Add(indent + $"scoped global::System.Span<byte> __hs_map{suffix}Arena;");
+        lines.Add(indent + $"if (__hs_map{suffix}ByteTotal <= 1024) {{ __hs_map{suffix}Arena = stackalloc byte[__hs_map{suffix}ByteTotal == 0 ? 1 : __hs_map{suffix}ByteTotal]; }} else {{ __hs_map{suffix}Arena = new byte[__hs_map{suffix}ByteTotal]; }}");
+        lines.Add(indent + $"scoped global::System.Span<global::Hosihikari.Bindings.Abi.MapEntry> __hs_map{suffix}EntrySpan;");
+        lines.Add(indent + $"if (__hs_map{suffix}Count <= 16) {{ __hs_map{suffix}EntrySpan = stackalloc global::Hosihikari.Bindings.Abi.MapEntry[__hs_map{suffix}Count == 0 ? 1 : __hs_map{suffix}Count]; }} else {{ __hs_map{suffix}EntrySpan = new global::Hosihikari.Bindings.Abi.MapEntry[__hs_map{suffix}Count]; }}");
+        lines.Add(indent + $"fixed (byte* __hs_map{suffix}ArenaPtr = __hs_map{suffix}Arena)");
+        lines.Add(indent + $"fixed (global::Hosihikari.Bindings.Abi.MapEntry* __hs_map{suffix}Data = __hs_map{suffix}EntrySpan)");
+        lines.Add(indent + "{");
+        var inner = indent + "    ";
+        lines.Add(inner + $"var __hs_map{suffix}Offset = 0;");
+        lines.Add(inner + $"var __hs_map{suffix}Index = 0;");
+        lines.Add(inner + $"if (__hs_map{suffix}Items is not null)");
+        lines.Add(inner + "{");
+        var loopIndent = inner + "    ";
+        lines.Add(loopIndent + $"foreach (var __hs_pair in __hs_map{suffix}Items)");
+        lines.Add(loopIndent + "{");
+        var encodeIndent = loopIndent + "    ";
+        lines.Add(encodeIndent + "var __hs_entry = new global::Hosihikari.Bindings.Abi.MapEntry();");
+        if (keyHasStrings)
+        {
+            EmitArenaStringEncode(
+                lines,
+                encodeIndent,
+                "Key",
+                "KeySize",
+                $"__hs_map{suffix}KeyItem",
+                $"__hs_map{suffix}KeyLength",
+                "__hs_pair.Key",
+                $"__hs_map{suffix}Arena",
+                $"__hs_map{suffix}ArenaPtr",
+                $"__hs_map{suffix}Offset");
+        }
+        else
+        {
             EmitMapManagedEncode(
                 lines,
-                inner + "    ",
+                encodeIndent,
                 "Key",
                 "KeySize",
                 parameter.MapKeyKind,
                 ArrayElementOwnership.None,
                 "__hs_pair.Key",
-                $"__hs_map{index}Strings",
-                $"__hs_map{index}StringCount");
+                $"__hs_map{suffix}Arena",
+                $"__hs_map{suffix}Offset");
+        }
+
+        if (valueHasStrings)
+        {
+            EmitArenaStringEncode(
+                lines,
+                encodeIndent,
+                "Value",
+                "ValueSize",
+                $"__hs_map{suffix}ValueItem",
+                $"__hs_map{suffix}ValueLength",
+                "__hs_pair.Value",
+                $"__hs_map{suffix}Arena",
+                $"__hs_map{suffix}ArenaPtr",
+                $"__hs_map{suffix}Offset");
+        }
+        else
+        {
             EmitMapManagedEncode(
                 lines,
-                inner + "    ",
+                encodeIndent,
                 "Value",
                 "ValueSize",
                 parameter.MapValueKind,
                 parameter.MapValueOwnership,
                 "__hs_pair.Value",
-                $"__hs_map{index}Strings",
-                $"__hs_map{index}StringCount");
-            lines.Add(inner + $"    __hs_map{index}Entries[__hs_map{index}Index++] = __hs_entry;");
-            lines.Add(inner + "}");
-            lines.Add(indent + "}");
-            lines.Add(indent + $"var __hs_map{index}View = new global::Hosihikari.Bindings.Abi.ArrayView {{ Data = __hs_map{index}Entries, Size = (nuint)__hs_map{index}Count }};");
+                $"__hs_map{suffix}Arena",
+                $"__hs_map{suffix}Offset");
         }
+
+        lines.Add(encodeIndent + $"__hs_map{suffix}Data[__hs_map{suffix}Index++] = __hs_entry;");
+        lines.Add(loopIndent + "}");
+        lines.Add(inner + "}");
+        lines.Add(inner + $"var __hs_map{suffix}View = new global::Hosihikari.Bindings.Abi.ArrayView {{ Data = __hs_map{suffix}Data, Size = (nuint)__hs_map{suffix}Count }};");
+        EmitMapBlocks(lines, parameters, mapIndices, position + 1, inner, emitBody);
+        lines.Add(indent + "}");
+    }
+
+    private static void EmitArenaStringEncode(
+        List<string> lines,
+        string indent,
+        string field,
+        string sizeField,
+        string itemVariable,
+        string lengthVariable,
+        string expression,
+        string arenaName,
+        string arenaPointerName,
+        string offsetName)
+    {
+        lines.Add(indent + $"var {itemVariable} = {expression} ?? string.Empty;");
+        lines.Add(indent + $"var {lengthVariable} = global::System.Text.Encoding.UTF8.GetByteCount({itemVariable});");
+        lines.Add(indent + $"global::System.Text.Encoding.UTF8.GetBytes({itemVariable}, {arenaName}.Slice({offsetName}, {lengthVariable}));");
+        lines.Add(indent + $"__hs_entry.{field} = (ulong)({arenaPointerName} + {offsetName});");
+        lines.Add(indent + $"__hs_entry.{sizeField} = (ulong){lengthVariable};");
+        lines.Add(indent + $"{offsetName} += {lengthVariable};");
     }
 
     private static void EmitMapManagedEncode(
@@ -1389,18 +1475,6 @@ internal static class InteropEmitter
         lines.Add(indent + (signed
             ? $"__hs_entry.{field} = unchecked((ulong)(long)({expression}));"
             : $"__hs_entry.{field} = unchecked((ulong)({expression}));"));
-    }
-
-    private static void EmitMapCleanup(
-        List<string> lines,
-        IReadOnlyList<int> mapIndices,
-        string indent)
-    {
-        foreach (var index in mapIndices)
-        {
-            lines.Add(indent + $"for (var __hs_i = 0; __hs_i < __hs_map{index}StringCount; __hs_i++) {{ if (__hs_map{index}Strings[__hs_i] != 0) {{ global::System.Runtime.InteropServices.Marshal.FreeHGlobal(__hs_map{index}Strings[__hs_i]); }} }}");
-            lines.Add(indent + $"global::System.Runtime.InteropServices.Marshal.FreeHGlobal((nint)__hs_map{index}Entries);");
-        }
     }
 
     private static void EmitPinnedBodyCore(
@@ -1470,12 +1544,17 @@ internal static class InteropEmitter
             lines.Add(inner + "    var __hs_entry = new global::Hosihikari.Bindings.Abi.MapEntry();");
             if (keyHasStrings)
             {
-                lines.Add(inner + $"    var __hs_KeyItem{suffix} = __hs_pair{suffix}.Key ?? string.Empty;");
-                lines.Add(inner + $"    var __hs_KeyLength{suffix} = global::System.Text.Encoding.UTF8.GetByteCount(__hs_KeyItem{suffix});");
-                lines.Add(inner + $"    global::System.Text.Encoding.UTF8.GetBytes(__hs_KeyItem{suffix}, __hs_vectorArena{suffix}.Slice(__hs_vectorOffset{suffix}, __hs_KeyLength{suffix}));");
-                lines.Add(inner + $"    __hs_entry.Key = (ulong)(__hs_vectorArenaPtr{suffix} + __hs_vectorOffset{suffix});");
-                lines.Add(inner + $"    __hs_entry.KeySize = (ulong)__hs_KeyLength{suffix};");
-                lines.Add(inner + $"    __hs_vectorOffset{suffix} += __hs_KeyLength{suffix};");
+                EmitArenaStringEncode(
+                    lines,
+                    inner + "    ",
+                    "Key",
+                    "KeySize",
+                    $"__hs_KeyItem{suffix}",
+                    $"__hs_KeyLength{suffix}",
+                    $"__hs_pair{suffix}.Key",
+                    $"__hs_vectorArena{suffix}",
+                    $"__hs_vectorArenaPtr{suffix}",
+                    $"__hs_vectorOffset{suffix}");
             }
             else
             {
@@ -1493,12 +1572,17 @@ internal static class InteropEmitter
 
             if (valueHasStrings)
             {
-                lines.Add(inner + $"    var __hs_ValueItem{suffix} = __hs_pair{suffix}.Value ?? string.Empty;");
-                lines.Add(inner + $"    var __hs_ValueLength{suffix} = global::System.Text.Encoding.UTF8.GetByteCount(__hs_ValueItem{suffix});");
-                lines.Add(inner + $"    global::System.Text.Encoding.UTF8.GetBytes(__hs_ValueItem{suffix}, __hs_vectorArena{suffix}.Slice(__hs_vectorOffset{suffix}, __hs_ValueLength{suffix}));");
-                lines.Add(inner + $"    __hs_entry.Value = (ulong)(__hs_vectorArenaPtr{suffix} + __hs_vectorOffset{suffix});");
-                lines.Add(inner + $"    __hs_entry.ValueSize = (ulong)__hs_ValueLength{suffix};");
-                lines.Add(inner + $"    __hs_vectorOffset{suffix} += __hs_ValueLength{suffix};");
+                EmitArenaStringEncode(
+                    lines,
+                    inner + "    ",
+                    "Value",
+                    "ValueSize",
+                    $"__hs_ValueItem{suffix}",
+                    $"__hs_ValueLength{suffix}",
+                    $"__hs_pair{suffix}.Value",
+                    $"__hs_vectorArena{suffix}",
+                    $"__hs_vectorArenaPtr{suffix}",
+                    $"__hs_vectorOffset{suffix}");
             }
             else
             {
