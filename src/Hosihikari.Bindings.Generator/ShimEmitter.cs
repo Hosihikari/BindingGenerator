@@ -440,6 +440,18 @@ internal static class ShimEmitter
             source.Add("}");
         }
 
+        // The IR is produced on Windows, where int64_t prints as "long long" and
+        // uint64_t as "unsigned long long". Fixed-width aliases keep the generated
+        // C++ type identity portable to libstdc++, where int64_t is "long".
+        for (var index = 0; index < source.Count; index++)
+        {
+            source[index] = source[index]
+                .Replace("unsigned long long int", "std::uint64_t", StringComparison.Ordinal)
+                .Replace("long long int", "std::int64_t", StringComparison.Ordinal)
+                .Replace("unsigned long long", "std::uint64_t", StringComparison.Ordinal)
+                .Replace("long long", "std::int64_t", StringComparison.Ordinal);
+        }
+
         Write(directory, header, source);
     }
 
