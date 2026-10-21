@@ -12,6 +12,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <map>
 #include <optional>
 #include <set>
@@ -71,11 +72,24 @@ struct Method {
     int VtableIndex = -1;
 };
 
+struct RttiBase {
+    std::string Name;
+    int64_t Offset = 0;
+    bool Virtual = false;
+    std::string Access = "public";
+};
+
 struct Configuration {
     std::string Id;
     std::map<std::string, Method> Methods;
     std::map<std::string, std::string> VtableSymbols;
     std::map<std::string, uint64_t> VtableAddresses;
+    std::map<std::string, std::vector<RttiBase>> RttiBases;
+    std::map<uint64_t, uint64_t> ElfRelocations;
+    std::map<std::string, uint64_t> TypeInfoByName;
+    uint64_t ClassTypeInfoVtable = 0;
+    uint64_t SiTypeInfoVtable = 0;
+    uint64_t VmiTypeInfoVtable = 0;
 };
 
 std::string trim(StringRef Text) {
@@ -531,7 +545,190 @@ bool loadPdb(const Inputs& Inputs, const object::COFFObjectFile& Coff, Configura
     return true;
 }
 
+bool readElfRaw(const object::ObjectFile& Elf, uint64_t Address, void* Destination, size_t Size) {
+    for (auto Section : Elf.sections()) {
+        uint64_t SectionAddress = Section.getAddress();
+        uint64_t Length = Section.getSize();
+        if (Address >= SectionAddress && Address + Size <= SectionAddress + Length) {
+            auto Contents = Section.getContents();
+            if (!Contents) {
+                return false;
+            }
+            std::memcpy(Destination, Contents->data() + (Address - SectionAddress), Size);
+            return true;
+        }
+    }
+    return false;
+}
+
+uint64_t readElfPointer(const Configuration& Config, const object::ObjectFile& Elf, uint64_t Address) {
+    auto Relocation = Config.ElfRelocations.find(Address);
+    if (Relocation != Config.ElfRelocations.end()) {
+        return Relocation->second;
+    }
+    uint64_t Value = 0;
+    readElfRaw(Elf, Address, &Value, sizeof(Value));
+    return Value;
+}
+
+template <typename T>
+T readElfValue(const object::ObjectFile& Elf, uint64_t Address) {
+    T Value{};
+    readElfRaw(Elf, Address, &Value, sizeof(Value));
+    return Value;
+}
+
+std::string readElfString(const object::ObjectFile& Elf, uint64_t Address) {
+    std::string Result;
+    for (auto Section : Elf.sections()) {
+        uint64_t SectionAddress = Section.getAddress();
+        uint64_t Length = Section.getSize();
+        if (Address < SectionAddress || Address >= SectionAddress + Length) {
+            continue;
+        }
+        auto Contents = Section.getContents();
+        if (!Contents) {
+            return Result;
+        }
+        const char* Data = Contents->data() + (Address - SectionAddress);
+        size_t Available = static_cast<size_t>(Length - (Address - SectionAddress));
+        for (size_t Index = 0; Index < Available && Index < 4096 && Data[Index] != 0; ++Index) {
+            Result.push_back(static_cast<char>(Data[Index]));
+        }
+        return Result;
+    }
+    return Result;
+}
+
+std::string decodeItaniumTypeName(StringRef Text) {
+    std::string Raw = Text.str();
+    if (Text.consume_front("N")) {
+        std::string Out;
+        while (!Text.empty() && Text.front() != 'E') {
+            if (Out.empty() && Text.consume_front("St")) {
+                Out = "std";
+                continue;
+            }
+            if (Text.consume_front("S")) {
+                return Raw;
+            }
+            size_t Length = 0;
+            size_t Digits = 0;
+            while (!Text.empty() && std::isdigit(static_cast<unsigned char>(Text.front())) != 0) {
+                Length = Length * 10 + static_cast<size_t>(Text.front() - '0');
+                Text = Text.drop_front();
+                ++Digits;
+            }
+            if (Digits == 0 || Text.size() < Length) {
+                return Raw;
+            }
+            if (!Out.empty()) {
+                Out += "::";
+            }
+            Out += Text.substr(0, Length).str();
+            Text = Text.drop_front(Length);
+        }
+        return Out.empty() ? Raw : Out;
+    }
+    if (Text.consume_front("St")) {
+        std::string Rest = decodeItaniumTypeName(Text);
+        return Rest.empty() ? "std" : "std::" + Rest;
+    }
+    size_t Length = 0;
+    size_t Digits = 0;
+    while (!Text.empty() && std::isdigit(static_cast<unsigned char>(Text.front())) != 0) {
+        Length = Length * 10 + static_cast<size_t>(Text.front() - '0');
+        Text = Text.drop_front();
+        ++Digits;
+    }
+    if (Digits == 0 || Text.size() < Length) {
+        return Raw;
+    }
+    return Text.substr(0, Length).str();
+}
+
+void collectElfRtti(const Inputs& Inputs, const object::ObjectFile& Elf, Configuration& Config) {
+    struct TypeInfo {
+        std::string Name;
+        std::vector<RttiBase> Bases;
+    };
+    std::map<uint64_t, TypeInfo> Cache;
+    std::set<uint64_t> Visiting;
+
+    std::function<TypeInfo(uint64_t)> readInfo = [&](uint64_t Address) -> TypeInfo {
+        auto Cached = Cache.find(Address);
+        if (Cached != Cache.end()) {
+            return Cached->second;
+        }
+        if (!Visiting.insert(Address).second) {
+            return TypeInfo{};
+        }
+
+        TypeInfo Info;
+        uint64_t Vtable = readElfPointer(Config, Elf, Address);
+        uint64_t NamePointer = readElfPointer(Config, Elf, Address + 8);
+        Info.Name = decodeItaniumTypeName(readElfString(Elf, NamePointer));
+
+        if (Vtable == Config.SiTypeInfoVtable) {
+            uint64_t BaseAddress = readElfPointer(Config, Elf, Address + 16);
+            TypeInfo Base = readInfo(BaseAddress);
+            if (!Base.Name.empty()) {
+                Info.Bases.push_back(RttiBase{Base.Name, 0, false, "public"});
+                Config.RttiBases[Base.Name] = Base.Bases;
+            }
+        } else if (Vtable == Config.VmiTypeInfoVtable) {
+            uint32_t Flags = readElfValue<uint32_t>(Elf, Address + 16);
+            (void)Flags;
+            uint32_t BaseCount = readElfValue<uint32_t>(Elf, Address + 20);
+            for (uint32_t Index = 0; Index < BaseCount; ++Index) {
+                uint64_t Entry = Address + 24 + Index * 16;
+                uint64_t BaseAddress = readElfPointer(Config, Elf, Entry);
+                uint64_t OffsetFlags = readElfValue<uint64_t>(Elf, Entry + 8);
+                TypeInfo Base = readInfo(BaseAddress);
+                if (Base.Name.empty()) {
+                    continue;
+                }
+                int64_t Offset = static_cast<int64_t>(OffsetFlags) >> 8;
+                bool Virtual = (OffsetFlags & 1) != 0;
+                std::string Access = (OffsetFlags & 2) != 0 ? "public" : "private";
+                Info.Bases.push_back(RttiBase{Base.Name, Offset, Virtual, Access});
+                Config.RttiBases[Base.Name] = Base.Bases;
+            }
+        }
+
+        Visiting.erase(Address);
+        Config.RttiBases[Info.Name] = Info.Bases;
+        Cache.emplace(Address, Info);
+        return Info;
+    };
+
+    for (const auto& ClassName : Inputs.Classes) {
+        std::string EncodedName = std::to_string(ClassName.size()) + ClassName;
+        auto TypeInfo = Config.TypeInfoByName.find(EncodedName);
+        if (TypeInfo != Config.TypeInfoByName.end()) {
+            readInfo(TypeInfo->second);
+        }
+    }
+}
+
 bool loadElf(const Inputs& Inputs, const object::ObjectFile& Elf, Configuration& Config) {
+    if (auto* ElfObject = dyn_cast<object::ELFObjectFileBase>(&Elf)) {
+        for (auto Section : ElfObject->dynamic_relocation_sections()) {
+            for (auto Relocation : Section.relocations()) {
+                object::ELFRelocationRef ElfRelocation(Relocation);
+                if (ElfRelocation.getType() != ELF::R_X86_64_RELATIVE) {
+                    continue;
+                }
+                auto Addend = ElfRelocation.getAddend();
+                if (!Addend) {
+                    consumeError(Addend.takeError());
+                    continue;
+                }
+                Config.ElfRelocations[ElfRelocation.getOffset()] = static_cast<uint64_t>(*Addend);
+            }
+        }
+    }
+
     for (auto Symbol : Elf.symbols()) {
         auto Name = Symbol.getName();
         if (!Name) {
@@ -539,6 +736,24 @@ bool loadElf(const Inputs& Inputs, const object::ObjectFile& Elf, Configuration&
             continue;
         }
         std::string Mangled = Name->str();
+
+        auto SymbolValueResult = Symbol.getValue();
+        if (!SymbolValueResult) {
+            consumeError(SymbolValueResult.takeError());
+            continue;
+        }
+        uint64_t SymbolValue = *SymbolValueResult;
+        if (Mangled == "_ZTVN10__cxxabiv117__class_type_infoE") {
+            Config.ClassTypeInfoVtable = SymbolValue + 16;
+        } else if (Mangled == "_ZTVN10__cxxabiv120__si_class_type_infoE") {
+            Config.SiTypeInfoVtable = SymbolValue + 16;
+        } else if (Mangled == "_ZTVN10__cxxabiv121__vmi_class_type_infoE") {
+            Config.VmiTypeInfoVtable = SymbolValue + 16;
+        }
+        if (Mangled.rfind("_ZTI", 0) == 0) {
+            Config.TypeInfoByName[Mangled.substr(4)] = SymbolValue;
+        }
+
         bool Wanted = false;
         for (const auto& ClassName : Inputs.Classes) {
             std::string Marker = std::to_string(ClassName.size()) + ClassName;
@@ -574,11 +789,13 @@ bool loadElf(const Inputs& Inputs, const object::ObjectFile& Elf, Configuration&
             if (!Parsed.Valid) {
                 continue;
             }
-            uint64_t Address = cantFail(Symbol.getValue());
+            uint64_t Address = SymbolValue;
             addMethod(Config, Parsed, Mangled, Address, Address);
             break;
         }
     }
+
+    collectElfRtti(Inputs, Elf, Config);
     return true;
 }
 
@@ -829,6 +1046,35 @@ bool emitIr(const Inputs& Inputs, const Configuration& Windows, const Configurat
     int64_t WinMembers = 0;
     int64_t LinuxMembers = 0;
 
+    std::set<std::string> DeclarationIds;
+    for (const auto& ClassName : Inputs.Classes) {
+        DeclarationIds.insert("bedrock:" + ClassName);
+    }
+    for (const Configuration* Config : {&Windows, &Linux}) {
+        for (const auto& [Name, Bases] : Config->RttiBases) {
+            for (const auto& Base : Bases) {
+                const std::string DeclarationId = "bedrock:" + Base.Name;
+                if (!DeclarationIds.insert(DeclarationId).second) {
+                    continue;
+                }
+                json::Object Declaration;
+                Declaration["recordType"] = "declaration";
+                Declaration["id"] = DeclarationId;
+                Declaration["surface"] = "bedrock";
+                Declaration["kind"] = "class";
+                Declaration["qualifiedName"] = Base.Name;
+                Declaration["access"] = "public";
+                Declaration["linkage"] = "external";
+                Declaration["abstract"] = false;
+                Declaration["copyConstructible"] = false;
+                Declaration["inline"] = false;
+                Declaration["defined"] = false;
+                Declaration["consteval"] = false;
+                WinRecords.push_back(std::move(Declaration));
+            }
+        }
+    }
+
     for (const auto& ClassName : Inputs.Classes) {
         const std::string DeclarationId = "bedrock:" + ClassName;
         json::Object Declaration;
@@ -864,6 +1110,19 @@ bool emitIr(const Inputs& Inputs, const Configuration& Windows, const Configurat
                     Variant["address"] = Address;
                 }
             }
+            auto RttiBases = Config->RttiBases.find(ClassName);
+            if (RttiBases != Config->RttiBases.end() && !RttiBases->second.empty()) {
+                json::Array Bases;
+                for (const auto& Base : RttiBases->second) {
+                    json::Object BaseRecord;
+                    BaseRecord["declarationId"] = "bedrock:" + Base.Name;
+                    BaseRecord["offset"] = Base.Offset;
+                    BaseRecord["access"] = Base.Access;
+                    BaseRecord["virtual"] = Base.Virtual;
+                    Bases.emplace_back(std::move(BaseRecord));
+                }
+                Variant["bases"] = std::move(Bases);
+            }
             (Config == &Windows ? WinRecords : LinuxRecords).push_back(std::move(Variant));
         }
 
@@ -891,7 +1150,7 @@ bool emitIr(const Inputs& Inputs, const Configuration& Windows, const Configurat
 
     json::Object Manifest;
     Manifest["schema"] = "hosihikari.bindings.ir/1";
-    Manifest["irVersion"] = "1.4.0";
+    Manifest["irVersion"] = "1.4.1";
     json::Object Frontend;
     Frontend["name"] = "symbols";
     Frontend["version"] = "0.1.0";
@@ -949,7 +1208,7 @@ bool emitIr(const Inputs& Inputs, const Configuration& Windows, const Configurat
     Manifest["diagnostics"] = std::move(Diagnostics);
 
     json::Object Counts;
-    Counts["declarations"] = static_cast<int64_t>(Inputs.Classes.size());
+    Counts["declarations"] = static_cast<int64_t>(DeclarationIds.size());
     Counts["variants"] = static_cast<int64_t>(Inputs.Classes.size() * 2);
     Counts["members"] = WinMembers + LinuxMembers;
     Manifest["counts"] = std::move(Counts);

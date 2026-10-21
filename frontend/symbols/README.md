@@ -69,6 +69,16 @@ Linux includes local/inline functions that the Windows publics omit, which expla
 }
 ```
 
+## RTTI inheritance
+
+The ELF reader resolves `_ZTI` objects through `.rela.dyn` addends and reads `__class_type_info`, `__si_class_type_info`, and `__vmi_class_type_info` structures. For the 1.21.3 build it yields:
+
+- `Actor : ActorStatusProvider`
+- `Mob : Actor`
+- `Player : Mob`
+
+Results are written to `variant.bases` (IR 1.4.1). The PDB publics for this build contain no `??_R*` symbols for game classes, so Windows inheritance comes from the header supplement or stays empty.
+
 ## Header supplement
 
 `frontend/merge-symbol-ir.py` merges facts from a header-derived IR (for example LiteLoaderBDS `v2/main`) into the symbol IR:
@@ -85,8 +95,9 @@ The merge:
 
 - copies class traits and instance/static field members into both configurations;
 - copies a header layout only when it has fields or bases, and drops header vtable slots (the symbol IR keeps per-configuration `vtableIndex`);
+- moves `layout.bases` into `variant.bases`, deduplicating against RTTI results;
 - adds header-only inline methods when no symbol method with the same normalized signature exists;
-- copies declarations referenced by `layout.bases`.
+- copies base declarations referenced by the header.
 
 For the 1.21.3 slice, `BlockPos` gains `x`/`y`/`z` fields, size 12, align 4, and its `VectorBase<...>` base. The LiteLoaderBDS `Actor` header declares only methods and static constants, so `Actor` gains no instance fields and no layout; its static constants are merged as `static_field` members. The header layout is written to both configurations; for these plain-int value types the layout is identical on Windows and Linux, but virtual/inherited classes would need per-configuration confirmation.
 

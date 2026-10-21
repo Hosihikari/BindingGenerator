@@ -134,13 +134,14 @@ def main():
 
         header_variant = header_variants.get(declaration_id, {})
         layout = header_variant.get("layout")
+        header_bases = layout.get("bases", []) if layout else []
         usable_layout = None
-        if layout and (layout.get("fieldOffsets") or layout.get("bases")):
+        if layout and (layout.get("fieldOffsets") or header_bases):
             usable_layout = {
                 "size": layout.get("size", 0),
                 "align": layout.get("align", 0),
                 "fieldOffsets": layout.get("fieldOffsets", []),
-                "bases": layout.get("bases", []),
+                "bases": [],
             }
 
         if usable_layout is not None:
@@ -154,7 +155,21 @@ def main():
                         record["layout"] = copy.deepcopy(usable_layout)
                         copied_layouts += 1
 
-            for base in usable_layout["bases"]:
+        if header_bases:
+            for configuration, records in symbol_records.items():
+                for record in records:
+                    if (
+                        record.get("recordType") == "variant"
+                        and record.get("declarationId") == declaration_id
+                        and record.get("configuration") == configuration
+                    ):
+                        existing = record.setdefault("bases", [])
+                        known = {base.get("declarationId") for base in existing}
+                        for base in header_bases:
+                            if base.get("declarationId") not in known:
+                                existing.append(copy.deepcopy(base))
+                                known.add(base.get("declarationId"))
+            for base in header_bases:
                 base_id = base.get("declarationId")
                 if base_id and base_id not in symbol_declarations and base_id in header_declarations:
                     if all(

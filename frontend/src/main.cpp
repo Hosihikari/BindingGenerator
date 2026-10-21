@@ -1253,7 +1253,7 @@ int main(int argc, char** argv) {
 
     llvm::json::Object Manifest;
     Manifest["schema"] = "hosihikari.bindings.ir/1";
-    Manifest["irVersion"] = "1.4.0";
+    Manifest["irVersion"] = "1.4.1";
 
     llvm::json::Object Frontend;
     Frontend["name"] = "libtooling";
