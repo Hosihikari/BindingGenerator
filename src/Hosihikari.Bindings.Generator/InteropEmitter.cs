@@ -70,6 +70,8 @@ internal static class InteropEmitter
                 "        _ownsHandle = ownsHandle;",
                 "    }",
                 "",
+                $"    public static {name.ClassName} Borrow(nint handle) => new {name.ClassName}(handle, false);",
+                "",
                 "    public nint Handle => _handle;",
                 "",
                 "    internal nint ReleaseHandle()",
@@ -107,12 +109,13 @@ internal static class InteropEmitter
 
             if (plan.FunctionsByDeclaration.TryGetValue(declaration.Id, out var declarationFunctions))
             {
-                foreach (var cast in declarationFunctions
-                             .Where(function => function.Kind == AbiFunctionKind.Cast)
+                foreach (var helper in declarationFunctions
+                             .Where(function => function.Kind is AbiFunctionKind.Cast
+                                 or AbiFunctionKind.DirectorCreate)
                              .OrderBy(function => function.CSharpMemberName, StringComparer.Ordinal))
                 {
                     lines.Add("");
-                    EmitMethod(lines, cast.CSharpMemberName, cast);
+                    EmitMethod(lines, helper.CSharpMemberName, helper);
                 }
             }
 

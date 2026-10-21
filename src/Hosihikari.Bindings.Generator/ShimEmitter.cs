@@ -872,6 +872,14 @@ internal static class ShimEmitter
                     : $"    return static_cast<{function.TargetCppName}*>(static_cast<{function.ClassCppName}*>({SelfParameter}));";
                 break;
 
+            case AbiFunctionKind.DirectorCreate:
+                foreach (var line in EmitDirectorCreate(function))
+                {
+                    yield return line;
+                }
+
+                break;
+
             case AbiFunctionKind.Method:
             {
                 if (function.CallableOp == CallableOp.Invoke)
@@ -1228,6 +1236,55 @@ internal static class ShimEmitter
         yield return $"    auto* hs_target = {holder}->value.get();";
         yield return $"    hs_register_borrowed(hs_target, {holder}, [](void* hs_holder) {{ delete static_cast<hs_borrowed_holder<{function.ClassCppName}>*>(hs_holder); }});";
         yield return "    return hs_target;";
+    }
+
+    private static IEnumerable<string> EmitDirectorCreate(AbiFunction function)
+    {
+        var constructorCount = function.Parameters.Count - 3;
+        var names = function.Parameters
+            .Select((parameter, index) => CppParameterName(parameter, index))
+            .ToList();
+        var parameterDeclarations = function.Parameters
+            .Select((parameter, index) => $"{AbiPlan.CppType(parameter.Kind)} {names[index]}")
+            .ToList();
+        var baseArguments = function.Parameters
+            .Take(constructorCount)
+            .Select((parameter, index) => NativeArgument(function, parameter, index, names[index]))
+            .ToList();
+        var eventName = "hs_event";
+        var eventArgument = function.DirectorCallbackParameterIsReference ? "&" + eventName : eventName;
+
+        yield return $"    struct hs_director final : {function.ClassCppName}";
+        yield return "    {";
+        yield return "        void* hs_userData;";
+        yield return "        void (*hs_invoke)(void*, void*);";
+        yield return "        void (*hs_release)(void*);";
+        yield return "";
+        yield return $"        hs_director({string.Join(", ", parameterDeclarations)})";
+        var initializers = new List<string>();
+        if (baseArguments.Count > 0)
+        {
+            initializers.Add($"{function.ClassCppName}({string.Join(", ", baseArguments)})");
+        }
+
+        initializers.Add($"hs_invoke(static_cast<void (*)(void*, void*)>({names[constructorCount]}))");
+        initializers.Add($"hs_userData({names[constructorCount + 1]})");
+        initializers.Add($"hs_release(static_cast<void (*)(void*)>({names[constructorCount + 2]}))");
+        yield return "            : " + string.Join(", ", initializers);
+        yield return "        {";
+        yield return "        }";
+        yield return "";
+        yield return "        ~hs_director() override";
+        yield return "        {";
+        yield return "            if (hs_release) { hs_release(hs_userData); }";
+        yield return "        }";
+        yield return "";
+        yield return $"        void {function.NativeMemberName}({function.DirectorCallbackParameterType} {eventName}) override";
+        yield return "        {";
+        yield return $"            if (hs_invoke) {{ hs_invoke(hs_userData, {eventArgument}); }}";
+        yield return "        }";
+        yield return "    };";
+        yield return $"    return hs_make_shared_handle(std::static_pointer_cast<{function.ClassCppName}>(std::make_shared<hs_director>({string.Join(", ", names)})));";
     }
 
     private static string BorrowedStringCallExpression(AbiParameter parameter, string holder, int ordinal)

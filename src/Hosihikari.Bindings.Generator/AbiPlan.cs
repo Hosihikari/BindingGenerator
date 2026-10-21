@@ -35,6 +35,7 @@ internal enum AbiFunctionKind
     Set,
     Method,
     Cast,
+    DirectorCreate,
 }
 
 internal enum AbiCastKind
@@ -193,6 +194,8 @@ internal sealed class AbiFunction
     public AbiCastKind CastKind { get; init; }
     public string? TargetCppName { get; init; }
     public string? TargetDeclarationId { get; init; }
+    public string? DirectorCallbackParameterType { get; init; }
+    public bool DirectorCallbackParameterIsReference { get; init; }
     public string Surface { get; init; } = "";
     public string DeclarationId { get; init; } = "";
     public string? MemberId { get; init; }
@@ -671,7 +674,10 @@ internal sealed class AbiPlan
             var ownsBorrowedString = declarationMembers.Any(member =>
                 member.Kind == "field"
                 && member.Type is not null
-                && IsStringViewType(member.Type.Canonical));
+                && (IsStringViewType(member.Type.Canonical)
+                    || (IsReferenceType(member.Type.Canonical)
+                        && !IsRValueReference(member.Type.Canonical)
+                        && IsStringType(member.Type.Canonical))));
             var linkSafe = linkCarrier || virtualDispatch || IsLinkSafe(declaration.Id);
             var destructorUsable = IsDestructorUsable(declaration, declarationMembers);
             var hasPublicDestructor = linkSafe
@@ -975,6 +981,167 @@ internal sealed class AbiPlan
                     ReturnNullable = true,
                 });
             }
+        }
+
+        // A director is generated for an abstract class with exactly one pure virtual method
+        // returning void, taking one reference/pointer, and a public virtual destructor.
+        // The constructor must use only scalar, enum, or shared parameters so the factory
+        // can forward them without extra prelude.
+        static bool IsDirectorConstructorParameter(AbiParameter parameter) =>
+            !parameter.IsOptional
+            && !parameter.IsUniquePtrParam
+            && !parameter.IsVector
+            && !parameter.IsMap
+            && (parameter.Kind == AbiKind.Shared
+                || parameter.Kind is AbiKind.Bool or AbiKind.I8 or AbiKind.U8
+                    or AbiKind.I16 or AbiKind.U16 or AbiKind.I32 or AbiKind.U32
+                    or AbiKind.I64 or AbiKind.U64 or AbiKind.USize or AbiKind.ISize
+                    or AbiKind.F32 or AbiKind.F64);
+
+        foreach (var declaration in declarations)
+        {
+            if (!castableDeclarationIds.Contains(declaration.Id)
+                || declaration.Template is not null
+                || !membersByDeclaration.TryGetValue(declaration.Id, out var directorMembers))
+            {
+                continue;
+            }
+
+            var pureMethods = directorMembers
+                .Where(member => member.Pure && member.Kind == "method" && member.Access == "public")
+                .ToList();
+            if (pureMethods.Count != 1)
+            {
+                continue;
+            }
+
+            var callMethod = pureMethods[0];
+            var callSignature = callMethod.Signature;
+            if (callSignature is null
+                || callSignature.Variadic
+                || !string.Equals(callSignature.ReturnType.Trim(), "void", StringComparison.Ordinal)
+                || callSignature.Parameters.Count != 1)
+            {
+                continue;
+            }
+
+            var callbackType = callSignature.Parameters[0].Type.Trim();
+            if (!IsPointerOrReferenceType(callbackType) || IsRValueReference(callbackType))
+            {
+                continue;
+            }
+
+            var callbackCore = StripTopLevelQualifiers(callbackType);
+            var callbackIsReference = callbackCore.EndsWith("&", StringComparison.Ordinal);
+            if (!callbackIsReference && !callbackCore.EndsWith("*", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            var callbackPointee = StripTopLevelQualifiers(callbackCore[..^1].TrimEnd());
+            if (callbackPointee.EndsWith("*", StringComparison.Ordinal)
+                || callbackPointee.EndsWith("&", StringComparison.Ordinal)
+                || !publicDeclarationsByQualifiedName.TryGetValue(callbackPointee, out var callbackDeclaration))
+            {
+                continue;
+            }
+
+            var destructor = directorMembers.FirstOrDefault(member => member.Kind == "destructor");
+            if (destructor is null
+                || !destructor.Virtual
+                || destructor.Access != "public"
+                || !(virtualDispatch
+                    ? destructor.Inline
+                    : linkCarrier ? HasExportedSymbol(declaration, destructor) : destructor.Inline))
+            {
+                continue;
+            }
+
+            var directorParameters = new List<AbiParameter>();
+            var hasConstructor = false;
+            foreach (var constructor in directorMembers
+                         .Where(member => member.Kind == "constructor"
+                             && member.Access is "public" or "protected")
+                         .OrderBy(member => member.Id, StringComparer.Ordinal))
+            {
+                if (constructor.Signature is null || constructor.Signature.Variadic)
+                {
+                    continue;
+                }
+
+                if (!(virtualDispatch
+                        ? constructor.Inline
+                        : linkCarrier ? HasExportedSymbol(declaration, constructor) : constructor.Inline))
+                {
+                    continue;
+                }
+
+                var parameters = new List<AbiParameter>();
+                var usable = true;
+                foreach (var parameter in constructor.Signature.Parameters)
+                {
+                    if (!TryMapParameter(
+                            declaration.Surface,
+                            parameter.Name,
+                            parameter.Type,
+                            publicDeclarationsByQualifiedName,
+                            declarationNames,
+                            destroyableDeclarationIds,
+                            enumUnderlyingByName,
+                            linkCarrier,
+                            variants,
+                            out var mapped,
+                            out _)
+                        || !IsDirectorConstructorParameter(mapped))
+                    {
+                        usable = false;
+                        break;
+                    }
+
+                    parameters.Add(mapped);
+                }
+
+                if (!usable)
+                {
+                    continue;
+                }
+
+                directorParameters = parameters;
+                hasConstructor = true;
+                break;
+            }
+
+            if (!hasConstructor)
+            {
+                continue;
+            }
+
+            directorParameters.Add(new AbiParameter { Name = "invoke", Kind = AbiKind.Opaque, NativeType = "void*" });
+            directorParameters.Add(new AbiParameter { Name = "userData", Kind = AbiKind.Opaque, NativeType = "void*" });
+            directorParameters.Add(new AbiParameter { Name = "release", Kind = AbiKind.Opaque, NativeType = "void*" });
+
+            var directorId = declaration.Id + "::director";
+            functions.Add(new AbiFunction
+            {
+                CppName = "hs_director_" + CSharpNaming.ShortHash(directorId),
+                Kind = AbiFunctionKind.DirectorCreate,
+                Surface = declaration.Surface,
+                DeclarationId = declaration.Id,
+                MemberId = directorId,
+                ClassCppName = declaration.QualifiedName,
+                ClassName = declarationNames[declaration.Id],
+                NativeMemberName = callMethod.Name,
+                CSharpMemberName = CastMemberName(declaration.Id, "CreateDirector", callMethod.Id),
+                ReturnKind = AbiKind.Shared,
+                NativeReturnType = "std::shared_ptr<" + declaration.QualifiedName + ">",
+                SharedWrapper = SharedWrapperKind.SharedPtr,
+                ReturnNullable = true,
+                Parameters = directorParameters,
+                Static = true,
+                TargetDeclarationId = callbackDeclaration.Id,
+                DirectorCallbackParameterType = callbackType,
+                DirectorCallbackParameterIsReference = callbackIsReference,
+            });
         }
 
         var usedVariants = functions
