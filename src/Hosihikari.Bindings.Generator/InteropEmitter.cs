@@ -1171,7 +1171,7 @@ internal static class InteropEmitter
             {
                 case AbiKind.StringView:
                     yield return $"__hs_stringData{index}";
-                    yield return $"(nuint)__hs_stringBytes{index}.Length";
+                    yield return $"(nuint)__hs_stringByteCount{index}";
                     break;
                 case AbiKind.Opaque:
                     if (parameter.IsUniquePtrParam)
@@ -1441,7 +1441,15 @@ internal static class InteropEmitter
             var stringSlots = (keyHasStrings ? 1 : 0) + (valueHasStrings ? 1 : 0);
             lines.Add(indent + $"var __hs_vectorItems{suffix} = {vectorName} ?? global::System.Array.Empty<{vector.VectorElementWrapperType}>();");
             lines.Add(indent + $"var __hs_vectorCount{suffix} = __hs_vectorItems{suffix}.Length;");
-            lines.Add(indent + $"var __hs_vectorEntries{suffix} = (global::Hosihikari.Bindings.Abi.MapEntry*)global::System.Runtime.InteropServices.Marshal.AllocHGlobal((__hs_vectorCount{suffix} == 0 ? 1 : __hs_vectorCount{suffix}) * sizeof(global::Hosihikari.Bindings.Abi.MapEntry));");
+            lines.Add(indent + $"scoped global::System.Span<global::Hosihikari.Bindings.Abi.MapEntry> __hs_vectorEntrySpan{suffix};");
+            lines.Add(indent + $"if (__hs_vectorCount{suffix} <= 16)");
+            lines.Add(indent + "{");
+            lines.Add(indent + $"    __hs_vectorEntrySpan{suffix} = stackalloc global::Hosihikari.Bindings.Abi.MapEntry[__hs_vectorCount{suffix} == 0 ? 1 : __hs_vectorCount{suffix}];");
+            lines.Add(indent + "}");
+            lines.Add(indent + "else");
+            lines.Add(indent + "{");
+            lines.Add(indent + $"    __hs_vectorEntrySpan{suffix} = new global::Hosihikari.Bindings.Abi.MapEntry[__hs_vectorCount{suffix}];");
+            lines.Add(indent + "}");
             lines.Add(indent + $"var __hs_vectorStrings{suffix} = new nint[__hs_vectorCount{suffix} * {stringSlots}];");
             lines.Add(indent + $"var __hs_vectorStringCount{suffix} = 0;");
             lines.Add(indent + "try");
@@ -1471,15 +1479,16 @@ internal static class InteropEmitter
                 "__hs_pair.Value",
                 $"__hs_vectorStrings{suffix}",
                 $"__hs_vectorStringCount{suffix}");
-            lines.Add(inner + $"    __hs_vectorEntries{suffix}[__hs_i{suffix}] = __hs_entry;");
+            lines.Add(inner + $"    __hs_vectorEntrySpan{suffix}[__hs_i{suffix}] = __hs_entry;");
             lines.Add(inner + "}");
-            lines.Add(inner + $"var __hs_vectorData{suffix} = __hs_vectorEntries{suffix};");
-            EmitVectorBlocks(lines, parameters, stringIndices, vectorIndices, position + 1, inner, emitBody);
+            lines.Add(inner + $"fixed (global::Hosihikari.Bindings.Abi.MapEntry* __hs_vectorData{suffix} = __hs_vectorEntrySpan{suffix})");
+            lines.Add(inner + "{");
+            EmitVectorBlocks(lines, parameters, stringIndices, vectorIndices, position + 1, inner + "    ", emitBody);
+            lines.Add(inner + "}");
             lines.Add(indent + "}");
             lines.Add(indent + "finally");
             lines.Add(indent + "{");
             lines.Add(indent + $"    for (var __hs_i{suffix} = 0; __hs_i{suffix} < __hs_vectorStringCount{suffix}; __hs_i{suffix}++) {{ if (__hs_vectorStrings{suffix}[__hs_i{suffix}] != 0) {{ global::System.Runtime.InteropServices.Marshal.FreeHGlobal(__hs_vectorStrings{suffix}[__hs_i{suffix}]); }} }}");
-            lines.Add(indent + $"    global::System.Runtime.InteropServices.Marshal.FreeHGlobal((nint)__hs_vectorEntries{suffix});");
             lines.Add(indent + "}");
             return;
         }
@@ -1549,7 +1558,17 @@ internal static class InteropEmitter
             var expression = parameters[index].IsOptional
                 ? $"{name} ?? string.Empty"
                 : name;
-            lines.Add(indent + $"var __hs_stringBytes{index} = global::System.Text.Encoding.UTF8.GetBytes({expression});");
+            lines.Add(indent + $"var __hs_stringByteCount{index} = global::System.Text.Encoding.UTF8.GetByteCount({expression});");
+            lines.Add(indent + $"scoped global::System.Span<byte> __hs_stringBytes{index};");
+            lines.Add(indent + $"if (__hs_stringByteCount{index} <= 256)");
+            lines.Add(indent + "{");
+            lines.Add(indent + $"    __hs_stringBytes{index} = stackalloc byte[__hs_stringByteCount{index} == 0 ? 1 : __hs_stringByteCount{index}];");
+            lines.Add(indent + "}");
+            lines.Add(indent + "else");
+            lines.Add(indent + "{");
+            lines.Add(indent + $"    __hs_stringBytes{index} = new byte[__hs_stringByteCount{index}];");
+            lines.Add(indent + "}");
+            lines.Add(indent + $"global::System.Text.Encoding.UTF8.GetBytes({expression}, __hs_stringBytes{index});");
         }
     }
 
