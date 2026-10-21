@@ -69,7 +69,7 @@ powershell -File frontend/smoke-shim.ps1 -IrDirectory artifacts/llapi-full-ir -L
 
 ## Endstone 表面
 
-`frontend/run-endstone.ps1` 解析 Endstone 公共伞头（`include/endstone/endstone.hpp`）并提供 expected-lite 与 nlohmann_json 头。`--virtual-dispatch` 为 header-only 虚接口发射免链接 shim：inline 成员与虚方法经宿主提供的 vtable 调用，非虚 out-of-line 成员保留 stub。`frontend/build-endstone-shim.ps1` 用 Endstone 头编译生成的表。Endstone 0.11.14 表面当前选出 2,056 个函数，包含符合条件的模板实例、inline/constexpr 静态字段、非模板类的赋值运算符与继承转换。
+`frontend/run-endstone.ps1` 解析 Endstone 公共伞头（`include/endstone/endstone.hpp`）并提供 expected-lite 与 nlohmann_json 头。`--virtual-dispatch` 为 header-only 虚接口发射免链接 shim：inline 成员与虚方法经宿主提供的 vtable 调用，非虚 out-of-line 成员保留 stub。`frontend/build-endstone-shim.ps1` 用 Endstone 头编译生成的表。Endstone 0.11.14 表面当前选出 2,040 个函数，包含符合条件的模板实例、inline/constexpr 静态字段、非模板类的赋值运算符与继承转换。
 
 ## 相关仓库
 

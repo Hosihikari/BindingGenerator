@@ -422,6 +422,10 @@ internal sealed class AbiPlan
             {
                 declarationReason = "the native name is not a valid C++ qualified name";
             }
+            else if (HasMsvcInternalTypeName(declaration.QualifiedName))
+            {
+                declarationReason = "the native name uses implementation-specific standard library types";
+            }
             else if (declaration.Template is not null
                 && ((linkCarrier || virtualDispatch)
                     ? HasInaccessibleTemplateArgument(declaration)
@@ -1265,6 +1269,9 @@ internal sealed class AbiPlan
                     || !function.Defined
                     || function.Source is null
                     || !IsValidCppQualifiedName(function.QualifiedName)
+                    || HasMsvcInternalTypeName(function.QualifiedName)
+                    || HasMsvcInternalTypeName(function.Signature!.ReturnType)
+                    || function.Signature.Parameters.Any(parameter => HasMsvcInternalTypeName(parameter.Type))
                     || !IsNativeSourceAvailable(nativeRoot, function.Source.File))
                 {
                     continue;
@@ -1999,6 +2006,9 @@ internal sealed class AbiPlan
 
         return false;
     }
+
+    private static bool HasMsvcInternalTypeName(string text) =>
+        text.Contains("std::_", StringComparison.Ordinal);
 
     private static bool IsValidCppQualifiedName(string qualifiedName)
     {

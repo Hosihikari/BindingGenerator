@@ -69,7 +69,7 @@ The complete LLAPI umbrella currently selects 362 link-safe functions, or 3,467 
 
 ## Endstone surface
 
-`frontend/run-endstone.ps1` parses the Endstone public umbrella (`include/endstone/endstone.hpp`) with expected-lite and nlohmann_json headers. `--virtual-dispatch` emits a link-free shim for the header-only virtual interfaces: inline members and virtual methods are called through the host-provided vtables, while non-virtual out-of-line members remain stubs. `frontend/build-endstone-shim.ps1` compiles the generated table against the Endstone headers. The Endstone 0.11.14 surface currently selects 2,056 functions, including eligible template instances, inline/constexpr static fields, assignment operators on non-template classes, and inheritance casts.
+`frontend/run-endstone.ps1` parses the Endstone public umbrella (`include/endstone/endstone.hpp`) with expected-lite and nlohmann_json headers. `--virtual-dispatch` emits a link-free shim for the header-only virtual interfaces: inline members and virtual methods are called through the host-provided vtables, while non-virtual out-of-line members remain stubs. `frontend/build-endstone-shim.ps1` compiles the generated table against the Endstone headers. The Endstone 0.11.14 surface currently selects 2,040 functions, including eligible template instances, inline/constexpr static fields, assignment operators on non-template classes, and inheritance casts.
 
 ## Related repositories
 

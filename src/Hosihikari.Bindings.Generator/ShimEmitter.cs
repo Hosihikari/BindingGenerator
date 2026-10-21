@@ -1309,7 +1309,7 @@ internal static class ShimEmitter
 
         initializers.Add($"hs_invoke(reinterpret_cast<hs_invoke_type>({names[constructorCount]}))");
         initializers.Add($"hs_userData({names[constructorCount + 1]})");
-        initializers.Add($"hs_release(static_cast<void (*)(void*)>({names[constructorCount + 2]}))");
+        initializers.Add($"hs_release(reinterpret_cast<void (*)(void*)>({names[constructorCount + 2]}))");
         yield return "            : " + string.Join(", ", initializers);
         yield return "        {";
         yield return "        }";
