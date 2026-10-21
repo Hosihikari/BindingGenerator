@@ -33,7 +33,7 @@ cmake --build build/frontend --config Release
 
 ## Current state
 
-The frontend parses the full `src/ll/api` umbrella plus the `src-server/ll/api` overlays (1,514 declarations / 6,114 members in the current full IR) and the smaller `ll/api/event` module. It emits JSONL IR plus `ir-manifest.json` and validates the result through the .NET CLI. The visitor covers classes/structs/unions, fields, static fields, methods, constructors, destructors, operators, enums, namespace-scope functions, and concrete template instantiations. Macro provenance is inferred from export/deprecated/nodiscard attributes; uninstantiated template declarations and partial specializations are skipped.
+The frontend parses the full `src/ll/api` umbrella plus the `src-server/ll/api` overlays (1,530 declarations / 6,145 members in the current full IR) and the smaller `ll/api/event` module. It emits JSONL IR plus `ir-manifest.json` and validates the result through the .NET CLI. The visitor covers classes/structs/unions, fields, static fields, methods, constructors, destructors, operators, enums, namespace-scope functions, and concrete template instantiations. Public record types referenced by value from filtered signatures are emitted with their constructors, destructor, and fields even when declared outside the module filter. Macro provenance is inferred from export/deprecated/nodiscard attributes; uninstantiated template declarations and partial specializations are skipped.
 
 ## Full IR
 

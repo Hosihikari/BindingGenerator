@@ -165,9 +165,11 @@ public:
         for (auto* Member : Definition->decls()) {
             if (auto* Field = dyn_cast<FieldDecl>(Member)) {
                 collectDependencyEnums(Field);
+                collectDependencyRecords(Field);
                 emitMember(Definition, DeclId, Field, "field", false);
             } else if (auto* Variable = dyn_cast<VarDecl>(Member)) {
                 collectDependencyEnums(Variable);
+                collectDependencyRecords(Variable);
                 if (Variable->isStaticDataMember()) {
                     emitMember(Definition, DeclId, Variable, "static_field", true);
                 }
@@ -176,6 +178,7 @@ public:
                     continue;
                 }
                 collectDependencyEnums(Method);
+                collectDependencyRecords(Method);
                 if (isa<CXXConstructorDecl>(Method)) {
                     emitMember(Definition, DeclId, Method, "constructor", false);
                 } else if (isa<CXXDestructorDecl>(Method)) {
@@ -203,6 +206,7 @@ public:
         }
 
         collectDependencyEnums(Decl);
+        collectDependencyRecords(Decl);
 
         std::string DeclId = idFor(Decl, "");
         if (!Emitted.insert(DeclId).second) {
@@ -272,6 +276,99 @@ public:
         }
     }
 
+    // Records passed by value in filtered signatures may live in headers outside
+    // the module filter. Emit their declarations plus the members needed to
+    // construct and inspect them; reference-only dependencies stay opaque.
+    void collectDependencyRecords(const NamedDecl* Decl) {
+        if (const auto* Function = dyn_cast<FunctionDecl>(Decl)) {
+            collectDependencyRecord(Function->getReturnType());
+            for (auto* Parameter : Function->parameters()) {
+                collectDependencyRecord(Parameter->getType());
+            }
+        } else if (const auto* Field = dyn_cast<FieldDecl>(Decl)) {
+            collectDependencyRecord(Field->getType());
+        } else if (const auto* Variable = dyn_cast<VarDecl>(Decl)) {
+            collectDependencyRecord(Variable->getType());
+        }
+    }
+
+    void collectDependencyRecord(QualType Type) {
+        Type = Type.getCanonicalType();
+        if (Type.isNull() || Type->isPointerType() || Type->isReferenceType() || Type->isArrayType()) {
+            return;
+        }
+        if (!Type->isRecordType()) {
+            return;
+        }
+
+        CXXRecordDecl* Record = Type->getAsCXXRecordDecl();
+        if (Record == nullptr || Record->isImplicit() || !Record->isCompleteDefinition()
+            || Record->isInvalidDecl() || Record->isDependentContext() || Record->isLambda()
+            || Record->isAnonymousStructOrUnion() || Record->getDescribedClassTemplate() != nullptr
+            || isa<ClassTemplateSpecializationDecl>(Record)
+            || !Record->isExternallyVisible() || !isInRoot(Record->getLocation(), false)
+            || isInStandardNamespace(Record) || isInternalName(Record) || !isDeclAccessible(Record)) {
+            return;
+        }
+
+        DependencyRecords.emplace(idFor(Record, ""), Record);
+    }
+
+    void EmitDependencyRecords() {
+        std::set<std::string> Processed;
+        while (true) {
+            auto It = std::find_if(
+                DependencyRecords.begin(),
+                DependencyRecords.end(),
+                [&](const auto& Entry) { return Processed.find(Entry.first) == Processed.end(); }
+            );
+            if (It == DependencyRecords.end()) {
+                break;
+            }
+
+            Processed.insert(It->first);
+            if (!Emitted.insert(It->first).second) {
+                continue;
+            }
+
+            CXXRecordDecl* Decl = It->second;
+            std::string Kind = Decl->isUnion() ? "union" : (Decl->isStruct() ? "struct" : "class");
+            Records.emplace_back(makeDeclaration(Decl, It->first, Kind));
+            ++Declarations;
+            Records.emplace_back(makeVariant(Decl, It->first));
+            ++Variants;
+
+            for (auto* Member : Decl->decls()) {
+                if (auto* Field = dyn_cast<FieldDecl>(Member)) {
+                    if (Field->getAccess() != AS_public) {
+                        continue;
+                    }
+                    collectDependencyEnums(Field);
+                    collectDependencyRecords(Field);
+                    emitMember(Decl, It->first, Field, "field", false);
+                } else if (auto* Variable = dyn_cast<VarDecl>(Member)) {
+                    if (Variable->getAccess() != AS_public || !Variable->isStaticDataMember()) {
+                        continue;
+                    }
+                    collectDependencyEnums(Variable);
+                    collectDependencyRecords(Variable);
+                    emitMember(Decl, It->first, Variable, "static_field", true);
+                } else if (auto* Method = dyn_cast<CXXMethodDecl>(Member)) {
+                    if (Method->isImplicit() || Method->isDeleted() || Method->getAccess() != AS_public) {
+                        continue;
+                    }
+                    collectDependencyEnums(Method);
+                    collectDependencyRecords(Method);
+                    if (isa<CXXConstructorDecl>(Method)) {
+                        emitMember(Decl, It->first, Method, "constructor", false);
+                    } else if (isa<CXXDestructorDecl>(Method)) {
+                        emitMember(Decl, It->first, Method, "destructor", false);
+                    }
+                }
+            }
+        }
+    }
+
     std::vector<llvm::json::Object> Records;
     int Declarations = 0;
     int Variants = 0;
@@ -282,6 +379,7 @@ private:
     const Options& Opt;
     std::set<std::string> Emitted;
     std::map<std::string, EnumDecl*> DependencyEnums;
+    std::map<std::string, CXXRecordDecl*> DependencyRecords;
 
     bool isInternalName(const NamedDecl* Decl) const {
         std::string Qualified = Decl->getQualifiedNameAsString();
@@ -868,6 +966,7 @@ int main(int argc, char** argv) {
 
     IrVisitor Visitor(AST->getASTContext(), Opt);
     Visitor.TraverseDecl(AST->getASTContext().getTranslationUnitDecl());
+    Visitor.EmitDependencyRecords();
     Visitor.EmitDependencyEnums();
 
     llvm::sys::fs::create_directories(Opt.Output);
