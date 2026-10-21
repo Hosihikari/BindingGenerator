@@ -34,6 +34,14 @@ internal enum AbiFunctionKind
     Get,
     Set,
     Method,
+    Cast,
+}
+
+internal enum AbiCastKind
+{
+    None,
+    Upcast,
+    Downcast,
 }
 
 internal sealed class AbiParameter
@@ -181,6 +189,9 @@ internal sealed class AbiFunction
     public string TableField => CppName;
     public string CppName { get; init; } = "";
     public AbiFunctionKind Kind { get; init; }
+    public AbiCastKind CastKind { get; init; }
+    public string? TargetCppName { get; init; }
+    public string? TargetDeclarationId { get; init; }
     public string Surface { get; init; } = "";
     public string DeclarationId { get; init; } = "";
     public string? MemberId { get; init; }
@@ -448,6 +459,21 @@ internal sealed class AbiPlan
                     .Distinct(StringComparer.Ordinal)
                     .ToList(),
                 StringComparer.Ordinal);
+        var publicBaseInfosByDeclaration = records.OfType<VariantRecord>()
+            .GroupBy(variant => variant.DeclarationId, StringComparer.Ordinal)
+            .ToDictionary(
+                group => group.Key,
+                group => group
+                    .SelectMany(variant => variant.Layout?.Bases ?? [])
+                    .Where(baseInfo => baseInfo.Access == "public")
+                    .GroupBy(baseInfo => baseInfo.DeclarationId)
+                    .Select(byId => byId.First())
+                    .ToList(),
+                StringComparer.Ordinal);
+        var polymorphicDeclarationIds = records.OfType<MemberRecord>()
+            .Where(member => member.Virtual || member.Pure)
+            .Select(member => member.DeclarationId)
+            .ToHashSet(StringComparer.Ordinal);
         var linkSafeMemo = new Dictionary<string, bool>(StringComparer.Ordinal);
 
         bool IsLinkSafe(string declarationId)
@@ -616,6 +642,7 @@ internal sealed class AbiPlan
         var callables = BuildCallableRegistry(records, enumUnderlyingByName);
 
         var functions = new List<AbiFunction>();
+        var uncastableDeclarationIds = new HashSet<string>(StringComparer.Ordinal);
         foreach (var declaration in declarations)
         {
             if (!membersByDeclaration.TryGetValue(declaration.Id, out var declarationMembers))
@@ -633,6 +660,7 @@ internal sealed class AbiPlan
             // safe C++ type for the shim until the IR distinguishes the two.
             if (HasImplicitSpecializationMembers(declaration, declarationMembers))
             {
+                uncastableDeclarationIds.Add(declaration.Id);
                 continue;
             }
 
@@ -844,6 +872,107 @@ internal sealed class AbiPlan
                 }
 
                 functions.Add(function);
+            }
+        }
+
+        // Upcasts and RTTI downcasts are synthetic table functions. They alias the same object
+        // and always produce borrowed wrappers; no ownership is transferred.
+        var castableDeclarationIds = declarations
+            .Select(declaration => declaration.Id)
+            .Where(id => !uncastableDeclarationIds.Contains(id))
+            .ToHashSet(StringComparer.Ordinal);
+        var castNamesByDeclaration = declarations.ToDictionary(
+            declaration => declaration.Id,
+            declaration => new HashSet<string>(
+                membersByDeclaration.TryGetValue(declaration.Id, out var declarationMembers)
+                    ? declarationMembers
+                        .Where(member => member.Access == "public")
+                        .Select(member => TypeNames.Sanitize(member.Name))
+                    : [],
+                StringComparer.Ordinal),
+            StringComparer.Ordinal);
+
+        string CastMemberName(string ownerId, string candidate, string targetId)
+        {
+            var names = castNamesByDeclaration[ownerId];
+            if (names.Add(candidate))
+            {
+                return candidate;
+            }
+
+            var suffixed = candidate + "_" + CSharpNaming.ShortHash(targetId);
+            names.Add(suffixed);
+            return suffixed;
+        }
+
+        foreach (var declaration in declarations)
+        {
+            if (!castableDeclarationIds.Contains(declaration.Id)
+                || !publicBaseInfosByDeclaration.TryGetValue(declaration.Id, out var baseInfos)
+                || !declarationNames.TryGetValue(declaration.Id, out var derivedName))
+            {
+                continue;
+            }
+
+            foreach (var baseInfo in baseInfos)
+            {
+                if (string.Equals(baseInfo.DeclarationId, declaration.Id, StringComparison.Ordinal)
+                    || !castableDeclarationIds.Contains(baseInfo.DeclarationId)
+                    || !allDeclarationsById.TryGetValue(baseInfo.DeclarationId, out var baseDeclaration)
+                    || baseDeclaration.Kind is not ("class" or "struct" or "union")
+                    || baseDeclaration.Access != "public"
+                    || !string.Equals(baseDeclaration.Surface, declaration.Surface, StringComparison.Ordinal)
+                    || baseDeclaration.QualifiedName.StartsWith("std::", StringComparison.Ordinal)
+                    || !declarationNames.TryGetValue(baseDeclaration.Id, out var baseName))
+                {
+                    continue;
+                }
+
+                var upcastId = declaration.Id + "::cast::up::" + baseDeclaration.Id;
+                functions.Add(new AbiFunction
+                {
+                    CppName = "hs_cast_" + CSharpNaming.ShortHash(upcastId),
+                    Kind = AbiFunctionKind.Cast,
+                    CastKind = AbiCastKind.Upcast,
+                    Surface = declaration.Surface,
+                    DeclarationId = declaration.Id,
+                    MemberId = upcastId,
+                    ClassCppName = declaration.QualifiedName,
+                    ClassName = derivedName,
+                    TargetCppName = baseDeclaration.QualifiedName,
+                    TargetDeclarationId = baseDeclaration.Id,
+                    NativeMemberName = "",
+                    CSharpMemberName = CastMemberName(declaration.Id, "As" + baseName.ClassName, baseDeclaration.Id),
+                    ReturnKind = AbiKind.Opaque,
+                    NativeReturnType = baseDeclaration.QualifiedName + " *",
+                    ReturnWrapperType = "global::" + baseName.NamespaceName + "." + baseName.ClassName,
+                });
+
+                if (!polymorphicDeclarationIds.Contains(baseDeclaration.Id))
+                {
+                    continue;
+                }
+
+                var downcastId = baseDeclaration.Id + "::cast::down::" + declaration.Id;
+                functions.Add(new AbiFunction
+                {
+                    CppName = "hs_cast_" + CSharpNaming.ShortHash(downcastId),
+                    Kind = AbiFunctionKind.Cast,
+                    CastKind = AbiCastKind.Downcast,
+                    Surface = baseDeclaration.Surface,
+                    DeclarationId = baseDeclaration.Id,
+                    MemberId = downcastId,
+                    ClassCppName = baseDeclaration.QualifiedName,
+                    ClassName = baseName,
+                    TargetCppName = declaration.QualifiedName,
+                    TargetDeclarationId = declaration.Id,
+                    NativeMemberName = "",
+                    CSharpMemberName = CastMemberName(baseDeclaration.Id, "TryAs" + derivedName.ClassName, declaration.Id),
+                    ReturnKind = AbiKind.Opaque,
+                    NativeReturnType = declaration.QualifiedName + " *",
+                    ReturnWrapperType = "global::" + derivedName.NamespaceName + "." + derivedName.ClassName,
+                    ReturnNullable = true,
+                });
             }
         }
 
@@ -2290,6 +2419,17 @@ internal sealed class AbiPlan
             nativeType = optionalRefInner;
             optional = true;
             nullable = true;
+
+            // optional_ref is a borrowed view; use the same typed wrapper path as T*/T&.
+            var optionalRefPointee = StripTopLevelQualifiers(optionalRefInner);
+            if (!optionalRefPointee.EndsWith("*", StringComparison.Ordinal)
+                && !optionalRefPointee.EndsWith("&", StringComparison.Ordinal)
+                && declarationsByQualifiedName.TryGetValue(optionalRefPointee, out var optionalRefDeclaration)
+                && declarationNames.TryGetValue(optionalRefDeclaration.Id, out var optionalRefName))
+            {
+                wrapperType = "global::" + optionalRefName.NamespaceName + "." + optionalRefName.ClassName;
+            }
+
             return true;
         }
 

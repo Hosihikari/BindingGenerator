@@ -464,7 +464,12 @@ internal static class ShimEmitter
             .ToDictionary(group => group.Key, group => group.First(), StringComparer.Ordinal);
         var includes = new HashSet<string>(StringComparer.Ordinal);
 
-        foreach (var id in functions.Select(function => function.DeclarationId).Distinct(StringComparer.Ordinal))
+        foreach (var id in functions
+                     .Select(function => function.DeclarationId)
+                     .Concat(functions
+                         .Select(function => function.TargetDeclarationId)
+                         .OfType<string>())
+                     .Distinct(StringComparer.Ordinal))
         {
             if (!declarations.TryGetValue(id, out var declaration))
             {
@@ -860,6 +865,12 @@ internal static class ShimEmitter
                 yield return $"    {target} = static_cast<{function.Parameters[0].NativeType}>({value});";
                 break;
             }
+
+            case AbiFunctionKind.Cast:
+                yield return function.CastKind == AbiCastKind.Downcast
+                    ? $"    return dynamic_cast<{function.TargetCppName}*>(static_cast<{function.ClassCppName}*>({SelfParameter}));"
+                    : $"    return static_cast<{function.TargetCppName}*>(static_cast<{function.ClassCppName}*>({SelfParameter}));";
+                break;
 
             case AbiFunctionKind.Method:
             {

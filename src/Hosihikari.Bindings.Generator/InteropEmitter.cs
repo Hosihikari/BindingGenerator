@@ -105,6 +105,17 @@ internal static class InteropEmitter
                 }
             }
 
+            if (plan.FunctionsByDeclaration.TryGetValue(declaration.Id, out var declarationFunctions))
+            {
+                foreach (var cast in declarationFunctions
+                             .Where(function => function.Kind == AbiFunctionKind.Cast)
+                             .OrderBy(function => function.CSharpMemberName, StringComparer.Ordinal))
+                {
+                    lines.Add("");
+                    EmitMethod(lines, cast.CSharpMemberName, cast);
+                }
+            }
+
             if (hasDestroy)
             {
                 lines.Add("");
