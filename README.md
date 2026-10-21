@@ -71,6 +71,8 @@ The complete LLAPI umbrella currently selects 496 link-safe functions, or 3,819 
 
 `frontend/run-endstone.ps1` parses the Endstone public umbrella (`include/endstone/endstone.hpp`) with expected-lite and nlohmann_json headers. `--virtual-dispatch` emits a link-free shim for the header-only virtual interfaces: inline members and virtual methods are called through the host-provided vtables, while non-virtual out-of-line members remain stubs. `frontend/build-endstone-shim.ps1` compiles the generated table against the Endstone headers. The Endstone 0.11.14 surface currently selects 2,364 functions, including eligible template instances, inline/constexpr static fields, assignment operators on non-template classes, and inheritance casts.
 
+`frontend/run-endstone.sh` generates the `linux-x64-server` configuration on Linux. The `endstone-linux-ir` CI job builds the frontend against LLVM 23.1.3, generates and validates the IR, emits the Interop and shim, compares the emitted Interop byte-for-byte with the committed Windows-IR output, and compiles the shim. Fixed-width spellings, standard-library iterator types, and `system_clock::time_point` durations are normalized to the Windows form so declaration ids, table field hashes, and coverage stay identical across platforms (ADR 0018).
+
 ## Related repositories
 
 - `Hosihikari/Bindings.Ir`: schema, models, reader/writer, validator.

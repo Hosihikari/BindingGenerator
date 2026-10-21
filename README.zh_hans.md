@@ -71,6 +71,8 @@ powershell -File frontend/smoke-shim.ps1 -IrDirectory artifacts/llapi-full-ir -L
 
 `frontend/run-endstone.ps1` 解析 Endstone 公共伞头（`include/endstone/endstone.hpp`）并提供 expected-lite 与 nlohmann_json 头。`--virtual-dispatch` 为 header-only 虚接口发射免链接 shim：inline 成员与虚方法经宿主提供的 vtable 调用，非虚 out-of-line 成员保留 stub。`frontend/build-endstone-shim.ps1` 用 Endstone 头编译生成的表。Endstone 0.11.14 表面当前选出 2,364 个函数，包含符合条件的模板实例、inline/constexpr 静态字段、非模板类的赋值运算符与继承转换。
 
+`frontend/run-endstone.sh` 在 Linux 上生成 `linux-x64-server` 配置。`endstone-linux-ir` CI 作业构建针对 LLVM 23.1.3 的前端，生成并校验 IR，发射 Interop 与 shim，将发射出的 Interop 与已提交的 Windows-IR 输出逐字节比对，并编译 shim。固定宽度类型的拼写、标准库迭代器类型与 `system_clock::time_point` 的 duration 会归一到 Windows 形态，使声明 id、函数表字段哈希与覆盖在平台间保持一致（ADR 0018）。
+
 ## 相关仓库
 
 - `Hosihikari/Bindings.Ir`：schema、模型、读写器与校验器。
