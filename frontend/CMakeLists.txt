@@ -61,6 +61,7 @@ if(WIN32)
 endif()
 
 find_package(Clang REQUIRED CONFIG)
+find_package(LLVM REQUIRED CONFIG)
 find_package(Threads REQUIRED)
 
 add_executable(hosihikari-ir-frontend src/main.cpp)
@@ -84,4 +85,21 @@ target_link_libraries(
     clangAST
     clangBasic
     Threads::Threads
+)
+
+add_executable(hosihikari-symbol-ir-frontend symbols/main.cpp)
+target_include_directories(hosihikari-symbol-ir-frontend PRIVATE ${LLVM_INCLUDE_DIRS})
+if(MSVC)
+  target_compile_options(hosihikari-symbol-ir-frontend PRIVATE /utf-8)
+  target_link_options(hosihikari-symbol-ir-frontend PRIVATE /STACK:67108864)
+endif()
+target_link_libraries(
+  hosihikari-symbol-ir-frontend
+  PRIVATE
+    LLVMDebugInfoPDB
+    LLVMDebugInfoCodeView
+    LLVMDemangle
+    LLVMObject
+    LLVMBinaryFormat
+    LLVMSupport
 )
