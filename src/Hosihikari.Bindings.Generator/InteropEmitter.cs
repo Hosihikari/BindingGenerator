@@ -751,7 +751,7 @@ internal static class InteropEmitter
             lines,
             create.Parameters,
             stringIndices,
-            FindVectorParameter(create.Parameters),
+            FindVectorParameters(create.Parameters),
             "        ",
             bodyIndent =>
             {
@@ -819,7 +819,7 @@ internal static class InteropEmitter
             lines,
             method.Parameters,
             stringIndices,
-            FindVectorParameter(method.Parameters),
+            FindVectorParameters(method.Parameters),
             "        ",
             bodyIndent => EmitMethodBody(lines, method, call, bodyIndent));
         lines.Add("    }");
@@ -1076,10 +1076,8 @@ internal static class InteropEmitter
 
             if (parameter.IsVector)
             {
-                vectorArguments.Add("__hs_vectorData");
-                vectorArguments.Add(parameter.VectorElementKind == AbiKind.StringView
-                    ? "(nuint)__hs_vectorViews.Length"
-                    : $"(nuint)({name}?.Length ?? 0)");
+                vectorArguments.Add($"__hs_vectorData{index}");
+                vectorArguments.Add($"(nuint)({name}?.Length ?? 0)");
                 continue;
             }
 
@@ -1149,38 +1147,39 @@ internal static class InteropEmitter
         }
     }
 
-    private static int FindVectorParameter(IReadOnlyList<AbiParameter> parameters)
+    private static List<int> FindVectorParameters(IReadOnlyList<AbiParameter> parameters)
     {
+        var indices = new List<int>();
         for (var index = 0; index < parameters.Count; index++)
         {
             if (parameters[index].IsVector)
             {
-                return index;
+                indices.Add(index);
             }
         }
 
-        return -1;
+        return indices;
     }
 
     private static void EmitPinnedBody(
         List<string> lines,
         IReadOnlyList<AbiParameter> parameters,
         IReadOnlyList<int> stringIndices,
-        int vectorIndex,
+        IReadOnlyList<int> vectorIndices,
         string indent,
         Action<string> emitBody)
     {
         var mapIndices = FindMapParameters(parameters);
         if (mapIndices.Count == 0)
         {
-            EmitPinnedBodyCore(lines, parameters, stringIndices, vectorIndex, indent, emitBody);
+            EmitPinnedBodyCore(lines, parameters, stringIndices, vectorIndices, indent, emitBody);
             return;
         }
 
         EmitMapBuffers(lines, parameters, mapIndices, indent);
         lines.Add(indent + "try");
         lines.Add(indent + "{");
-        EmitPinnedBodyCore(lines, parameters, stringIndices, vectorIndex, indent + "    ", emitBody);
+        EmitPinnedBodyCore(lines, parameters, stringIndices, vectorIndices, indent + "    ", emitBody);
         lines.Add(indent + "}");
         lines.Add(indent + "finally");
         lines.Add(indent + "{");
@@ -1324,124 +1323,134 @@ internal static class InteropEmitter
         List<string> lines,
         IReadOnlyList<AbiParameter> parameters,
         IReadOnlyList<int> stringIndices,
-        int vectorIndex,
+        IReadOnlyList<int> vectorIndices,
         string indent,
         Action<string> emitBody)
     {
-        if (vectorIndex >= 0)
+        EmitStringBuffers(lines, parameters, stringIndices, indent);
+        EmitVectorBlocks(lines, parameters, stringIndices, vectorIndices, 0, indent, emitBody);
+    }
+
+    private static void EmitVectorBlocks(
+        List<string> lines,
+        IReadOnlyList<AbiParameter> parameters,
+        IReadOnlyList<int> stringIndices,
+        IReadOnlyList<int> vectorIndices,
+        int position,
+        string indent,
+        Action<string> emitBody)
+    {
+        if (position >= vectorIndices.Count)
         {
-            var vector = parameters[vectorIndex];
-            var vectorName = CSharpParameterName(vector, vectorIndex);
-            if (vector.VectorElementOwnership == ArrayElementOwnership.PairCopy)
-            {
-                var keyHasStrings = vector.VectorPairKeyKind == AbiKind.StringView;
-                var valueHasStrings = vector.VectorPairValueKind == AbiKind.StringView;
-                var stringSlots = (keyHasStrings ? 1 : 0) + (valueHasStrings ? 1 : 0);
-                lines.Add(indent + $"var __hs_vectorItems = {vectorName} ?? global::System.Array.Empty<{vector.VectorElementWrapperType}>();");
-                lines.Add(indent + "var __hs_vectorCount = __hs_vectorItems.Length;");
-                lines.Add(indent + "var __hs_vectorEntries = (global::Hosihikari.Bindings.Abi.MapEntry*)global::System.Runtime.InteropServices.Marshal.AllocHGlobal((__hs_vectorCount == 0 ? 1 : __hs_vectorCount) * sizeof(global::Hosihikari.Bindings.Abi.MapEntry));");
-                lines.Add(indent + $"var __hs_vectorStrings = new nint[__hs_vectorCount * {stringSlots}];");
-                lines.Add(indent + "var __hs_vectorStringCount = 0;");
-                EmitStringBuffers(lines, parameters, stringIndices, indent);
-                lines.Add(indent + "try");
-                lines.Add(indent + "{");
-                var inner = indent + "    ";
-                lines.Add(inner + "for (var __hs_i = 0; __hs_i < __hs_vectorCount; __hs_i++)");
-                lines.Add(inner + "{");
-                lines.Add(inner + "    var __hs_pair = __hs_vectorItems[__hs_i];");
-                lines.Add(inner + "    var __hs_entry = new global::Hosihikari.Bindings.Abi.MapEntry();");
-                EmitMapManagedEncode(
-                    lines,
-                    inner + "    ",
-                    "Key",
-                    "KeySize",
-                    vector.VectorPairKeyKind,
-                    ArrayElementOwnership.None,
-                    "__hs_pair.Key",
-                    "__hs_vectorStrings",
-                    "__hs_vectorStringCount");
-                EmitMapManagedEncode(
-                    lines,
-                    inner + "    ",
-                    "Value",
-                    "ValueSize",
-                    vector.VectorPairValueKind,
-                    ArrayElementOwnership.None,
-                    "__hs_pair.Value",
-                    "__hs_vectorStrings",
-                    "__hs_vectorStringCount");
-                lines.Add(inner + "    __hs_vectorEntries[__hs_i] = __hs_entry;");
-                lines.Add(inner + "}");
-                lines.Add(inner + "var __hs_vectorData = __hs_vectorEntries;");
-                EmitStringFixes(lines, parameters, stringIndices, 0, inner, emitBody);
-                lines.Add(indent + "}");
-                lines.Add(indent + "finally");
-                lines.Add(indent + "{");
-                lines.Add(indent + "    for (var __hs_i = 0; __hs_i < __hs_vectorStringCount; __hs_i++) { if (__hs_vectorStrings[__hs_i] != 0) { global::System.Runtime.InteropServices.Marshal.FreeHGlobal(__hs_vectorStrings[__hs_i]); } }");
-                lines.Add(indent + "    global::System.Runtime.InteropServices.Marshal.FreeHGlobal((nint)__hs_vectorEntries);");
-                lines.Add(indent + "}");
-                return;
-            }
+            EmitStringFixes(lines, parameters, stringIndices, 0, indent, emitBody);
+            return;
+        }
 
-            if (vector.VectorElementKind == AbiKind.StringView)
-            {
-                lines.Add(indent + $"var __hs_vectorItems = {vectorName} ?? global::System.Array.Empty<string>();");
-                lines.Add(indent + "var __hs_vectorBytes = new byte[__hs_vectorItems.Length][];");
-                lines.Add(indent + "var __hs_vectorViews = new global::Hosihikari.Bindings.Abi.StringView[__hs_vectorItems.Length];");
-                lines.Add(indent + "var __hs_vectorHandles = new nint[__hs_vectorItems.Length];");
-                EmitStringBuffers(lines, parameters, stringIndices, indent);
-                lines.Add(indent + "try");
-                lines.Add(indent + "{");
-                var inner = indent + "    ";
-                lines.Add(inner + "for (var __hs_i = 0; __hs_i < __hs_vectorItems.Length; __hs_i++)");
-                lines.Add(inner + "{");
-                lines.Add(inner + "    __hs_vectorBytes[__hs_i] = global::System.Text.Encoding.UTF8.GetBytes(__hs_vectorItems[__hs_i] ?? string.Empty);");
-                lines.Add(inner + "    var __hs_bytes = __hs_vectorBytes[__hs_i];");
-                lines.Add(inner + "    var __hs_ptr = (nint)global::System.Runtime.InteropServices.Marshal.AllocHGlobal(__hs_bytes.Length == 0 ? 1 : __hs_bytes.Length);");
-                lines.Add(inner + "    if (__hs_bytes.Length > 0) { global::System.Runtime.InteropServices.Marshal.Copy(__hs_bytes, 0, (nint)__hs_ptr, __hs_bytes.Length); }");
-                lines.Add(inner + "    __hs_vectorHandles[__hs_i] = __hs_ptr;");
-                lines.Add(inner + "    __hs_vectorViews[__hs_i] = new global::Hosihikari.Bindings.Abi.StringView { Data = (byte*)__hs_ptr, Size = (nuint)__hs_bytes.Length };");
-                lines.Add(inner + "}");
-                lines.Add(inner + "fixed (global::Hosihikari.Bindings.Abi.StringView* __hs_vectorData = __hs_vectorViews)");
-                lines.Add(inner + "{");
-                EmitStringFixes(lines, parameters, stringIndices, 0, inner + "    ", emitBody);
-                lines.Add(inner + "}");
-                lines.Add(indent + "}");
-                lines.Add(indent + "finally");
-                lines.Add(indent + "{");
-                lines.Add(indent + "    for (var __hs_i = 0; __hs_i < __hs_vectorHandles.Length; __hs_i++) { if (__hs_vectorHandles[__hs_i] != 0) { global::System.Runtime.InteropServices.Marshal.FreeHGlobal((nint)__hs_vectorHandles[__hs_i]); } }");
-                lines.Add(indent + "}");
-                return;
-            }
-
-            if (vector.VectorElementKind == AbiKind.Opaque)
-            {
-                lines.Add(indent + $"var __hs_vectorItems = {vectorName};");
-                lines.Add(indent + "var __hs_vectorHandles = new nint[__hs_vectorItems?.Length ?? 0];");
-                lines.Add(indent + "for (var __hs_i = 0; __hs_i < __hs_vectorHandles.Length; __hs_i++)");
-                lines.Add(indent + "{");
-                lines.Add(indent + "    __hs_vectorHandles[__hs_i] = __hs_vectorItems![__hs_i]?.Handle ?? 0;");
-                lines.Add(indent + "}");
-                EmitStringBuffers(lines, parameters, stringIndices, indent);
-                lines.Add(indent + "fixed (nint* __hs_vectorHandleData = __hs_vectorHandles)");
-                lines.Add(indent + "{");
-                lines.Add(indent + "    var __hs_vectorData = (void**)__hs_vectorHandleData;");
-                EmitStringFixes(lines, parameters, stringIndices, 0, indent + "    ", emitBody);
-                lines.Add(indent + "}");
-                return;
-            }
-
-            var elementType = AbiPlan.CSharpType(vector.VectorElementKind);
-            EmitStringBuffers(lines, parameters, stringIndices, indent);
-            lines.Add(indent + $"fixed ({elementType}* __hs_vectorData = {vectorName})");
+        var index = vectorIndices[position];
+        var vector = parameters[index];
+        var vectorName = CSharpParameterName(vector, index);
+        var suffix = index.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        if (vector.VectorElementOwnership == ArrayElementOwnership.PairCopy)
+        {
+            var keyHasStrings = vector.VectorPairKeyKind == AbiKind.StringView;
+            var valueHasStrings = vector.VectorPairValueKind == AbiKind.StringView;
+            var stringSlots = (keyHasStrings ? 1 : 0) + (valueHasStrings ? 1 : 0);
+            lines.Add(indent + $"var __hs_vectorItems{suffix} = {vectorName} ?? global::System.Array.Empty<{vector.VectorElementWrapperType}>();");
+            lines.Add(indent + $"var __hs_vectorCount{suffix} = __hs_vectorItems{suffix}.Length;");
+            lines.Add(indent + $"var __hs_vectorEntries{suffix} = (global::Hosihikari.Bindings.Abi.MapEntry*)global::System.Runtime.InteropServices.Marshal.AllocHGlobal((__hs_vectorCount{suffix} == 0 ? 1 : __hs_vectorCount{suffix}) * sizeof(global::Hosihikari.Bindings.Abi.MapEntry));");
+            lines.Add(indent + $"var __hs_vectorStrings{suffix} = new nint[__hs_vectorCount{suffix} * {stringSlots}];");
+            lines.Add(indent + $"var __hs_vectorStringCount{suffix} = 0;");
+            lines.Add(indent + "try");
             lines.Add(indent + "{");
-            EmitStringFixes(lines, parameters, stringIndices, 0, indent + "    ", emitBody);
+            var inner = indent + "    ";
+            lines.Add(inner + $"for (var __hs_i{suffix} = 0; __hs_i{suffix} < __hs_vectorCount{suffix}; __hs_i{suffix}++)");
+            lines.Add(inner + "{");
+            lines.Add(inner + $"    var __hs_pair = __hs_vectorItems{suffix}[__hs_i{suffix}];");
+            lines.Add(inner + "    var __hs_entry = new global::Hosihikari.Bindings.Abi.MapEntry();");
+            EmitMapManagedEncode(
+                lines,
+                inner + "    ",
+                "Key",
+                "KeySize",
+                vector.VectorPairKeyKind,
+                ArrayElementOwnership.None,
+                "__hs_pair.Key",
+                $"__hs_vectorStrings{suffix}",
+                $"__hs_vectorStringCount{suffix}");
+            EmitMapManagedEncode(
+                lines,
+                inner + "    ",
+                "Value",
+                "ValueSize",
+                vector.VectorPairValueKind,
+                ArrayElementOwnership.None,
+                "__hs_pair.Value",
+                $"__hs_vectorStrings{suffix}",
+                $"__hs_vectorStringCount{suffix}");
+            lines.Add(inner + $"    __hs_vectorEntries{suffix}[__hs_i{suffix}] = __hs_entry;");
+            lines.Add(inner + "}");
+            lines.Add(inner + $"var __hs_vectorData{suffix} = __hs_vectorEntries{suffix};");
+            EmitVectorBlocks(lines, parameters, stringIndices, vectorIndices, position + 1, inner, emitBody);
+            lines.Add(indent + "}");
+            lines.Add(indent + "finally");
+            lines.Add(indent + "{");
+            lines.Add(indent + $"    for (var __hs_i{suffix} = 0; __hs_i{suffix} < __hs_vectorStringCount{suffix}; __hs_i{suffix}++) {{ if (__hs_vectorStrings{suffix}[__hs_i{suffix}] != 0) {{ global::System.Runtime.InteropServices.Marshal.FreeHGlobal(__hs_vectorStrings{suffix}[__hs_i{suffix}]); }} }}");
+            lines.Add(indent + $"    global::System.Runtime.InteropServices.Marshal.FreeHGlobal((nint)__hs_vectorEntries{suffix});");
             lines.Add(indent + "}");
             return;
         }
 
-        EmitStringBuffers(lines, parameters, stringIndices, indent);
-        EmitStringFixes(lines, parameters, stringIndices, 0, indent, emitBody);
+        if (vector.VectorElementKind == AbiKind.StringView)
+        {
+            lines.Add(indent + $"var __hs_vectorItems{suffix} = {vectorName} ?? global::System.Array.Empty<string>();");
+            lines.Add(indent + $"var __hs_vectorBytes{suffix} = new byte[__hs_vectorItems{suffix}.Length][];");
+            lines.Add(indent + $"var __hs_vectorViews{suffix} = new global::Hosihikari.Bindings.Abi.StringView[__hs_vectorItems{suffix}.Length];");
+            lines.Add(indent + $"var __hs_vectorHandles{suffix} = new nint[__hs_vectorItems{suffix}.Length];");
+            lines.Add(indent + "try");
+            lines.Add(indent + "{");
+            var inner = indent + "    ";
+            lines.Add(inner + $"for (var __hs_i{suffix} = 0; __hs_i{suffix} < __hs_vectorItems{suffix}.Length; __hs_i{suffix}++)");
+            lines.Add(inner + "{");
+            lines.Add(inner + $"    __hs_vectorBytes{suffix}[__hs_i{suffix}] = global::System.Text.Encoding.UTF8.GetBytes(__hs_vectorItems{suffix}[__hs_i{suffix}] ?? string.Empty);");
+            lines.Add(inner + $"    var __hs_bytes = __hs_vectorBytes{suffix}[__hs_i{suffix}];");
+            lines.Add(inner + "    var __hs_ptr = (nint)global::System.Runtime.InteropServices.Marshal.AllocHGlobal(__hs_bytes.Length == 0 ? 1 : __hs_bytes.Length);");
+            lines.Add(inner + "    if (__hs_bytes.Length > 0) { global::System.Runtime.InteropServices.Marshal.Copy(__hs_bytes, 0, (nint)__hs_ptr, __hs_bytes.Length); }");
+            lines.Add(inner + $"    __hs_vectorHandles{suffix}[__hs_i{suffix}] = __hs_ptr;");
+            lines.Add(inner + $"    __hs_vectorViews{suffix}[__hs_i{suffix}] = new global::Hosihikari.Bindings.Abi.StringView {{ Data = (byte*)__hs_ptr, Size = (nuint)__hs_bytes.Length }};");
+            lines.Add(inner + "}");
+            lines.Add(inner + $"fixed (global::Hosihikari.Bindings.Abi.StringView* __hs_vectorData{suffix} = __hs_vectorViews{suffix})");
+            lines.Add(inner + "{");
+            EmitVectorBlocks(lines, parameters, stringIndices, vectorIndices, position + 1, inner + "    ", emitBody);
+            lines.Add(inner + "}");
+            lines.Add(indent + "}");
+            lines.Add(indent + "finally");
+            lines.Add(indent + "{");
+            lines.Add(indent + $"    for (var __hs_i{suffix} = 0; __hs_i{suffix} < __hs_vectorHandles{suffix}.Length; __hs_i{suffix}++) {{ if (__hs_vectorHandles{suffix}[__hs_i{suffix}] != 0) {{ global::System.Runtime.InteropServices.Marshal.FreeHGlobal((nint)__hs_vectorHandles{suffix}[__hs_i{suffix}]); }} }}");
+            lines.Add(indent + "}");
+            return;
+        }
+
+        if (vector.VectorElementKind == AbiKind.Opaque)
+        {
+            lines.Add(indent + $"var __hs_vectorItems{suffix} = {vectorName};");
+            lines.Add(indent + $"var __hs_vectorHandles{suffix} = new nint[__hs_vectorItems{suffix}?.Length ?? 0];");
+            lines.Add(indent + $"for (var __hs_i{suffix} = 0; __hs_i{suffix} < __hs_vectorHandles{suffix}.Length; __hs_i{suffix}++)");
+            lines.Add(indent + "{");
+            lines.Add(indent + $"    __hs_vectorHandles{suffix}[__hs_i{suffix}] = __hs_vectorItems{suffix}![__hs_i{suffix}]?.Handle ?? 0;");
+            lines.Add(indent + "}");
+            lines.Add(indent + $"fixed (nint* __hs_vectorHandleData{suffix} = __hs_vectorHandles{suffix})");
+            lines.Add(indent + "{");
+            lines.Add(indent + $"    var __hs_vectorData{suffix} = (void**)__hs_vectorHandleData{suffix};");
+            EmitVectorBlocks(lines, parameters, stringIndices, vectorIndices, position + 1, indent + "    ", emitBody);
+            lines.Add(indent + "}");
+            return;
+        }
+
+        var elementType = AbiPlan.CSharpType(vector.VectorElementKind);
+        lines.Add(indent + $"fixed ({elementType}* __hs_vectorData{suffix} = {vectorName})");
+        lines.Add(indent + "{");
+        EmitVectorBlocks(lines, parameters, stringIndices, vectorIndices, position + 1, indent + "    ", emitBody);
+        lines.Add(indent + "}");
     }
 
     private static void EmitStringBuffers(

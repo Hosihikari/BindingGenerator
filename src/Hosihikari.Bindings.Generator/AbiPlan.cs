@@ -1526,7 +1526,6 @@ internal sealed class AbiPlan
         }
 
         var parameters = new List<AbiParameter>();
-        var vectorParameters = 0;
         foreach (var parameter in constructor.Signature.Parameters)
         {
             if (!TryMapParameter(
@@ -1552,16 +1551,6 @@ internal sealed class AbiPlan
                 // The shim would have to bind a temporary string to a mutable reference.
                 reason = "constructors do not accept mutable string references";
                 return false;
-            }
-
-            if (abiParameter.IsVector)
-            {
-                vectorParameters++;
-                if (vectorParameters > 1)
-                {
-                    reason = "constructors accept at most one vector parameter";
-                    return false;
-                }
             }
 
             if (abiParameter.Kind == AbiKind.Opaque
@@ -1723,7 +1712,6 @@ internal sealed class AbiPlan
         }
 
         var parameters = new List<AbiParameter>();
-        var vectorParameters = 0;
         foreach (var parameter in method.Signature.Parameters)
         {
             if (!TryMapParameter(
@@ -1748,16 +1736,6 @@ internal sealed class AbiPlan
             {
                 reason = "methods do not accept mutable string references";
                 return false;
-            }
-
-            if (abiParameter.IsVector)
-            {
-                vectorParameters++;
-                if (vectorParameters > 1)
-                {
-                    reason = "methods accept at most one vector parameter";
-                    return false;
-                }
             }
 
             parameters.Add(abiParameter);
