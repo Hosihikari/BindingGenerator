@@ -203,6 +203,8 @@ internal sealed class AbiFunction
     public ArrayElementOwnership MapValueOwnership { get; init; }
     public string? MapValueNativeType { get; init; }
     public bool ReturnNullable { get; init; }
+    public bool CreateViaBorrowedHolder { get; init; }
+    public bool DestroyViaBorrowedHolder { get; init; }
     public bool ReturnExpected { get; init; }
     public string? ExpectedErrorType { get; init; }
     public bool NeedsPresenceFlag => ReturnOptional || ReturnExpected;
@@ -621,9 +623,9 @@ internal sealed class AbiPlan
                 continue;
             }
 
-            // A class that stores a string_view/reference field cannot be safely created from
-            // managed memory: the native object would outlive the caller's buffer. Its existing
-            // handles can still be read through real getters.
+            // A class that stores a string_view/reference field keeps pointers into its
+            // constructor arguments. The shim backs those arguments with holder-owned strings
+            // so the native object remains valid after the call.
             var ownsBorrowedString = declarationMembers.Any(member =>
                 member.Kind == "field"
                 && member.Type is not null
@@ -666,10 +668,6 @@ internal sealed class AbiPlan
                 {
                     reason = "the constructor is pure virtual";
                 }
-                else if (ownsBorrowedString)
-                {
-                    reason = "the class owns a borrowed string field";
-                }
                 else if (!destructorAccessible)
                 {
                     reason = "the class has no accessible destructor";
@@ -678,7 +676,7 @@ internal sealed class AbiPlan
                 {
                     reason = "the class is abstract";
                 }
-                else if (hasAbstractTemplateArgument)
+                else if (hasAbstractTemplateArgument && !ownsBorrowedString)
                 {
                     reason = "the class has an abstract template argument";
                 }
@@ -695,6 +693,7 @@ internal sealed class AbiPlan
                         publicDeclarationsByQualifiedName,
                         declarationNames,
                         destroyableDeclarationIds,
+                        ownsBorrowedString,
                         enumUnderlyingByName,
                         allowOwnedByValue,
                         variants,
@@ -714,7 +713,7 @@ internal sealed class AbiPlan
                 || (allowOwnedByValue && destroyableDeclarationIds.Contains(declaration.Id));
             if (hasDestroy)
             {
-                functions.Add(BuildDestroy(declaration, declarationNames));
+                functions.Add(BuildDestroy(declaration, declarationNames, ownsBorrowedString));
             }
             else
             {
@@ -1499,6 +1498,7 @@ internal sealed class AbiPlan
         IReadOnlyDictionary<string, DeclarationRecord> declarationsByQualifiedName,
         IReadOnlyDictionary<string, DeclarationName> declarationNames,
         IReadOnlySet<string> destroyableDeclarationIds,
+        bool ownsBorrowedString,
         IReadOnlyDictionary<string, string> enumUnderlyingByName,
         bool linkCarrier,
         VariantRegistry variants,
@@ -1571,6 +1571,28 @@ internal sealed class AbiPlan
             parameters.Add(abiParameter);
         }
 
+        if (ownsBorrowedString)
+        {
+            var stringParameters = parameters
+                .Select((parameter, index) => (Parameter: parameter, Type: constructor.Signature.Parameters[index].Type))
+                .Where(pair => pair.Parameter.Kind == AbiKind.StringView)
+                .ToList();
+            if (stringParameters.Count == 0)
+            {
+                reason = "the class stores borrowed strings but the constructor has no string parameter";
+                return false;
+            }
+
+            foreach (var pair in stringParameters)
+            {
+                if (!IsSafeBorrowedStringParameter(pair.Type))
+                {
+                    reason = "the class stores borrowed strings and the constructor takes a string by value";
+                    return false;
+                }
+            }
+        }
+
         function = new AbiFunction
         {
             CppName = "hs_create_" + CSharpNaming.ShortHash(constructor.Id),
@@ -1585,8 +1607,41 @@ internal sealed class AbiPlan
             ReturnKind = AbiKind.Opaque,
             NativeReturnType = "void*",
             Parameters = parameters,
+            CreateViaBorrowedHolder = ownsBorrowedString,
         };
         return true;
+    }
+
+    private static bool IsSafeBorrowedStringParameter(string type)
+    {
+        var text = type.Trim();
+        if (IsStringViewType(text))
+        {
+            return true;
+        }
+
+        if (IsPointerType(text) && text.Contains("char", StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        if (!IsReferenceType(text) || !IsConstType(text) || IsRValueReference(text))
+        {
+            return false;
+        }
+
+        var stripped = text;
+        if (stripped.StartsWith("const ", StringComparison.Ordinal))
+        {
+            stripped = stripped["const ".Length..].TrimStart();
+        }
+
+        while (stripped.EndsWith("&", StringComparison.Ordinal))
+        {
+            stripped = stripped[..^1].TrimEnd();
+        }
+
+        return IsStringType(stripped);
     }
 
     private static bool CanPassMutableReference(
@@ -1614,7 +1669,8 @@ internal sealed class AbiPlan
 
     private static AbiFunction BuildDestroy(
         DeclarationRecord declaration,
-        IReadOnlyDictionary<string, DeclarationName> declarationNames) =>
+        IReadOnlyDictionary<string, DeclarationName> declarationNames,
+        bool borrowed) =>
         new()
         {
             CppName = "hs_destroy_" + CSharpNaming.ShortHash(declaration.Id),
@@ -1625,6 +1681,7 @@ internal sealed class AbiPlan
             ClassName = declarationNames[declaration.Id],
             ReturnKind = AbiKind.Void,
             NativeReturnType = "void",
+            DestroyViaBorrowedHolder = borrowed,
         };
 
     private static bool TryBuildMethod(

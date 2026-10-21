@@ -171,6 +171,7 @@ internal static class ShimEmitter
             "#include <filesystem>",
             "#include <functional>",
             "#include <memory>",
+            "#include <mutex>",
             "#include <new>",
             "#include <optional>",
             "#include <stdexcept>",
@@ -318,6 +319,48 @@ internal static class ShimEmitter
         source.Add("std::weak_ptr<T> hs_weak_from_handle(HosihikariSharedHandle handle)");
         source.Add("{");
         source.Add("    return std::weak_ptr<T>(hs_shared_from_handle<T>(handle));");
+        source.Add("}");
+        source.Add("");
+        source.Add("template <class T>");
+        source.Add("struct hs_borrowed_holder");
+        source.Add("{");
+        source.Add("    std::vector<std::string> strings;");
+        source.Add("    std::unique_ptr<T> value;");
+        source.Add("};");
+        source.Add("");
+        source.Add("struct hs_borrowed_entry");
+        source.Add("{");
+        source.Add("    void* holder;");
+        source.Add("    void (*release)(void*);");
+        source.Add("};");
+        source.Add("");
+        source.Add("inline std::mutex hs_borrowedMutex;");
+        source.Add("inline std::unordered_map<void*, hs_borrowed_entry> hs_borrowedRegistry;");
+        source.Add("");
+        source.Add("inline void hs_register_borrowed(void* target, void* holder, void (*release)(void*))");
+        source.Add("{");
+        source.Add("    std::lock_guard<std::mutex> lock(hs_borrowedMutex);");
+        source.Add("    hs_borrowedRegistry[target] = hs_borrowed_entry{holder, release};");
+        source.Add("}");
+        source.Add("");
+        source.Add("template <class T>");
+        source.Add("void hs_destroy_borrowed_or_delete(void* target)");
+        source.Add("{");
+        source.Add("    void* holder = nullptr;");
+        source.Add("    void (*release)(void*) = nullptr;");
+        source.Add("    {");
+        source.Add("        std::lock_guard<std::mutex> lock(hs_borrowedMutex);");
+        source.Add("        auto it = hs_borrowedRegistry.find(target);");
+        source.Add("        if (it != hs_borrowedRegistry.end())");
+        source.Add("        {");
+        source.Add("            holder = it->second.holder;");
+        source.Add("            release = it->second.release;");
+        source.Add("            hs_borrowedRegistry.erase(it);");
+        source.Add("        }");
+        source.Add("    }");
+        source.Add("");
+        source.Add("    if (release) { release(holder); }");
+        source.Add("    else { delete static_cast<T*>(target); }");
         source.Add("}");
         source.Add("");
         source.Add("template <class T>");
@@ -757,11 +800,23 @@ internal static class ShimEmitter
                     break;
                 }
 
+                if (function.CreateViaBorrowedHolder)
+                {
+                    foreach (var line in EmitBorrowedCreate(function))
+                    {
+                        yield return line;
+                    }
+
+                    break;
+                }
+
                 yield return $"    return new {function.ClassCppName}({string.Join(", ", BuildNativeArguments(function))});";
                 break;
 
             case AbiFunctionKind.Destroy:
-                yield return $"    delete static_cast<{function.ClassCppName}*>({SelfParameter});";
+                yield return function.DestroyViaBorrowedHolder
+                    ? $"    hs_destroy_borrowed_or_delete<{function.ClassCppName}>({SelfParameter});"
+                    : $"    delete static_cast<{function.ClassCppName}*>({SelfParameter});";
                 break;
 
             case AbiFunctionKind.Get:
@@ -1134,6 +1189,50 @@ internal static class ShimEmitter
             _ => $"std::in_place_index<{alternative.Index}>, static_cast<{alternative.NativeType}>(value)",
         };
         yield return $"    return static_cast<void*>(new {native}({construct}));";
+    }
+
+    private static IEnumerable<string> EmitBorrowedCreate(AbiFunction function)
+    {
+        const string holder = "hs_borrowed";
+        yield return $"    auto* {holder} = new hs_borrowed_holder<{function.ClassCppName}>();";
+        var callArguments = new List<string>();
+        var stringOrdinal = 0;
+        for (var index = 0; index < function.Parameters.Count; index++)
+        {
+            var parameter = function.Parameters[index];
+            if (parameter.Kind == AbiKind.StringView)
+            {
+                var name = CppParameterName(parameter, index);
+                yield return $"    {holder}->strings.emplace_back({name}_data, {name}_size);";
+                callArguments.Add(BorrowedStringCallExpression(parameter, holder, stringOrdinal));
+                stringOrdinal++;
+            }
+            else
+            {
+                callArguments.Add(NativeArgument(function, parameter, index));
+            }
+        }
+
+        yield return $"    {holder}->value = std::make_unique<{function.ClassCppName}>({string.Join(", ", callArguments)});";
+        yield return $"    auto* hs_target = {holder}->value.get();";
+        yield return $"    hs_register_borrowed(hs_target, {holder}, [](void* hs_holder) {{ delete static_cast<hs_borrowed_holder<{function.ClassCppName}>*>(hs_holder); }});";
+        yield return "    return hs_target;";
+    }
+
+    private static string BorrowedStringCallExpression(AbiParameter parameter, string holder, int ordinal)
+    {
+        if (AbiPlan.IsStringViewType(parameter.NativeType))
+        {
+            return $"std::string_view({holder}->strings[{ordinal}])";
+        }
+
+        if (AbiPlan.IsPointerType(parameter.NativeType)
+            || parameter.NativeType.Contains("char*", StringComparison.Ordinal))
+        {
+            return $"{holder}->strings[{ordinal}].c_str()";
+        }
+
+        return $"{holder}->strings[{ordinal}]";
     }
 
     private static IEnumerable<string> EmitVariantRead(AbiFunction function)
