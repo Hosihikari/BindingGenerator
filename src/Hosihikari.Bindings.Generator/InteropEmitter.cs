@@ -954,7 +954,7 @@ internal static class InteropEmitter
                 if (method.ArrayElementKind == AbiKind.StringView)
                 {
                     lines.Add(indent + "var __hs_items = (global::Hosihikari.Bindings.Abi.StringView*)__hs_view.Data;");
-                    lines.Add(indent + "var __hs_result = new string[checked((int)__hs_view.Size)];");
+                    lines.Add(indent + "var __hs_result = __hs_view.Size == 0 ? global::System.Array.Empty<string>() : new string[checked((int)__hs_view.Size)];");
                     lines.Add(indent + "for (var __hs_i = 0; __hs_i < __hs_result.Length; __hs_i++)");
                     lines.Add(indent + "{");
                     lines.Add(indent + "    __hs_result[__hs_i] = global::System.Text.Encoding.UTF8.GetString(__hs_items[__hs_i].Data, checked((int)__hs_items[__hs_i].Size));");
@@ -964,7 +964,7 @@ internal static class InteropEmitter
                 else if (method.ArrayElementKind == AbiKind.Shared)
                 {
                     lines.Add(indent + "var __hs_items = (global::Hosihikari.Bindings.Abi.SharedHandleData*)__hs_view.Data;");
-                    lines.Add(indent + "var __hs_result = new global::Hosihikari.Bindings.Abi.SharedHandle[checked((int)__hs_view.Size)];");
+                    lines.Add(indent + "var __hs_result = __hs_view.Size == 0 ? global::System.Array.Empty<global::Hosihikari.Bindings.Abi.SharedHandle>() : new global::Hosihikari.Bindings.Abi.SharedHandle[checked((int)__hs_view.Size)];");
                     lines.Add(indent + "for (var __hs_i = 0; __hs_i < __hs_result.Length; __hs_i++)");
                     lines.Add(indent + "{");
                     lines.Add(indent + "    __hs_result[__hs_i] = global::Hosihikari.Bindings.Abi.SharedHandle.FromNative(__hs_items[__hs_i])!;");
@@ -976,7 +976,7 @@ internal static class InteropEmitter
                     var nullableElement = method.ArrayElementOwnership == ArrayElementOwnership.OptionalRecordCopy;
                     var wrapper = method.ArrayElementWrapperType!;
                     lines.Add(indent + "var __hs_items = (void**)__hs_view.Data;");
-                    lines.Add(indent + $"var __hs_result = new {wrapper}{(nullableElement ? "?" : "")}[checked((int)__hs_view.Size)];");
+                    lines.Add(indent + $"var __hs_result = __hs_view.Size == 0 ? global::System.Array.Empty<{wrapper}>() : new {wrapper}{(nullableElement ? "?" : "")}[checked((int)__hs_view.Size)];");
                     lines.Add(indent + "for (var __hs_i = 0; __hs_i < __hs_result.Length; __hs_i++)");
                     lines.Add(indent + "{");
                     if (nullableElement)
@@ -995,7 +995,7 @@ internal static class InteropEmitter
                 else
                 {
                     var elementType = AbiPlan.CSharpType(method.ArrayElementKind);
-                    lines.Add(indent + $"var __hs_result = new {elementType}[checked((int)__hs_view.Size)];");
+                    lines.Add(indent + $"var __hs_result = __hs_view.Size == 0 ? global::System.Array.Empty<{elementType}>() : new {elementType}[checked((int)__hs_view.Size)];");
                     lines.Add(indent + "if (__hs_view.Size > 0)");
                     lines.Add(indent + "{");
                     lines.Add(indent + $"    new global::System.ReadOnlySpan<{elementType}>(__hs_view.Data, checked((int)__hs_view.Size)).CopyTo(__hs_result);");
