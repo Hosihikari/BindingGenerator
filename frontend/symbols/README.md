@@ -1,6 +1,6 @@
-# Symbol IR prototype (Bedrock 1.21.3)
+# Symbol IR frontend (Bedrock 1.21.3)
 
-Extracts a prototype symbol-level IR from a publics-only PDB and an ELF symbol table. It exists to establish the third API surface without header assumptions; the formal IR schema is not changed yet.
+Extracts a symbol-level IR from a publics-only PDB and an ELF symbol table. It exists to establish the third API surface without header assumptions. `--output` writes the prototype JSON; `--ir-output` writes formal IR 1.4.0 shards and a manifest.
 
 ## Inputs
 
@@ -20,7 +20,12 @@ Extracts a prototype symbol-level IR from a publics-only PDB and an ELF symbol t
   -Classes Actor,BlockPos
 ```
 
-The script builds `hosihikari-symbol-ir-frontend` and writes a single JSON document. The JSON is a prototype, not `hosihikari.bindings.ir/1`.
+The script builds `hosihikari-symbol-ir-frontend` and writes a single prototype JSON document. Add `-IrOutput <dir>` to write `hosihikari.bindings.ir/1` 1.4.0 shards plus `ir-manifest.json`:
+
+```powershell
+./frontend/run-symbols.ps1 -Pdb <pdb> -Exe <pe> -Elf <debug> -IrOutput artifacts/symbol-ir/ir -NoPrototype
+dotnet run --project ../src/Hosihikari.Bindings.Generator/Hosihikari.Bindings.Generator.csproj -c Release -- validate-ir artifacts/symbol-ir/ir/ir-manifest.json artifacts/symbol-ir/ir
+```
 
 ## What the symbols provide
 

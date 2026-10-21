@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <map>
 #include <optional>
@@ -17,6 +18,7 @@
 #include <string>
 #include <vector>
 
+#include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/BinaryFormat/ELF.h"
 #include "llvm/DebugInfo/CodeView/SymbolDeserializer.h"
@@ -33,6 +35,7 @@
 #include "llvm/Support/Error.h"
 #include "llvm/Support/Format.h"
 #include "llvm/Support/JSON.h"
+#include "llvm/Support/SHA256.h"
 #include "llvm/Support/raw_ostream.h"
 
 using namespace llvm;
@@ -44,6 +47,7 @@ struct Inputs {
     std::string Exe;
     std::string Elf;
     std::string Output;
+    std::string IrOutput;
     std::string Version = "1.21.3";
     std::vector<std::string> Classes;
 };
@@ -265,7 +269,19 @@ ParsedMethod parseDemangled(const std::string& Demangled, const std::string& Cla
     }
 
     const std::string Marker = ClassName + "::";
-    size_t MarkerPosition = Text.find(Marker);
+    size_t MarkerPosition = std::string::npos;
+    size_t MarkerDepth = 0;
+    for (size_t Index = 0; Index + Marker.size() <= Text.size(); ++Index) {
+        char Character = Text[Index];
+        if (Character == '<' || Character == '(' || Character == '[') {
+            ++MarkerDepth;
+        } else if (Character == '>' || Character == ')' || Character == ']') {
+            --MarkerDepth;
+        } else if (MarkerDepth == 0 && Text.compare(Index, Marker.size(), Marker) == 0) {
+            MarkerPosition = Index;
+            break;
+        }
+    }
     if (MarkerPosition == std::string::npos) {
         return Result;
     }
@@ -634,6 +650,317 @@ json::Object buildMethodJson(const std::string& Key, const Configuration& Window
     return Object;
 }
 
+struct MergedMethod {
+    std::string Key;
+    const Method* Win = nullptr;
+    const Method* Lin = nullptr;
+    std::string ReturnType;
+    std::string Access = "unknown";
+    bool Virtual = false;
+    bool Static = false;
+    bool Ctor = false;
+    bool Dtor = false;
+};
+
+std::vector<MergedMethod> mergeMethods(const Configuration& Windows, const Configuration& Linux, const std::string& ClassName) {
+    std::set<std::string> Keys;
+    for (const auto& [Key, Method] : Windows.Methods) {
+        if (Method.ClassName == ClassName) {
+            Keys.insert(Key);
+        }
+    }
+    for (const auto& [Key, Method] : Linux.Methods) {
+        if (Method.ClassName == ClassName) {
+            Keys.insert(Key);
+        }
+    }
+
+    std::vector<MergedMethod> Result;
+    for (const auto& Key : Keys) {
+        MergedMethod Merged;
+        Merged.Key = Key;
+        auto WinIt = Windows.Methods.find(Key);
+        if (WinIt != Windows.Methods.end()) {
+            Merged.Win = &WinIt->second;
+        }
+        auto LinIt = Linux.Methods.find(Key);
+        if (LinIt != Linux.Methods.end()) {
+            Merged.Lin = &LinIt->second;
+        }
+        const Method& Base = Merged.Win != nullptr ? *Merged.Win : *Merged.Lin;
+        Merged.ReturnType = Merged.Win != nullptr ? Merged.Win->ReturnType : Merged.Lin->ReturnType;
+        Merged.Access = Merged.Win != nullptr ? Merged.Win->Access : Merged.Lin->Access;
+        Merged.Virtual = (Merged.Win != nullptr && Merged.Win->Virtual) || (Merged.Lin != nullptr && Merged.Lin->Virtual);
+        Merged.Static = Merged.Win != nullptr && Merged.Win->Static;
+        Merged.Ctor = Base.Ctor;
+        Merged.Dtor = Base.Dtor;
+        Result.push_back(std::move(Merged));
+    }
+    return Result;
+}
+
+std::string effectiveReturnType(const MergedMethod& Method) {
+    if (Method.Ctor || Method.Dtor) {
+        return "void";
+    }
+    return Method.ReturnType.empty() ? "unknown" : Method.ReturnType;
+}
+
+std::string methodKind(const MergedMethod& Method) {
+    if (Method.Ctor) {
+        return "constructor";
+    }
+    if (Method.Dtor) {
+        return "destructor";
+    }
+    if (startsWith(Method.Key.substr(Method.Key.find("::") + 2), "operator")) {
+        return "operator";
+    }
+    return "method";
+}
+
+std::string memberId(const std::string& ClassName, const MergedMethod& MergedMethodInfo) {
+    const Method& Base = MergedMethodInfo.Win != nullptr ? *MergedMethodInfo.Win : *MergedMethodInfo.Lin;
+    std::string Signature = effectiveReturnType(MergedMethodInfo) + "(";
+    for (const auto& Parameter : Base.Parameters) {
+        Signature += Parameter;
+        Signature += ",";
+    }
+    Signature += ")";
+    return "bedrock:" + ClassName + "@" + ClassName + "::" + Base.Name + "#" + Signature;
+}
+
+json::Object makeMemberRecord(
+    const std::string& ClassName,
+    const std::string& DeclarationId,
+    const std::string& ConfigurationId,
+    const MergedMethod& Merged,
+    const Method& MethodInfo) {
+    json::Object Record;
+    Record["recordType"] = "member";
+    Record["id"] = memberId(ClassName, Merged);
+    Record["declarationId"] = DeclarationId;
+    Record["configuration"] = ConfigurationId;
+    Record["kind"] = methodKind(Merged);
+    Record["name"] = MethodInfo.Name;
+    Record["access"] = Merged.Access;
+    Record["static"] = Merged.Static;
+    Record["virtual"] = Merged.Virtual;
+    Record["pure"] = false;
+    Record["inline"] = false;
+    Record["defined"] = true;
+    Record["consteval"] = false;
+    if (MethodInfo.VtableIndex >= 0) {
+        Record["vtableIndex"] = MethodInfo.VtableIndex;
+    }
+    Record["symbol"] = MethodInfo.Symbol;
+    Record["address"] = MethodInfo.Va;
+    if (MethodInfo.Rva != MethodInfo.Va) {
+        Record["rva"] = MethodInfo.Rva;
+    }
+
+    json::Object Signature;
+    Signature["canonical"] = ClassName + "::" + MethodInfo.Name;
+    Signature["returnType"] = effectiveReturnType(Merged);
+    json::Array Parameters;
+    for (size_t Index = 0; Index < MethodInfo.Parameters.size(); ++Index) {
+        json::Object Parameter;
+        Parameter["name"] = "arg" + std::to_string(Index);
+        Parameter["type"] = MethodInfo.Parameters[Index];
+        Parameters.emplace_back(std::move(Parameter));
+    }
+    Signature["parameters"] = std::move(Parameters);
+    Signature["variadic"] = false;
+    Signature["const"] = MethodInfo.Const;
+    Record["signature"] = std::move(Signature);
+    return Record;
+}
+
+std::string sha256Text(StringRef Text) {
+    auto Digest = SHA256::hash(ArrayRef<uint8_t>(
+        reinterpret_cast<const uint8_t*>(Text.data()), Text.size()));
+    return "sha256:" + toHex(ArrayRef<uint8_t>(Digest.data(), Digest.size()));
+}
+
+std::string recordKey(const json::Object& Record) {
+    if (auto* Id = Record.get("id")) {
+        if (auto Text = Id->getAsString()) {
+            return Text->str();
+        }
+    }
+    if (auto* DeclarationId = Record.get("declarationId")) {
+        if (auto Text = DeclarationId->getAsString()) {
+            return Text->str();
+        }
+    }
+    return "";
+}
+
+std::string serializeRecords(std::vector<json::Object>& Records) {
+    std::sort(Records.begin(), Records.end(), [](const json::Object& Left, const json::Object& Right) {
+        return recordKey(Left) < recordKey(Right);
+    });
+    std::string Text;
+    raw_string_ostream Stream(Text);
+    for (auto& Record : Records) {
+        Stream << json::Value(std::move(Record)) << "\n";
+    }
+    Stream.flush();
+    return Text;
+}
+
+bool writeFile(const std::filesystem::path& Path, StringRef Text) {
+    std::error_code Error;
+    raw_fd_ostream Output(Path.string(), Error);
+    if (Error) {
+        errs() << "cannot write " << Path.string() << ": " << Error.message() << "\n";
+        return false;
+    }
+    Output << Text;
+    return true;
+}
+
+bool emitIr(const Inputs& Inputs, const Configuration& Windows, const Configuration& Linux, uint64_t ImageBase) {
+    std::filesystem::create_directories(Inputs.IrOutput);
+    const auto OutputDirectory = std::filesystem::path(Inputs.IrOutput);
+
+    std::vector<json::Object> WinRecords;
+    std::vector<json::Object> LinuxRecords;
+    int64_t WinMembers = 0;
+    int64_t LinuxMembers = 0;
+
+    for (const auto& ClassName : Inputs.Classes) {
+        const std::string DeclarationId = "bedrock:" + ClassName;
+        json::Object Declaration;
+        Declaration["recordType"] = "declaration";
+        Declaration["id"] = DeclarationId;
+        Declaration["surface"] = "bedrock";
+        Declaration["kind"] = "class";
+        Declaration["qualifiedName"] = ClassName;
+        Declaration["access"] = "public";
+        Declaration["linkage"] = "external";
+        Declaration["abstract"] = false;
+        Declaration["copyConstructible"] = false;
+        Declaration["inline"] = false;
+        Declaration["defined"] = false;
+        Declaration["consteval"] = false;
+        WinRecords.push_back(std::move(Declaration));
+
+        for (const auto& [ConfigId, Config] : {std::pair<const char*, const Configuration*>{ "win-x64-server", &Windows },
+                                               { "linux-x64-server", &Linux }}) {
+            json::Object Variant;
+            Variant["recordType"] = "variant";
+            Variant["declarationId"] = DeclarationId;
+            Variant["configuration"] = ConfigId;
+            Variant["availability"] = "present";
+            auto Vtable = Config->VtableSymbols.find(ClassName);
+            if (Vtable != Config->VtableSymbols.end()) {
+                uint64_t Address = Config->VtableAddresses.at(ClassName);
+                Variant["symbol"] = Vtable->second;
+                if (Config == &Windows) {
+                    Variant["address"] = Address + ImageBase;
+                    Variant["rva"] = Address;
+                } else {
+                    Variant["address"] = Address;
+                }
+            }
+            (Config == &Windows ? WinRecords : LinuxRecords).push_back(std::move(Variant));
+        }
+
+        auto Merged = mergeMethods(Windows, Linux, ClassName);
+        for (const auto& Method : Merged) {
+            if (Method.Win != nullptr) {
+                WinRecords.push_back(makeMemberRecord(ClassName, DeclarationId, "win-x64-server", Method, *Method.Win));
+                ++WinMembers;
+            }
+            if (Method.Lin != nullptr) {
+                LinuxRecords.push_back(makeMemberRecord(ClassName, DeclarationId, "linux-x64-server", Method, *Method.Lin));
+                ++LinuxMembers;
+            }
+        }
+    }
+
+    const int64_t WinRecordCount = static_cast<int64_t>(WinRecords.size());
+    const int64_t LinuxRecordCount = static_cast<int64_t>(LinuxRecords.size());
+    const std::string WinText = serializeRecords(WinRecords);
+    const std::string LinuxText = serializeRecords(LinuxRecords);
+    if (!writeFile(OutputDirectory / "win-x64-server.jsonl", WinText)
+        || !writeFile(OutputDirectory / "linux-x64-server.jsonl", LinuxText)) {
+        return false;
+    }
+
+    json::Object Manifest;
+    Manifest["schema"] = "hosihikari.bindings.ir/1";
+    Manifest["irVersion"] = "1.4.0";
+    json::Object Frontend;
+    Frontend["name"] = "symbols";
+    Frontend["version"] = "0.1.0";
+    Frontend["llvm"] = "23.1.3";
+    Manifest["frontend"] = std::move(Frontend);
+
+    json::Array Sources;
+    for (const auto& Source : {Inputs.Pdb, Inputs.Elf}) {
+        json::Object Pin;
+        Pin["surface"] = "bedrock";
+        Pin["repo"] = "local";
+        Pin["commit"] = Inputs.Version;
+        Pin["path"] = Source;
+        Sources.emplace_back(std::move(Pin));
+    }
+    Manifest["sources"] = std::move(Sources);
+
+    const std::string EmptyHash = sha256Text("");
+    json::Array Configurations;
+    for (const auto& [Id, Os] : {std::pair<const char*, const char*>{ "win-x64-server", "windows" },
+                                 { "linux-x64-server", "linux" }}) {
+        json::Object Configuration;
+        Configuration["id"] = Id;
+        Configuration["os"] = Os;
+        Configuration["arch"] = "x64";
+        Configuration["target"] = "server";
+        Configuration["defines"] = json::Array();
+        Configuration["definesHash"] = EmptyHash;
+        Configurations.emplace_back(std::move(Configuration));
+    }
+    Manifest["configurations"] = std::move(Configurations);
+
+    json::Array Shards;
+    for (const auto& [Id, Path, Text, RecordCount] : {
+             std::tuple<const char*, const char*, const std::string*, int64_t>{
+                 "win-x64-server", "win-x64-server.jsonl", &WinText, WinRecordCount },
+             std::tuple<const char*, const char*, const std::string*, int64_t>{
+                 "linux-x64-server", "linux-x64-server.jsonl", &LinuxText, LinuxRecordCount }}) {
+        json::Object Shard;
+        Shard["surface"] = "bedrock";
+        Shard["configuration"] = Id;
+        Shard["module"] = "bedrock";
+        Shard["path"] = Path;
+        Shard["sha256"] = sha256Text(*Text);
+        Shard["sha256Compressed"] = sha256Text(*Text);
+        Shard["records"] = RecordCount;
+        Shards.emplace_back(std::move(Shard));
+    }
+    Manifest["shards"] = std::move(Shards);
+
+    json::Object Diagnostics;
+    Diagnostics["errors"] = 0;
+    Diagnostics["warnings"] = 0;
+    Diagnostics["shardsWithErrors"] = json::Array();
+    Manifest["diagnostics"] = std::move(Diagnostics);
+
+    json::Object Counts;
+    Counts["declarations"] = static_cast<int64_t>(Inputs.Classes.size());
+    Counts["variants"] = static_cast<int64_t>(Inputs.Classes.size() * 2);
+    Counts["members"] = WinMembers + LinuxMembers;
+    Manifest["counts"] = std::move(Counts);
+
+    std::string ManifestText;
+    raw_string_ostream ManifestStream(ManifestText);
+    ManifestStream << json::Value(std::move(Manifest)) << "\n";
+    ManifestStream.flush();
+    return writeFile(OutputDirectory / "ir-manifest.json", ManifestText);
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -655,6 +982,8 @@ int main(int argc, char** argv) {
             Inputs.Elf = next();
         } else if (Argument == "--output") {
             Inputs.Output = next();
+        } else if (Argument == "--ir-output") {
+            Inputs.IrOutput = next();
         } else if (Argument == "--version") {
             Inputs.Version = next();
         } else if (Argument == "--classes") {
@@ -677,10 +1006,10 @@ int main(int argc, char** argv) {
         }
     }
 
-    if (Inputs.Pdb.empty() || Inputs.Exe.empty() || Inputs.Elf.empty() || Inputs.Output.empty()
-        || Inputs.Classes.empty()) {
+    if (Inputs.Pdb.empty() || Inputs.Exe.empty() || Inputs.Elf.empty()
+        || (Inputs.Output.empty() && Inputs.IrOutput.empty()) || Inputs.Classes.empty()) {
         errs() << "usage: hosihikari-symbol-ir-frontend --pdb <pdb> --exe <pe> --elf <debug> "
-                  "--output <file> [--version <id>] --classes <A,B>\n";
+                  "[--output <prototype.json>] [--ir-output <dir>] [--version <id>] --classes <A,B>\n";
         return 2;
     }
 
@@ -726,6 +1055,13 @@ int main(int argc, char** argv) {
     }
     for (auto& [ClassName, Symbol] : Linux.VtableSymbols) {
         mapVtableAddresses(Linux, Linux.VtableAddresses[ClassName], false, 0, nullptr, Elf);
+    }
+
+    if (!Inputs.IrOutput.empty() && !emitIr(Inputs, Windows, Linux, Coff->getImageBase())) {
+        return 1;
+    }
+    if (Inputs.Output.empty()) {
+        return 0;
     }
 
     json::Object Root;

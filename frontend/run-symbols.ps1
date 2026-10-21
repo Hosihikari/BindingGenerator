@@ -6,6 +6,8 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$Elf,
     [string]$Output = "artifacts/symbol-ir/prototype.json",
+    [string]$IrOutput = "",
+    [switch]$NoPrototype,
     [string]$Version = "1.21.3",
     [string[]]$Classes = @("Actor", "BlockPos"),
     [string]$LlvmRoot = "$env:LOCALAPPDATA\Temp\hosihikari-llvm\clang+llvm-23.1.3-x86_64-pc-windows-msvc",
@@ -18,8 +20,25 @@ $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $Pdb = (Resolve-Path $Pdb).Path
 $Exe = (Resolve-Path $Exe).Path
 $Elf = (Resolve-Path $Elf).Path
-$Output = if ([System.IO.Path]::IsPathRooted($Output)) { $Output } else { Join-Path $RepoRoot $Output }
-New-Item -ItemType Directory -Force -Path (Split-Path $Output -Parent) | Out-Null
+$Output = if ($NoPrototype) {
+    ""
+} elseif ([string]::IsNullOrWhiteSpace($Output)) {
+    ""
+} elseif ([System.IO.Path]::IsPathRooted($Output)) {
+    $Output
+} else {
+    Join-Path $RepoRoot $Output
+}
+if (-not [string]::IsNullOrWhiteSpace($Output)) {
+    New-Item -ItemType Directory -Force -Path (Split-Path $Output -Parent) | Out-Null
+}
+if (-not [string]::IsNullOrWhiteSpace($IrOutput)) {
+    $IrOutput = if ([System.IO.Path]::IsPathRooted($IrOutput)) { $IrOutput } else { Join-Path $RepoRoot $IrOutput }
+    New-Item -ItemType Directory -Force -Path $IrOutput | Out-Null
+}
+if ([string]::IsNullOrWhiteSpace($Output) -and [string]::IsNullOrWhiteSpace($IrOutput)) {
+    throw "Specify -Output, -IrOutput, or both."
+}
 
 if (-not $SkipBuild) {
     & (Join-Path $PSScriptRoot "build.ps1") -LlvmRoot $LlvmRoot
@@ -30,16 +49,29 @@ if (-not (Test-Path $Frontend)) {
     throw "Symbol frontend was not built: $Frontend"
 }
 
-& $Frontend `
-    --pdb $Pdb `
-    --exe $Exe `
-    --elf $Elf `
-    --output $Output `
-    --version $Version `
-    --classes ($Classes -join ",")
+$Arguments = @(
+    "--pdb", $Pdb,
+    "--exe", $Exe,
+    "--elf", $Elf,
+    "--version", $Version,
+    "--classes", ($Classes -join ",")
+)
+if (-not [string]::IsNullOrWhiteSpace($Output)) {
+    $Arguments += @("--output", $Output)
+}
+if (-not [string]::IsNullOrWhiteSpace($IrOutput)) {
+    $Arguments += @("--ir-output", $IrOutput)
+}
+
+& $Frontend @Arguments
 
 if ($LASTEXITCODE -ne 0) {
     throw "symbol frontend exited with $LASTEXITCODE"
 }
 
-Write-Output "Wrote $Output"
+if (-not [string]::IsNullOrWhiteSpace($Output)) {
+    Write-Output "Wrote $Output"
+}
+if (-not [string]::IsNullOrWhiteSpace($IrOutput)) {
+    Write-Output "Wrote IR under $IrOutput"
+}
