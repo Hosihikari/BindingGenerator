@@ -18,8 +18,10 @@
 #include "llvm/Support/raw_ostream.h"
 
 #include <algorithm>
+#include <cctype>
 #include <fstream>
 #include <map>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
@@ -46,6 +48,251 @@ std::string normalizePath(std::string Path) {
         Path.pop_back();
     }
     return Path;
+}
+
+void splitConfiguration(const std::string& Id, std::string& Os, std::string& Arch, std::string& Target) {
+    size_t First = Id.find('-');
+    size_t Second = First == std::string::npos ? std::string::npos : Id.find('-', First + 1);
+    Os = First == std::string::npos ? Id : Id.substr(0, First);
+    Arch = First == std::string::npos
+        ? "x64"
+        : Id.substr(First + 1, Second == std::string::npos ? std::string::npos : Second - First - 1);
+    Target = Second == std::string::npos ? "server" : Id.substr(Second + 1);
+    if (Os == "win") {
+        Os = "windows";
+    }
+    if (Arch.empty()) {
+        Arch = "x64";
+    }
+    if (Target.empty()) {
+        Target = "server";
+    }
+}
+
+bool isTypeWordChar(char C) {
+    return std::isalnum(static_cast<unsigned char>(C)) != 0 || C == '_';
+}
+
+// Targets whose `long` is 64-bit spell the same fixed-width types differently from
+// Windows. Rewrite those spellings to the Windows form so declaration ids, table
+// field hashes, and coverage stay identical across platforms.
+std::string normalize64BitLongTypes(llvm::StringRef Text) {
+    std::string Out;
+    size_t I = 0;
+    auto peekWord = [&](size_t& Position) {
+        while (Position < Text.size() && Text[Position] == ' ') {
+            ++Position;
+        }
+        size_t Start = Position;
+        while (Position < Text.size() && isTypeWordChar(Text[Position])) {
+            ++Position;
+        }
+        return Text.slice(Start, Position);
+    };
+
+    while (I < Text.size()) {
+        size_t Start = I;
+        while (I < Text.size() && isTypeWordChar(Text[I])) {
+            ++I;
+        }
+        if (Start == I) {
+            Out.push_back(Text[I]);
+            ++I;
+            continue;
+        }
+
+        llvm::StringRef Word = Text.slice(Start, I);
+        if (Word == "unsigned") {
+            size_t Next = I;
+            if (peekWord(Next) == "long") {
+                size_t After = Next;
+                if (peekWord(After) == "long") {
+                    Out += "unsigned long long";
+                    I = After;
+                } else {
+                    Out += "unsigned long long";
+                    I = Next;
+                }
+                continue;
+            }
+        }
+
+        if (Word == "long") {
+            size_t Next = I;
+            llvm::StringRef NextWord = peekWord(Next);
+            if (NextWord == "double") {
+                Out += "long";
+                continue;
+            }
+
+            Out += "long long";
+            if (NextWord == "long") {
+                I = Next;
+            }
+            continue;
+        }
+
+        Out += Word;
+    }
+
+    return Out;
+}
+
+std::pair<llvm::StringRef, llvm::StringRef> splitTopLevelArgument(llvm::StringRef Content) {
+    size_t Nested = 0;
+    for (size_t I = 0; I < Content.size(); ++I) {
+        char C = Content[I];
+        if (C == '<') {
+            ++Nested;
+        } else if (C == '>') {
+            --Nested;
+        } else if (C == ',' && Nested == 0) {
+            return {Content.slice(0, I).trim(), Content.drop_front(I + 1).trim()};
+        }
+    }
+    return {Content.trim(), llvm::StringRef()};
+}
+
+template <typename Builder>
+std::string replaceTemplateInstances(llvm::StringRef Text, llvm::StringRef Prefix, Builder Build) {
+    std::string Out;
+    size_t I = 0;
+    while (I < Text.size()) {
+        size_t Pos = Text.find(Prefix, I);
+        if (Pos == llvm::StringRef::npos) {
+            Out += Text.substr(I);
+            break;
+        }
+        Out += Text.substr(I, Pos - I);
+
+        size_t ContentStart = Pos + Prefix.size();
+        size_t Depth = 1;
+        size_t J = ContentStart;
+        for (; J < Text.size() && Depth > 0; ++J) {
+            if (Text[J] == '<') {
+                ++Depth;
+            } else if (Text[J] == '>') {
+                --Depth;
+            }
+        }
+        if (Depth != 0) {
+            Out += Text.substr(Pos);
+            break;
+        }
+
+        auto Replacement = Build(Text.slice(ContentStart, J - 1));
+        if (Replacement) {
+            Out += *Replacement;
+        } else {
+            Out += Text.substr(Pos, J - Pos);
+        }
+        I = J;
+    }
+    return Out;
+}
+
+std::string wrapNestedIterator(llvm::StringRef Outer, llvm::StringRef Inner, llvm::StringRef Element) {
+    std::string Out = Outer.str();
+    Out += Inner.str();
+    Out += Element.str();
+    Out += ">>>";
+    return Out;
+}
+
+// libstdc++ spells vector iterators as __gnu_cxx::__normal_iterator. Rewrite them to
+// the MSVC spelling so declaration ids and stub messages match the Windows IR.
+std::string normalizeGnuIteratorTypes(llvm::StringRef Text) {
+    return replaceTemplateInstances(
+        Text,
+        "__gnu_cxx::__normal_iterator<",
+        [](llvm::StringRef Content) -> std::optional<std::string> {
+            auto [Pointer, Container] = splitTopLevelArgument(Content);
+            constexpr llvm::StringLiteral VectorPrefix = "std::vector<";
+            if (!Container.starts_with(VectorPrefix) || !Container.ends_with(">")) {
+                return std::nullopt;
+            }
+            llvm::StringRef Element = Container.slice(VectorPrefix.size(), Container.size() - 1);
+            bool IsConst = Pointer.starts_with("const ");
+            return wrapNestedIterator(
+                IsConst ? "std::_Vector_const_iterator<" : "std::_Vector_iterator<",
+                "std::_Vector_val<std::_Simple_types<",
+                Element);
+        });
+}
+
+// Rewrite libstdc++ tree, list, and unordered-container iterators to the MSVC forms.
+std::string normalizeGnuStdIteratorTypes(std::string Text) {
+    Text = replaceTemplateInstances(
+        Text,
+        "std::_Rb_tree_const_iterator<",
+        [](llvm::StringRef Content) -> std::optional<std::string> {
+            return wrapNestedIterator(
+                "std::_Tree_const_iterator<",
+                "std::_Tree_val<std::_Tree_simple_types<",
+                Content.trim());
+        });
+    Text = replaceTemplateInstances(
+        Text,
+        "std::_Rb_tree_iterator<",
+        [](llvm::StringRef Content) -> std::optional<std::string> {
+            return wrapNestedIterator(
+                "std::_Tree_iterator<",
+                "std::_Tree_val<std::_Tree_simple_types<",
+                Content.trim());
+        });
+
+    auto toListIterator = [](llvm::StringRef Content, llvm::StringRef Outer) -> std::optional<std::string> {
+        llvm::StringRef Element = Content.trim();
+        if (Element.starts_with("std::_List_val<")) {
+            return std::nullopt;
+        }
+        return wrapNestedIterator(Outer, "std::_List_val<std::_List_simple_types<", Element);
+    };
+    Text = replaceTemplateInstances(
+        Text,
+        "std::_List_const_iterator<",
+        [&](llvm::StringRef Content) -> std::optional<std::string> {
+            return toListIterator(Content, "std::_List_const_iterator<");
+        });
+    Text = replaceTemplateInstances(
+        Text,
+        "std::_List_iterator<",
+        [&](llvm::StringRef Content) -> std::optional<std::string> {
+            return toListIterator(Content, "std::_List_iterator<");
+        });
+
+    auto toNodeIterator = [](llvm::StringRef Content, llvm::StringRef Outer) -> std::optional<std::string> {
+        auto [Element, Rest] = splitTopLevelArgument(Content);
+        return wrapNestedIterator(Outer, "std::_List_val<std::_List_simple_types<", Element);
+    };
+    Text = replaceTemplateInstances(
+        Text,
+        "std::__detail::_Node_const_iterator<",
+        [&](llvm::StringRef Content) -> std::optional<std::string> {
+            return toNodeIterator(Content, "std::_List_const_iterator<");
+        });
+    Text = replaceTemplateInstances(
+        Text,
+        "std::__detail::_Node_iterator<",
+        [&](llvm::StringRef Content) -> std::optional<std::string> {
+            return toNodeIterator(Content, "std::_List_iterator<");
+        });
+    return Text;
+}
+
+// Windows elides the default duration of system_clock::time_point, while libstdc++
+// prints its nanosecond duration explicitly. Collapse it to the Windows spelling.
+std::string normalizeSystemClockTimePoint(std::string Text) {
+    const std::string Long =
+        "std::chrono::time_point<std::chrono::system_clock, "
+        "std::chrono::duration<long long, std::ratio<1, 1000000000>>>";
+    const std::string Short = "std::chrono::time_point<std::chrono::system_clock>";
+    size_t Pos = 0;
+    while ((Pos = Text.find(Long, Pos)) != std::string::npos) {
+        Text.replace(Pos, Long.size(), Short);
+        Pos += Short.size();
+    }
+    return Text;
 }
 
 bool parseOptions(int argc, char** argv, Options& Opt) {
@@ -468,11 +715,11 @@ private:
                     Argument.print(Policy, OS, true);
                 }
                 OS.flush();
-                return Template->getQualifiedNameAsString() + "<" + Arguments + ">";
+                return Template->getQualifiedNameAsString() + "<" + normalizePlatformTypeText(Arguments) + ">";
             }
         }
 
-        return Decl->getQualifiedNameAsString();
+        return normalizePlatformTypeText(Decl->getQualifiedNameAsString());
     }
 
     std::string idFor(const Decl* Decl, const std::string& ParentId) const {
@@ -574,10 +821,23 @@ private:
         return true;
     }
 
+    std::string normalizePlatformTypeText(std::string Text) const {
+        bool Long64 = Ctx.getTargetInfo().getLongWidth() == 64;
+        if (Long64) {
+            Text = normalize64BitLongTypes(Text);
+        }
+        Text = normalizeGnuIteratorTypes(Text);
+        Text = normalizeGnuStdIteratorTypes(Text);
+        if (Long64) {
+            Text = normalizeSystemClockTimePoint(std::move(Text));
+        }
+        return Text;
+    }
+
     std::string typeString(QualType Type) const {
         PrintingPolicy Policy(Ctx.getLangOpts());
         Policy.SuppressTagKeyword = true;
-        return Type.getCanonicalType().getAsString(Policy);
+        return normalizePlatformTypeText(Type.getCanonicalType().getAsString(Policy));
     }
 
     llvm::json::Object makeSource(SourceLocation Location) const {
@@ -616,7 +876,7 @@ private:
 
     llvm::json::Object makeSignature(FunctionDecl* Decl) const {
         llvm::json::Object Signature;
-        Signature["canonical"] = Decl->getQualifiedNameAsString();
+        Signature["canonical"] = normalizePlatformTypeText(Decl->getQualifiedNameAsString());
         Signature["returnType"] = typeString(Decl->getReturnType());
         Signature["variadic"] = Decl->isVariadic();
 
@@ -857,7 +1117,7 @@ private:
         Object["declarationId"] = DeclId;
         Object["configuration"] = Opt.Configuration;
         Object["kind"] = Kind;
-        Object["name"] = Member->getNameAsString();
+        Object["name"] = normalizePlatformTypeText(Member->getNameAsString());
         Object["access"] = accessString(Member->getAccess());
         Object["static"] = Static;
 
@@ -916,7 +1176,8 @@ private:
             Object["consteval"] = Method->isConsteval();
             Object["signature"] = makeSignature(Method);
             if (Method->begin_overridden_methods() != Method->end_overridden_methods()) {
-                Object["overrideOf"] = (*Method->begin_overridden_methods())->getQualifiedNameAsString();
+                Object["overrideOf"] = normalizePlatformTypeText(
+                    (*Method->begin_overridden_methods())->getQualifiedNameAsString());
             }
         }
 
@@ -996,7 +1257,7 @@ int main(int argc, char** argv) {
 
     llvm::json::Object Frontend;
     Frontend["name"] = "libtooling";
-    Frontend["version"] = "0.3.0";
+    Frontend["version"] = "0.4.0";
     Frontend["llvm"] = "23.1.3";
     Manifest["frontend"] = std::move(Frontend);
 
@@ -1014,10 +1275,14 @@ int main(int argc, char** argv) {
     llvm::json::Array Configurations;
     {
         llvm::json::Object Configuration;
+        std::string Os;
+        std::string Arch;
+        std::string Target;
+        splitConfiguration(Opt.Configuration, Os, Arch, Target);
         Configuration["id"] = Opt.Configuration;
-        Configuration["os"] = "windows";
-        Configuration["arch"] = "x64";
-        Configuration["target"] = "server";
+        Configuration["os"] = Os;
+        Configuration["arch"] = Arch;
+        Configuration["target"] = Target;
         Configuration["defines"] = llvm::json::Array();
         Configuration["definesHash"] = DefinesHash;
         Configurations.emplace_back(std::move(Configuration));

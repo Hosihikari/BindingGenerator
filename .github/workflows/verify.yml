@@ -80,3 +80,133 @@ jobs:
       - name: Run link-carrier smoke
         working-directory: Generator
         run: dotnet run --project tests/RealShimSmoke/RealShimSmoke.csproj -c Release -p:InteropDirectory=${{ github.workspace }}/Generator/artifacts/emitted-linked/interop -- ${{ github.workspace }}/Generator/artifacts/liblinked-shim.so
+
+  endstone-linux-ir:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generator
+        uses: actions/checkout@v4
+        with:
+          path: Generator
+
+      - name: IR contract
+        uses: actions/checkout@v4
+        with:
+          repository: Hosihikari/Bindings.Ir
+          path: Ir
+
+      - name: ABI contract
+        uses: actions/checkout@v4
+        with:
+          repository: Hosihikari/Bindings.Abi
+          path: Abi
+
+      - name: Endstone bindings
+        uses: actions/checkout@v4
+        with:
+          repository: Hosihikari/Bindings.Endstone
+          path: EndstoneBindings
+          fetch-depth: 1
+
+      - name: Endstone headers
+        uses: actions/checkout@v4
+        with:
+          repository: EndstoneMC/endstone
+          ref: v0.11.14
+          path: endstone
+          fetch-depth: 1
+
+      - name: expected-lite
+        uses: actions/checkout@v4
+        with:
+          repository: martinmoene/expected-lite
+          ref: v0.9.0
+          path: expected-lite
+          fetch-depth: 1
+
+      - name: nlohmann_json
+        uses: actions/checkout@v4
+        with:
+          repository: nlohmann/json
+          ref: v3.11.3
+          path: nlohmann-json
+          fetch-depth: 1
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Cache LLVM
+        id: llvm-cache
+        uses: actions/cache@v4
+        with:
+          path: llvm.tar.xz
+          key: llvm-23.1.3-linux-x64
+
+      - name: Download LLVM
+        if: steps.llvm-cache.outputs.cache-hit != 'true'
+        run: |
+          curl -fsSL -o llvm.tar.xz https://github.com/llvm/llvm-project/releases/download/llvmorg-23.1.3/LLVM-23.1.3-Linux-X64.tar.xz
+
+      - name: Extract LLVM
+        run: |
+          mkdir -p llvm
+          tar -xf llvm.tar.xz -C llvm --strip-components=1
+          rm -rf llvm/share llvm/lib/clang/*/lib
+
+      - name: Build frontend
+        working-directory: Generator
+        run: ./frontend/build.sh --llvm-root "${{ github.workspace }}/llvm"
+
+      - name: Generate Linux IR
+        working-directory: Generator
+        run: |
+          ./frontend/run-endstone.sh \
+            --endstone-root "${{ github.workspace }}/endstone" \
+            --llvm-root "${{ github.workspace }}/llvm" \
+            --expected-lite-include "${{ github.workspace }}/expected-lite/include" \
+            --nlohmann-include "${{ github.workspace }}/nlohmann-json/include" \
+            --compat-include "${{ github.workspace }}/EndstoneBindings/native/BindingShim/linux-compat.h" \
+            --output artifacts/endstone-linux-ir
+
+      - name: Upload Linux IR
+        uses: actions/upload-artifact@v4
+        with:
+          name: endstone-linux-ir
+          path: Generator/artifacts/endstone-linux-ir
+          retention-days: 3
+
+      - name: Emit from Linux IR
+        working-directory: Generator
+        run: |
+          dotnet run --project src/Hosihikari.Bindings.Generator/Hosihikari.Bindings.Generator.csproj -c Release -- \
+            emit artifacts/endstone-linux-ir/ir-manifest.json \
+            artifacts/endstone-linux-ir \
+            artifacts/emitted-linux \
+            --abi-header ../Abi/native/hosihikari_abi.h \
+            --native-root ../endstone \
+            --virtual-dispatch
+
+      - name: Compare generated Interop
+        working-directory: Generator
+        run: diff -ru ../EndstoneBindings/src/Hosihikari.Bindings.Endstone.Interop/Generated artifacts/emitted-linux/interop/endstone
+
+      - name: Compile Linux BindingShim
+        working-directory: Generator
+        run: |
+          g++ -std=c++20 -shared -fPIC -O2 -pthread \
+            -include ../EndstoneBindings/native/BindingShim/linux-compat.h \
+            -I ../endstone/include \
+            -I ../endstone/include/endstone \
+            -I artifacts/endstone-generated/include \
+            -I ../expected-lite/include \
+            -I ../nlohmann-json/include \
+            artifacts/emitted-linux/shim/linux-x64-server/endstone/binding_table.cpp \
+            -o artifacts/libendstone-linux-shim.so \
+            -ldl
+
+      - name: Inspect exported entry points
+        working-directory: Generator
+        run: |
+          nm -D --defined-only artifacts/libendstone-linux-shim.so \
+            | grep -E 'hosihikari_(get_binding_table_v1|endstone_get_server)'

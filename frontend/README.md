@@ -7,7 +7,7 @@ The native frontend parses the three header sets and emits the versioned IR defi
 Pin LLVM/Clang **23.1.3**.
 
 - **Windows**: the LLVM MSI is toolchain-only and does not contain `clang/Tooling` headers, `clangTooling.lib` or `ClangConfig.cmake`. Use the official `clang+llvm-23.1.3-x86_64-pc-windows-msvc.tar.xz` (or build LLVM), and point `CMAKE_PREFIX_PATH` at the extracted tree.
-- **Linux**: use the official 23.1.3 tarball or build LLVM with `LLVM_ENABLE_PROJECTS=clang`. Distribution `libclang-23-dev` may be a different patch level; do not mix.
+- **Linux**: use the official `LLVM-23.1.3-Linux-X64.tar.xz`. Distribution `libclang-23-dev` may be a different patch level; do not mix.
 
 ## Build
 
@@ -15,7 +15,11 @@ Pin LLVM/Clang **23.1.3**.
 ./frontend/build.ps1 -LlvmRoot <llvm-root>
 ```
 
-The script expects the extracted `clang+llvm-23.1.3-x86_64-pc-windows-msvc` tree and uses the Visual Studio 18 generator. A manual CMake invocation works too:
+```shell
+./frontend/build.sh --llvm-root <llvm-root>
+```
+
+The Windows script expects the extracted `clang+llvm-23.1.3-x86_64-pc-windows-msvc` tree and uses the Visual Studio 18 generator. The Linux script uses Ninja when available and builds `build/frontend-linux/hosihikari-ir-frontend`. A manual CMake invocation works too:
 
 ```shell
 cmake -S frontend -B build/frontend -G "Visual Studio 18 2026" -A x64 -DCMAKE_PREFIX_PATH=<llvm-root>
@@ -31,9 +35,24 @@ cmake --build build/frontend --config Release
 
 `run-local.ps1` runs the frontend on `ll/api/event/Event.h`. `run-umbrella.ps1` builds an umbrella from the module's headers, reuses the include paths and defines from the LeviLamina `compile_commands.json`, and validates the produced IR with the .NET CLI.
 
+For the Endstone Linux configuration:
+
+```shell
+./frontend/run-endstone.sh \
+  --endstone-root <checkout> \
+  --llvm-root <llvm-root> \
+  --expected-lite-include <expected-lite/include> \
+  --nlohmann-include <nlohmann-json/include> \
+  --output artifacts/endstone-linux-ir
+```
+
+The script emits `linux-x64-server` IR and validates it with the .NET CLI. On libstdc++, `--compat-include` can force-include headers such as the Endstone `std::floorf` compatibility shim from `Hosihikari/Bindings.Endstone`.
+
 ## Current state
 
 The frontend parses the full `src/ll/api` umbrella plus the `src-server/ll/api` overlays (1,530 declarations / 6,145 members in the current full IR) and the smaller `ll/api/event` module. It emits JSONL IR plus `ir-manifest.json` and validates the result through the .NET CLI. The visitor covers classes/structs/unions, fields, static fields, methods, constructors, destructors, operators, enums, namespace-scope functions, and concrete template instantiations. Public record types referenced by value from filtered signatures are emitted with their constructors, destructor, and fields even when declared outside the module filter. Macro provenance is inferred from export/deprecated/nodiscard attributes; uninstantiated template declarations and partial specializations are skipped.
+
+Type canonical strings are platform-neutral for identity purposes. On targets where `long` is 64-bit, canonical `long`/`unsigned long` spellings are rewritten to `long long`/`unsigned long long`, matching the Windows spelling of `std::int64_t`, `std::uint64_t`, and `size_t`. Declaration ids, table field hashes, and coverage therefore stay identical between `win-x64-server` and `linux-x64-server` IR.
 
 ## Full IR
 
@@ -53,4 +72,6 @@ python frontend/merge-ir.py --base <base-ir> --supplement <module-ir> --output <
 
 `merge-ir.py` copies only records matching the requested type/kind, skips ids already present, and recomputes the shard hash, record count, and manifest counts.
 
-The frontend is not part of the .NET CI job; it requires the pinned LLVM toolchain, zlib/zstd, and the MSVC/SDK headers. `build.ps1`, `run-local.ps1`, and `run-umbrella.ps1` cover the local Windows slice.
+The frontend is not part of the .NET fixture job; it requires the pinned LLVM toolchain, zlib/zstd, and the MSVC/SDK or libstdc++ headers. The `endstone-linux-ir` CI job builds it on Linux, generates `linux-x64-server` IR from Endstone 0.11.14, emits from that IR, and compiles the resulting shim.
+
+`build.ps1`, `run-local.ps1`, and `run-umbrella.ps1` cover the local Windows slice; `build.sh` and `run-endstone.sh` cover the Linux slice.

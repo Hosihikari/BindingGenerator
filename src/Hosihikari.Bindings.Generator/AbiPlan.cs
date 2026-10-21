@@ -2152,8 +2152,13 @@ internal sealed class AbiPlan
             return false;
         }
 
-        var normalized = sourceFile.Replace('\\', '/').TrimStart('/');
-        var fullPath = Path.GetFullPath(Path.Combine(nativeRoot, normalized));
+        var normalized = sourceFile.Replace('\\', '/');
+        if (Path.IsPathRooted(normalized) && File.Exists(normalized))
+        {
+            return true;
+        }
+
+        var fullPath = Path.GetFullPath(Path.Combine(nativeRoot, normalized.TrimStart('/')));
         return File.Exists(fullPath);
     }
 
