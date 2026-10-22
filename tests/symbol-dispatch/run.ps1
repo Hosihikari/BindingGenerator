@@ -63,7 +63,7 @@ try {
         --symbol-dispatch --target-module "fixture-bds.dll"
 
     $ShimSource = Join-Path $DispatchDirectory "shim\win-x64-server\bedrock\binding_table.cpp"
-    Invoke-Msvc "cl /nologo /std:c++20 /EHsc /utf-8 /LD `"$ShimSource`" /I `"$(Split-Path $ShimSource -Parent)`" /Fo:`"$Output\\`" /Fd:`"$Output\\shim-cl.pdb`" /Fe:`"$ShimDll`""
+    Invoke-Msvc "cl /nologo /std:c++20 /EHsc /utf-8 /MD /LD `"$ShimSource`" /I `"$(Split-Path $ShimSource -Parent)`" /Fo:`"$Output\\`" /Fd:`"$Output\\shim-cl.pdb`" /Fe:`"$ShimDll`""
 
     dotnet run --project (Join-Path $RepoRoot "tests\SymbolDispatchSmoke\SymbolDispatchSmoke.csproj") -c Release -- $FixtureDll $ShimDll
 }

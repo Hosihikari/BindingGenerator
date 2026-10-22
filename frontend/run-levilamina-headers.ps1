@@ -46,7 +46,13 @@ $Headers = @(
     "mc/enums/UIScalingRules.h",
     "mc/enums/VRControllerType.h",
     "mc/network/NetworkConnectionType.h",
-    "mc/deps/core/secure_storage/SecureStorageKey.h"
+    "mc/deps/core/secure_storage/SecureStorageKey.h",
+    "mc/nbt/CompoundTag.h",
+    "mc/nbt/ListTag.h",
+    "mc/deps/core/secure_storage/SecureStorage.h",
+    "mc/world/level/LevelStorageManager.h",
+    "mc/deps/core/common/bedrock/PlatformRuntimeInfo.h",
+    "mc/world/level/pathfinder/Path.h"
 )
 foreach ($header in $Headers) {
     if (-not (Test-Path (Join-Path $SourceRoot $header))) {

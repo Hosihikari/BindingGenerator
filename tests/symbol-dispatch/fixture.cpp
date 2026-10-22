@@ -57,6 +57,21 @@ struct not_null
 };
 }
 
+struct FixtureHeavy
+{
+    std::string text;
+
+    explicit FixtureHeavy(std::string value);
+    FixtureHeavy(FixtureHeavy const& other);
+    ~FixtureHeavy();
+};
+
+FixtureHeavy::FixtureHeavy(std::string value) : text(std::move(value)) {}
+
+FixtureHeavy::FixtureHeavy(FixtureHeavy const& other) : text(other.text) {}
+
+FixtureHeavy::~FixtureHeavy() = default;
+
 struct FixturePair
 {
     int x;
@@ -85,6 +100,9 @@ public:
     int sumValues(std::vector<int> const& values) const;
     FixturePair pair() const;
     int sumPair(FixturePair value) const;
+    FixtureHeavy heavy(int value) const;
+    std::unique_ptr<FixtureHeavy> uniqueHeavy(int value) const;
+    int heavySize(FixtureHeavy const& value) const;
     std::optional<int> maybeNumber(bool present) const;
     std::optional<FixtureValue> maybeValue(bool present) const;
     int sumValueOptional(std::optional<FixtureValue> value) const;
@@ -171,6 +189,21 @@ int FixtureBlock::sumValues(std::vector<int> const& values) const
 FixturePair FixtureBlock::pair() const
 {
     return FixturePair(x_, y_);
+}
+
+FixtureHeavy FixtureBlock::heavy(int value) const
+{
+    return FixtureHeavy(std::to_string(value));
+}
+
+std::unique_ptr<FixtureHeavy> FixtureBlock::uniqueHeavy(int value) const
+{
+    return std::make_unique<FixtureHeavy>(std::to_string(value));
+}
+
+int FixtureBlock::heavySize(FixtureHeavy const& value) const
+{
+    return static_cast<int>(value.text.size());
 }
 
 int FixtureBlock::sumPair(FixturePair value) const

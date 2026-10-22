@@ -291,6 +291,10 @@ internal static class ShimEmitter
         source.Add("    for (std::size_t i = 0; i < count; ++i) { result.emplace_back(data[i].data, data[i].size); }");
         source.Add("    return result;");
         source.Add("}");
+        source.Add("struct hs_unique_void_deleter");
+        source.Add("{");
+        source.Add("    void operator()(void*) const noexcept {}");
+        source.Add("};");
         source.Add("struct hs_shared_holder_base");
         source.Add("{");
         source.Add("    virtual ~hs_shared_holder_base() = default;");
@@ -2079,6 +2083,20 @@ internal static class ShimEmitter
 
         AppendSymbolResolution(source, configuration.Os, targetModule);
 
+        source.Add("");
+        source.Add("inline void* hs_allocate(std::size_t size, std::size_t align)");
+        source.Add("{");
+        source.Add("    return align > 16");
+        source.Add("        ? ::operator new(size, std::align_val_t(align))");
+        source.Add("        : ::operator new(size);");
+        source.Add("}");
+        source.Add("inline void hs_deallocate(void* pointer, std::size_t align) noexcept");
+        source.Add("{");
+        source.Add("    if (pointer == nullptr) { return; }");
+        source.Add("    if (align > 16) { ::operator delete(pointer, std::align_val_t(align)); }");
+        source.Add("    else { ::operator delete(pointer); }");
+        source.Add("}");
+
         var stringDestructor = StringDestructor(manifest, configuration);
         if (stringDestructor is not null)
         {
@@ -2132,6 +2150,10 @@ internal static class ShimEmitter
         source.Add("    }");
         source.Add("    return result;");
         source.Add("}");
+        source.Add("struct hs_unique_void_deleter");
+        source.Add("{");
+        source.Add("    void operator()(void*) const noexcept {}");
+        source.Add("};");
         source.Add("struct hs_shared_holder_base");
         source.Add("{");
         source.Add("    virtual ~hs_shared_holder_base() = default;");
@@ -2616,9 +2638,14 @@ internal static class ShimEmitter
         if (function.Kind == AbiFunctionKind.Destroy)
         {
             entry = members.Values.FirstOrDefault(member =>
-                string.Equals(member.DeclarationId, function.DeclarationId, StringComparison.Ordinal)
-                && string.Equals(member.Kind, "destructor", StringComparison.Ordinal)
-                && string.Equals(member.Access, "public", StringComparison.Ordinal));
+                    string.Equals(member.DeclarationId, function.DeclarationId, StringComparison.Ordinal)
+                    && string.Equals(member.Kind, "destructor", StringComparison.Ordinal)
+                    && string.Equals(member.Access, "public", StringComparison.Ordinal)
+                    && HasDispatchSymbol(member))
+                ?? members.Values.FirstOrDefault(member =>
+                    string.Equals(member.DeclarationId, function.DeclarationId, StringComparison.Ordinal)
+                    && string.Equals(member.Kind, "destructor", StringComparison.Ordinal)
+                    && string.Equals(member.Access, "public", StringComparison.Ordinal));
         }
         else if (function.MemberId is not null)
         {
@@ -2704,12 +2731,13 @@ internal static class ShimEmitter
         if (function.Kind == AbiFunctionKind.Create)
         {
             var align = layout!.Align > 0 ? layout.Align : 8;
-            yield return $"    auto* const hs_memory = static_cast<void*>(::operator new(static_cast<std::size_t>({layout.Size.ToString(CultureInfo.InvariantCulture)}), std::align_val_t({align.ToString(CultureInfo.InvariantCulture)})));";
+            yield return $"    auto* const hs_memory = static_cast<void*>(hs_allocate(static_cast<std::size_t>({layout.Size.ToString(CultureInfo.InvariantCulture)}), {align.ToString(CultureInfo.InvariantCulture)}));";
         }
 
         var ownedRecordReturn = function.Kind == AbiFunctionKind.Method
             && function.ReturnKind == AbiKind.Opaque
             && function.ReturnOwned
+            && !function.ReturnUniquePtr
             && !function.ReturnOptional
             && !function.NativeReturnType.TrimEnd().EndsWith("*", StringComparison.Ordinal)
             && !function.NativeReturnType.TrimEnd().EndsWith("&", StringComparison.Ordinal);
@@ -2895,10 +2923,12 @@ internal static class ShimEmitter
         var sharedReturnType = function.ReturnKind == AbiKind.Shared
             ? (function.SharedWrapper == SharedWrapperKind.WeakPtr ? "std::weak_ptr<void>" : "std::shared_ptr<void>")
             : null;
+        var uniquePtrReturn = function.ReturnUniquePtr;
         var manualOptionalSret = optionalReturnType is not null
             && string.Equals(configuration.Os, "windows", StringComparison.Ordinal);
-        var manualTypedSret = manualOptionalSret || sharedReturnType is not null;
-        var typedReturnType = optionalReturnType ?? sharedReturnType;
+        var manualTypedSret = manualOptionalSret || sharedReturnType is not null || uniquePtrReturn;
+        var typedReturnType = optionalReturnType ?? sharedReturnType
+            ?? (uniquePtrReturn ? "std::unique_ptr<void, hs_unique_void_deleter>" : null);
         if (manualTypedSret)
         {
             callReturn = "void";
@@ -2947,7 +2977,7 @@ internal static class ShimEmitter
             yield return "    auto const hs_fn = reinterpret_cast<HsFn>(hs_dtor);";
             yield return "    if (hs_fn != nullptr) { hs_fn(hs_self); }";
             var align = layout?.Align > 0 ? layout!.Align : 8;
-            yield return $"    ::operator delete(hs_self, std::align_val_t({align.ToString(CultureInfo.InvariantCulture)}));";
+            yield return $"    hs_deallocate(hs_self, {align.ToString(CultureInfo.InvariantCulture)});";
         }
         else
         {
@@ -3086,7 +3116,7 @@ internal static class ShimEmitter
                         yield return "    if (!*hs_hasValue) { return nullptr; }";
                     }
 
-                    yield return $"    auto* const hs_record = static_cast<void*>(::operator new(static_cast<std::size_t>({size}), std::align_val_t({align})));";
+                    yield return $"    auto* const hs_record = static_cast<void*>(hs_allocate(static_cast<std::size_t>({size}), {align}));";
                     yield return $"    std::memcpy(hs_record, hs_result->data, static_cast<std::size_t>({size}));";
                     if (manualOptionalSret)
                     {
@@ -3134,7 +3164,7 @@ internal static class ShimEmitter
             {
                 yield return $"    auto hs_value = {call};";
                 var align = returnLayout!.Align > 0 ? returnLayout.Align : 8;
-                yield return $"    auto* const hs_record = static_cast<void*>(::operator new(static_cast<std::size_t>({returnLayout.Size.ToString(CultureInfo.InvariantCulture)}), std::align_val_t({align.ToString(CultureInfo.InvariantCulture)})));";
+                yield return $"    auto* const hs_record = static_cast<void*>(hs_allocate(static_cast<std::size_t>({returnLayout.Size.ToString(CultureInfo.InvariantCulture)}), {align.ToString(CultureInfo.InvariantCulture)}));";
                 yield return $"    std::memcpy(hs_record, &hs_value, static_cast<std::size_t>({returnLayout.Size.ToString(CultureInfo.InvariantCulture)}));";
                 yield return "    return hs_record;";
             }
@@ -3185,7 +3215,7 @@ internal static class ShimEmitter
                             .ToString(CultureInfo.InvariantCulture);
                         yield return "    for (auto const& item : *hs_vectorResult)";
                         yield return "    {";
-                        yield return $"        auto* const hs_copy = static_cast<void*>(::operator new(static_cast<std::size_t>({size}), std::align_val_t({align})));";
+                        yield return $"        auto* const hs_copy = static_cast<void*>(hs_allocate(static_cast<std::size_t>({size}), {align}));";
                         yield return $"        std::memcpy(hs_copy, item.data, static_cast<std::size_t>({size}));";
                         yield return "        hs_arrayResult.push_back(hs_copy);";
                         yield return "    }";
@@ -3213,11 +3243,19 @@ internal static class ShimEmitter
                     yield return "    return HosihikariArrayView{hs_arrayResult.data(), hs_arrayResult.size()};";
                 }
             }
+            else if (function.ReturnUniquePtr)
+            {
+                yield return $"    {call};";
+                yield return "    auto& hs_unique = *reinterpret_cast<HsTypedResult*>(hs_typedStorage);";
+                yield return "    void* hs_result = hs_unique.release();";
+                yield return "    hs_unique.~HsTypedResult();";
+                yield return "    return hs_result;";
+            }
             else if (ownedRecordReturn)
             {
                 yield return $"    {call};";
                 var align = returnLayout!.Align > 0 ? returnLayout.Align : 8;
-                yield return $"    auto* const hs_record = static_cast<void*>(::operator new(static_cast<std::size_t>({returnLayout.Size.ToString(CultureInfo.InvariantCulture)}), std::align_val_t({align.ToString(CultureInfo.InvariantCulture)})));";
+                yield return $"    auto* const hs_record = static_cast<void*>(hs_allocate(static_cast<std::size_t>({returnLayout.Size.ToString(CultureInfo.InvariantCulture)}), {align.ToString(CultureInfo.InvariantCulture)}));";
                 if (returnNeedsCopy)
                 {
                     yield return "    using HsCopy = void (*)(void*, void*);";

@@ -72,6 +72,12 @@ struct Method {
     int VtableIndex = -1;
 };
 
+struct SupportSymbol {
+    std::string Symbol;
+    uint64_t Rva = 0;
+    uint64_t Address = 0;
+};
+
 struct RttiBase {
     std::string Name;
     int64_t Offset = 0;
@@ -87,6 +93,8 @@ struct Configuration {
     std::string StringDestructorSymbol;
     uint64_t StringDestructorRva = 0;
     uint64_t StringDestructorAddress = 0;
+    std::map<std::string, SupportSymbol> RecordDestructors;
+    std::map<std::string, SupportSymbol> RecordCopyConstructors;
     std::map<std::string, std::vector<RttiBase>> RttiBases;
     std::map<uint64_t, uint64_t> ElfRelocations;
     std::map<std::string, uint64_t> TypeInfoByName;
@@ -358,6 +366,93 @@ ParsedMethod parseDemangled(const std::string& Demangled, const std::string& Cla
     return Result;
 }
 
+bool isSameRecordType(std::string Type, const std::string& Record) {
+    Type = trim(Type);
+    while (Type.ends_with("&")) {
+        Type = trim(Type.substr(0, Type.size() - 1));
+    }
+    for (const char* Qualifier : {"const ", " const", "volatile ", " volatile"}) {
+        size_t Position;
+        while ((Position = Type.find(Qualifier)) != std::string::npos) {
+            Type.erase(Position, std::strlen(Qualifier));
+        }
+    }
+    Type = trim(Type);
+    for (const char* Keyword : {"class ", "struct ", "union ", "enum "}) {
+        if (startsWith(Type, Keyword)) {
+            Type = trim(Type.substr(std::strlen(Keyword)));
+        }
+    }
+    return Type == Record;
+}
+
+bool classifyRecordSupport(const std::string& Demangled, bool Windows,
+                           std::string& ClassName, bool& IsDestructor, bool& IsCopyConstructor) {
+    IsDestructor = false;
+    IsCopyConstructor = false;
+    std::string Text = trim(Demangled);
+    for (const char* Prefix : {"public: ", "protected: ", "private: "}) {
+        if (startsWith(Text, Prefix)) {
+            Text = std::string(Text).substr(std::strlen(Prefix));
+            break;
+        }
+    }
+    for (const char* Convention : {"__cdecl ", "__fastcall ", "__stdcall ", "__thiscall ", "__vectorcall ", "virtual "}) {
+        size_t Position;
+        while ((Position = Text.find(Convention)) != std::string::npos) {
+            Text.erase(Position, std::strlen(Convention));
+        }
+    }
+
+    size_t OpenParen = Text.find('(');
+    if (OpenParen == std::string::npos) {
+        return false;
+    }
+
+    std::string Head = trim(StringRef(Text).slice(0, OpenParen));
+    size_t Separator = Head.rfind("::");
+    if (Separator == std::string::npos) {
+        return false;
+    }
+
+    ClassName = trim(StringRef(Head).slice(0, Separator));
+    std::string Name = trim(Head.substr(Separator + 2));
+    size_t LastSeparator = ClassName.rfind("::");
+    std::string LastName = LastSeparator == std::string::npos
+        ? ClassName
+        : ClassName.substr(LastSeparator + 2);
+    if (Name == "~" + LastName) {
+        IsDestructor = true;
+        return true;
+    }
+    if (Name != LastName) {
+        return false;
+    }
+
+    ParsedMethod Parsed = parseDemangled(Text, ClassName, Windows);
+    if (!Parsed.Valid || !Parsed.Ctor || Parsed.Parameters.size() != 1) {
+        return false;
+    }
+    IsCopyConstructor = isSameRecordType(Parsed.Parameters[0], ClassName);
+    return IsCopyConstructor;
+}
+
+void addTypeTokens(const std::string& Text, std::set<std::string>& Tokens) {
+    std::string Current;
+    for (char Character : Text) {
+        auto Value = static_cast<unsigned char>(Character);
+        if (std::isalnum(Value) != 0 || Character == '_' || Character == ':') {
+            Current.push_back(Character);
+        } else if (!Current.empty()) {
+            Tokens.insert(Current);
+            Current.clear();
+        }
+    }
+    if (!Current.empty()) {
+        Tokens.insert(Current);
+    }
+}
+
 std::string makeKey(const ParsedMethod& Method) {
     std::string Key = Method.QualifiedName + "(";
     for (size_t Index = 0; Index < Method.Parameters.size(); ++Index) {
@@ -487,6 +582,14 @@ bool loadPdb(const Inputs& Inputs, const object::COFFObjectFile& Coff, Configura
     bool HadError = false;
     uint64_t ImageBase = Coff.getImageBase();
     uint64_t Seen = 0;
+    struct SupportCandidate {
+        std::string ClassName;
+        bool Destructor = false;
+        bool Copy = false;
+        std::string Symbol;
+        uint64_t Rva = 0;
+    };
+    std::vector<SupportCandidate> SupportCandidates;
 
     for (auto& Symbol : Symbols.getSymbols(&HadError)) {
         ++Seen;
@@ -503,6 +606,16 @@ bool loadPdb(const Inputs& Inputs, const object::COFFObjectFile& Coff, Configura
         }
 
         std::string Mangled = Public->Name.str();
+        if (Mangled.rfind("??0", 0) == 0 || Mangled.rfind("??1", 0) == 0) {
+            std::string Demangled = demangle(Mangled);
+            std::string ClassName;
+            bool IsDestructor = false;
+            bool IsCopy = false;
+            if (classifyRecordSupport(Demangled, true, ClassName, IsDestructor, IsCopy)) {
+                SupportCandidates.push_back(
+                    {ClassName, IsDestructor, IsCopy, Mangled, rvaForPublic(Coff, *Public)});
+            }
+        }
         if (Mangled == "??1?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QEAA@XZ") {
             Config.StringDestructorSymbol = Mangled;
             Config.StringDestructorRva = rvaForPublic(Coff, *Public);
@@ -544,6 +657,25 @@ bool loadPdb(const Inputs& Inputs, const object::COFFObjectFile& Coff, Configura
             uint64_t Rva = rvaForPublic(Coff, *Public);
             addMethod(Config, Parsed, Mangled, Rva, ImageBase + Rva);
             break;
+        }
+    }
+
+    std::set<std::string> ReferencedTypes;
+    for (const auto& [Key, Method] : Config.Methods) {
+        addTypeTokens(Method.ReturnType, ReferencedTypes);
+        for (const auto& Parameter : Method.Parameters) {
+            addTypeTokens(Parameter, ReferencedTypes);
+        }
+    }
+    for (const auto& Candidate : SupportCandidates) {
+        if (ReferencedTypes.find(Candidate.ClassName) == ReferencedTypes.end()) {
+            continue;
+        }
+        SupportSymbol Symbol{Candidate.Symbol, Candidate.Rva, ImageBase + Candidate.Rva};
+        if (Candidate.Destructor) {
+            Config.RecordDestructors[Candidate.ClassName] = Symbol;
+        } else if (Candidate.Copy) {
+            Config.RecordCopyConstructors[Candidate.ClassName] = Symbol;
         }
     }
 
@@ -737,6 +869,15 @@ bool loadElf(const Inputs& Inputs, const object::ObjectFile& Elf, Configuration&
         }
     }
 
+    struct SupportCandidate {
+        std::string ClassName;
+        bool Destructor = false;
+        bool Copy = false;
+        std::string Symbol;
+        uint64_t Address = 0;
+    };
+    std::vector<SupportCandidate> SupportCandidates;
+
     for (auto Symbol : Elf.symbols()) {
         auto Name = Symbol.getName();
         if (!Name) {
@@ -751,6 +892,20 @@ bool loadElf(const Inputs& Inputs, const object::ObjectFile& Elf, Configuration&
             continue;
         }
         uint64_t SymbolValue = *SymbolValueResult;
+        if (Mangled.rfind("_ZN", 0) == 0
+            && (Mangled.find("C1E") != std::string::npos
+                || Mangled.find("C2E") != std::string::npos
+                || Mangled.find("D1E") != std::string::npos
+                || Mangled.find("D2E") != std::string::npos)) {
+            std::string Demangled = demangle(Mangled);
+            std::string ClassName;
+            bool IsDestructor = false;
+            bool IsCopy = false;
+            if (classifyRecordSupport(Demangled, false, ClassName, IsDestructor, IsCopy)) {
+                SupportCandidates.push_back(
+                    {ClassName, IsDestructor, IsCopy, Mangled, SymbolValue});
+            }
+        }
         if (Mangled == "_ZNSt3__112basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEED1Ev"
             || Mangled == "_ZNSsD1Ev") {
             Config.StringDestructorSymbol = Mangled;
@@ -805,6 +960,25 @@ bool loadElf(const Inputs& Inputs, const object::ObjectFile& Elf, Configuration&
             uint64_t Address = SymbolValue;
             addMethod(Config, Parsed, Mangled, Address, Address);
             break;
+        }
+    }
+
+    std::set<std::string> ReferencedTypes;
+    for (const auto& [Key, Method] : Config.Methods) {
+        addTypeTokens(Method.ReturnType, ReferencedTypes);
+        for (const auto& Parameter : Method.Parameters) {
+            addTypeTokens(Parameter, ReferencedTypes);
+        }
+    }
+    for (const auto& Candidate : SupportCandidates) {
+        if (ReferencedTypes.find(Candidate.ClassName) == ReferencedTypes.end()) {
+            continue;
+        }
+        SupportSymbol Symbol{Candidate.Symbol, 0, Candidate.Address};
+        if (Candidate.Destructor) {
+            Config.RecordDestructors[Candidate.ClassName] = Symbol;
+        } else if (Candidate.Copy) {
+            Config.RecordCopyConstructors[Candidate.ClassName] = Symbol;
         }
     }
 
@@ -1250,6 +1424,63 @@ bool emitIr(const Inputs& Inputs, const Configuration& Windows, const Configurat
     }
     SupportSymbols["stdStringDestructor"] = std::move(StringDestructorConfigs);
     Manifest["supportSymbols"] = std::move(SupportSymbols);
+
+    std::set<std::string> RecordSupportNames;
+    for (const auto& [Name, Symbol] : Windows.RecordDestructors) {
+        RecordSupportNames.insert(Name);
+    }
+    for (const auto& [Name, Symbol] : Windows.RecordCopyConstructors) {
+        RecordSupportNames.insert(Name);
+    }
+    for (const auto& [Name, Symbol] : Linux.RecordDestructors) {
+        RecordSupportNames.insert(Name);
+    }
+    for (const auto& [Name, Symbol] : Linux.RecordCopyConstructors) {
+        RecordSupportNames.insert(Name);
+    }
+
+    json::Object RecordSupportJson;
+    for (const auto& Name : RecordSupportNames) {
+        json::Object Configs;
+        auto addConfig = [&](const char* ConfigId, const Configuration& Config) {
+            auto Destructor = Config.RecordDestructors.find(Name);
+            auto Copy = Config.RecordCopyConstructors.find(Name);
+            if (Destructor == Config.RecordDestructors.end()
+                && Copy == Config.RecordCopyConstructors.end()) {
+                return;
+            }
+
+            json::Object Entry;
+            if (Destructor != Config.RecordDestructors.end()) {
+                json::Object Value;
+                Value["symbol"] = Destructor->second.Symbol;
+                if (Destructor->second.Rva != 0) {
+                    Value["rva"] = Destructor->second.Rva;
+                }
+                Value["address"] = Destructor->second.Address;
+                Entry["destructor"] = std::move(Value);
+            }
+            if (Copy != Config.RecordCopyConstructors.end()) {
+                json::Object Value;
+                Value["symbol"] = Copy->second.Symbol;
+                if (Copy->second.Rva != 0) {
+                    Value["rva"] = Copy->second.Rva;
+                }
+                Value["address"] = Copy->second.Address;
+                Entry["copyConstructor"] = std::move(Value);
+            }
+
+            Configs[ConfigId] = std::move(Entry);
+        };
+        addConfig("win-x64-server", Windows);
+        if (HasLinux) {
+            addConfig("linux-x64-server", Linux);
+        }
+        if (!Configs.empty()) {
+            RecordSupportJson[Name] = std::move(Configs);
+        }
+    }
+    Manifest["recordSupport"] = std::move(RecordSupportJson);
 
     json::Object Counts;
     Counts["declarations"] = static_cast<int64_t>(DeclarationIds.size());

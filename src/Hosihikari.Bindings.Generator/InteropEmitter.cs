@@ -655,6 +655,8 @@ internal static class InteropEmitter
                     ? "optional:" + parameter.OptionalInnerType
                     : parameter.Kind == AbiKind.Callback
                     ? "callback:" + parameter.Callback!.NativeType
+                    : parameter.Kind == AbiKind.Opaque && parameter.WrapperType is not null
+                    ? "opaque:" + parameter.WrapperType
                     : AbiPlan.CSharpParameterType(parameter);
 
     private static string MemberBaseName(MemberRecord member) => member.Kind switch

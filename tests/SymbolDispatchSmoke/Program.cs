@@ -138,6 +138,38 @@ CheckReferenceWrapper("stackRef", 61, 63);
 CheckReferenceWrapper("weakRefValue", 71, 73);
 CheckReferenceWrapper("notNullOwner", 81, 83);
 
+var heavyMethod = typeof(FixtureBlock).GetMethod("heavy");
+if (heavyMethod is not null)
+{
+    var heavy = heavyMethod.Invoke(block, [1234]);
+    try
+    {
+        var heavySize = typeof(FixtureBlock).GetMethod("heavySize")!;
+        if ((int)heavySize.Invoke(block, [heavy])! != 4)
+        {
+            throw new InvalidOperationException("The non-trivial by-value record return is incorrect.");
+        }
+    }
+    finally
+    {
+        (heavy as IDisposable)?.Dispose();
+    }
+}
+
+var uniqueHeavyMethod = typeof(FixtureBlock).GetMethod("uniqueHeavy");
+if (uniqueHeavyMethod is not null)
+{
+    var heavy = uniqueHeavyMethod.Invoke(block, [4321]);
+    try
+    {
+        var heavySize = typeof(FixtureBlock).GetMethod("heavySize")!;
+    }
+    finally
+    {
+        (heavy as IDisposable)?.Dispose();
+    }
+}
+
 var objectA = block.makeObject(10);
 var objectB = block.makeObject(20);
 if (block.sumObjectValues([objectA, objectB]) != 32)

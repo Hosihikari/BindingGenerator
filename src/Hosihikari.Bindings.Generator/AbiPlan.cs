@@ -441,6 +441,18 @@ internal sealed class AbiPlan
                     .ToList(),
                 StringComparer.Ordinal);
 
+        var symbolDestroyableDeclarationIds = symbolDispatch
+            ? membersByDeclaration
+                .Where(pair => pair.Value.Any(member =>
+                    member.Kind == "destructor"
+                    && member.Access == "public"
+                    && (!string.IsNullOrWhiteSpace(member.Symbol)
+                        || member.Rva is not null
+                        || member.Address is not null)))
+                .Select(pair => pair.Key)
+                .ToHashSet(StringComparer.Ordinal)
+            : new HashSet<string>(StringComparer.Ordinal);
+
         var layoutDeclarationIds = records.OfType<VariantRecord>()
             .Where(variant => variant.Layout is { Size: > 0 })
             .Select(variant => variant.DeclarationId)
@@ -892,7 +904,9 @@ internal sealed class AbiPlan
             var created = false;
 
             foreach (var constructor in declarationMembers.Where(member =>
-                         member.Kind == "constructor" && member.Access == "public"))
+                         member.Kind == "constructor"
+                         && member.Access == "public"
+                         && !member.Id.Contains("@support:", StringComparison.Ordinal)))
             {
                 string? reason = null;
                 if (symbolDispatch)
@@ -1183,6 +1197,7 @@ internal sealed class AbiPlan
                         enumUnderlyingByName,
                         allowOwnedByValue,
                         symbolDispatch,
+                        symbolDestroyableDeclarationIds,
                         symbolByValueReturns,
                         symbolByValueCopyRequired,
                         symbolVectorElements,
@@ -1678,6 +1693,7 @@ internal sealed class AbiPlan
                             enumUnderlyingByName,
                             linkCarrier,
                             symbolDispatch,
+                            symbolDestroyableDeclarationIds,
                             null,
                             variants,
                             callables,
@@ -2742,6 +2758,7 @@ internal sealed class AbiPlan
         IReadOnlyDictionary<string, string> enumUnderlyingByName,
         bool linkCarrier,
         bool symbolDispatch,
+        IReadOnlySet<string> symbolDestroyableDeclarationIds,
         IReadOnlyDictionary<string, DeclarationRecord> symbolByValueReturns,
         IReadOnlyDictionary<string, bool> symbolByValueCopyRequired,
         IReadOnlyDictionary<string, DeclarationRecord> symbolVectorElements,
@@ -2850,6 +2867,7 @@ internal sealed class AbiPlan
                 enumUnderlyingByName,
                 linkCarrier,
                 symbolDispatch,
+                symbolDestroyableDeclarationIds,
                 symbolDispatch ? symbolVectorElements : null,
                 variants,
                 callables,
@@ -2977,6 +2995,7 @@ internal sealed class AbiPlan
         IReadOnlyDictionary<string, string> enumUnderlyingByName,
         bool linkCarrier,
         bool symbolDispatch,
+        IReadOnlySet<string> symbolDestroyableDeclarationIds,
         IReadOnlyDictionary<string, DeclarationRecord>? symbolVectorElements,
         VariantRegistry variants,
         CallableRegistry callables,
@@ -3079,6 +3098,7 @@ internal sealed class AbiPlan
                     enumUnderlyingByName,
                     linkCarrier,
                     symbolDispatch,
+                    symbolDestroyableDeclarationIds,
                     symbolVectorElements,
                     variants,
                     callables,
@@ -3610,7 +3630,8 @@ internal sealed class AbiPlan
                 return false;
             }
 
-            if (!destroyableDeclarationIds.Contains(pointeeDeclaration.Id))
+            if (!destroyableDeclarationIds.Contains(pointeeDeclaration.Id)
+                && !(symbolDispatch && symbolDestroyableDeclarationIds.Contains(pointeeDeclaration.Id)))
             {
                 reason = $"unique_ptr return type '{uniquePointee}' has no accessible destructor";
                 return false;
@@ -4728,7 +4749,19 @@ internal sealed class AbiPlan
 
         var inner = text[prefix.Length..^1].Trim();
         var arguments = SplitTemplateArguments(inner).ToList();
-        if (arguments.Count != 1)
+        if (arguments.Count == 2)
+        {
+            // The symbol stream spells the default deleter explicitly.
+            var expected = "std::default_delete<" + arguments[0].Trim() + ">";
+            if (!string.Equals(
+                    CompactTemplateName(NormalizeTypeName(arguments[1].Trim())),
+                    CompactTemplateName(expected),
+                    StringComparison.Ordinal))
+            {
+                return false;
+            }
+        }
+        else if (arguments.Count != 1)
         {
             // A custom deleter owns release semantics the shim cannot reproduce.
             return false;
@@ -6088,8 +6121,7 @@ internal sealed class AbiPlan
                 || function.ReturnOptionalRecord);
         if (function.ReturnExpected
             || (function.ReturnOptional && !optionalRefReturn && !optionalValueReturn)
-            || function.ReturnUniquePtr
-            || (function.ReturnOwned && !ownedRecordReturn)
+            || (function.ReturnOwned && !ownedRecordReturn && !function.ReturnUniquePtr)
             || function.SharedWrapper is not (SharedWrapperKind.None or SharedWrapperKind.SharedPtr
                 or SharedWrapperKind.WeakPtr or SharedWrapperKind.NonOwnerPtr)
             || function.TimeConversion != TimeConversion.None

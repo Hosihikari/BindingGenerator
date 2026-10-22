@@ -84,6 +84,11 @@ public static class NativeEntryPoint
             var serverWrappersOk = serverInstance is null
                 || (serverTextSettings is not null && serverTextSettings.Target != 0);
 
+            // getSecureStorage transfers a unique_ptr<SecureStorage>; disposing it must run the
+            // game's virtual destructor and release the game-allocated object.
+            using var secureStorage = platform?.getSecureStorage();
+            var secureStorageOk = secureStorage is null || secureStorage.Handle != 0;
+
             // Core::PathBuffer<std::string> is a single string member; the shim reads it with
             // the std::string return ABI and releases it with the game's own string destructor.
             var storagePath = platform?.getInternalStoragePath() ?? "";
@@ -112,7 +117,8 @@ public static class NativeEntryPoint
                 && storagePath.Length > 0
                 && userdataPath.Length > 0
                 && currentStoragePath.Length > 0
-                && serverWrappersOk;
+                && serverWrappersOk
+                && secureStorageOk;
             var result =
                 "load=managed\n"
                 + $"a={textA}\n"
@@ -143,6 +149,7 @@ public static class NativeEntryPoint
                 + $"cdnConfig={cdnConfig is not null}\n"
                 + $"editorManager={editorManager is not null}\n"
                 + $"serverTextSettings={(serverTextSettings is not null ? "0x" + serverTextSettings.Target.ToString("x") : "null")}\n"
+                + $"secureStorage={(secureStorage is not null)}\n"
                 + $"stable={eduMode == eduModeAgain && maxRequests == maxRequestsAgain && addresses.SequenceEqual(addressesAgain)}\n"
                 + $"result={(ok ? "OK" : "FAIL")}\n";
             if (resultPath is not null)

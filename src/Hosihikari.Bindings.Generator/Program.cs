@@ -122,6 +122,11 @@ switch (args[0])
 
         var manifestHash = "sha256:" + IrHash.CanonicalJsonSha256(File.ReadAllText(args[1]));
         var output = Path.GetFullPath(args[3]);
+        if (symbolDispatch)
+        {
+            records = AddRecordSupport(records, manifest);
+        }
+
         var plan = AbiPlan.Build(records, nativeRoot, linkCarrier, llAllocator, virtualDispatch, symbolDispatch);
         foreach (var subdirectory in new[] { "interop", "shim", "coverage" })
         {
@@ -216,6 +221,74 @@ static void PrintErrors(IrValidationResult result)
     {
         Console.Error.WriteLine(" - " + error);
     }
+}
+
+static List<IrRecord> AddRecordSupport(List<IrRecord> records, IrManifest manifest)
+{
+    if (manifest.RecordSupport.Count == 0)
+    {
+        return records;
+    }
+
+    var declarations = records.OfType<DeclarationRecord>()
+        .GroupBy(declaration => declaration.QualifiedName, StringComparer.Ordinal)
+        .ToDictionary(group => group.Key, group => group.First(), StringComparer.Ordinal);
+    var additions = new List<MemberRecord>();
+    foreach (var (name, byConfiguration) in manifest.RecordSupport)
+    {
+        if (!declarations.TryGetValue(name, out var declaration))
+        {
+            continue;
+        }
+
+        foreach (var (configuration, support) in byConfiguration)
+        {
+            if (support.Destructor is { } destructor)
+            {
+                additions.Add(new MemberRecord
+                {
+                    Id = declaration.Id + "@support:destructor",
+                    DeclarationId = declaration.Id,
+                    Configuration = configuration,
+                    Kind = "destructor",
+                    Name = "~" + name,
+                    Access = "public",
+                    Symbol = destructor.Symbol,
+                    Rva = destructor.Rva,
+                    Address = destructor.Address,
+                    Signature = new SignatureInfo
+                    {
+                        Canonical = name + "::~" + name,
+                        ReturnType = "void",
+                    },
+                });
+            }
+
+            if (support.CopyConstructor is { } copy)
+            {
+                additions.Add(new MemberRecord
+                {
+                    Id = declaration.Id + "@support:copyConstructor",
+                    DeclarationId = declaration.Id,
+                    Configuration = configuration,
+                    Kind = "constructor",
+                    Name = name,
+                    Access = "public",
+                    Symbol = copy.Symbol,
+                    Rva = copy.Rva,
+                    Address = copy.Address,
+                    Signature = new SignatureInfo
+                    {
+                        Canonical = name + "::" + name,
+                        ReturnType = "void",
+                        Parameters = [new ParameterInfo { Type = "const " + name + " &" }],
+                    },
+                });
+            }
+        }
+    }
+
+    return additions.Count == 0 ? records : [.. records, .. additions];
 }
 
 static void PrintHelp()
