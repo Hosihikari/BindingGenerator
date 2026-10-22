@@ -89,6 +89,18 @@ public static class NativeEntryPoint
             using var secureStorage = platform?.getSecureStorage();
             var secureStorageOk = secureStorage is null || secureStorage.Handle != 0;
 
+            // Static constants are read from the game module's data symbols.
+            using var zeroVector = Vec3.ZERO;
+            using var maxBlockPos = BlockPos.MAX;
+            using var emptyItem = ItemStack.EMPTY_ITEM;
+            var staticConstantsOk = zeroVector.x == 0
+                && zeroVector.y == 0
+                && zeroVector.z == 0
+                && maxBlockPos.x != 0
+                && Level.IS_SLEEPING_POSSIBLE.Length > 0
+                && Actor.DAMAGE_NEARBY_MOBS_DURATION >= 0
+                && emptyItem.Handle != 0;
+
             // Core::PathBuffer<std::string> is a single string member; the shim reads it with
             // the std::string return ABI and releases it with the game's own string destructor.
             var storagePath = platform?.getInternalStoragePath() ?? "";
@@ -118,7 +130,8 @@ public static class NativeEntryPoint
                 && userdataPath.Length > 0
                 && currentStoragePath.Length > 0
                 && serverWrappersOk
-                && secureStorageOk;
+                && secureStorageOk
+                && staticConstantsOk;
             var result =
                 "load=managed\n"
                 + $"a={textA}\n"
@@ -150,6 +163,7 @@ public static class NativeEntryPoint
                 + $"editorManager={editorManager is not null}\n"
                 + $"serverTextSettings={(serverTextSettings is not null ? "0x" + serverTextSettings.Target.ToString("x") : "null")}\n"
                 + $"secureStorage={(secureStorage is not null)}\n"
+                + $"staticConstants={staticConstantsOk}\n"
                 + $"stable={eduMode == eduModeAgain && maxRequests == maxRequestsAgain && addresses.SequenceEqual(addressesAgain)}\n"
                 + $"result={(ok ? "OK" : "FAIL")}\n";
             if (resultPath is not null)

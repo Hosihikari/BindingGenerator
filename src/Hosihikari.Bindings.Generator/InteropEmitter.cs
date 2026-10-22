@@ -789,7 +789,9 @@ internal static class InteropEmitter
             return;
         }
 
-        var propertyType = AbiPlan.CSharpPropertyType((getter ?? setter!).ReturnKind);
+        var propertyType = hasGetter && getter!.ReturnWrapperType is not null
+            ? getter.ReturnWrapperType
+            : AbiPlan.CSharpPropertyType((getter ?? setter!).ReturnKind);
         lines.Add($"    public {modifier}{propertyType} {name}");
         lines.Add("    {");
         if (hasGetter)
@@ -804,6 +806,9 @@ internal static class InteropEmitter
                     lines.Add($"            var view = {call};");
                     lines.Add("            return global::System.Text.Encoding.UTF8.GetString(view.Data, checked((int)view.Size));");
                     lines.Add("        }");
+                    break;
+                case AbiKind.Opaque when getter.ReturnWrapperType is not null:
+                    lines.Add($"        get => new {getter.ReturnWrapperType}((nint){call}, false);");
                     break;
                 case AbiKind.Opaque:
                     lines.Add($"        get => (nint){call};");

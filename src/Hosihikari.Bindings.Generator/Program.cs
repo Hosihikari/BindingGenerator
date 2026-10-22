@@ -125,6 +125,7 @@ switch (args[0])
         if (symbolDispatch)
         {
             records = AddRecordSupport(records, manifest);
+            records = AddStaticFields(records, manifest);
         }
 
         var plan = AbiPlan.Build(records, nativeRoot, linkCarrier, llAllocator, virtualDispatch, symbolDispatch);
@@ -289,6 +290,52 @@ static List<IrRecord> AddRecordSupport(List<IrRecord> records, IrManifest manife
     }
 
     return additions.Count == 0 ? records : [.. records, .. additions];
+}
+
+static List<IrRecord> AddStaticFields(List<IrRecord> records, IrManifest manifest)
+{
+    if (manifest.StaticFields.Count == 0)
+    {
+        return records;
+    }
+
+    var declarations = records.OfType<DeclarationRecord>()
+        .GroupBy(declaration => declaration.QualifiedName, StringComparer.Ordinal)
+        .ToDictionary(group => group.Key, group => group.First(), StringComparer.Ordinal);
+    foreach (var (key, byConfiguration) in manifest.StaticFields)
+    {
+        var separator = key.LastIndexOf("::", StringComparison.Ordinal);
+        if (separator <= 0)
+        {
+            continue;
+        }
+
+        var className = key[..separator];
+        var fieldName = key[(separator + 2)..];
+        if (!declarations.TryGetValue(className, out var declaration))
+        {
+            continue;
+        }
+
+        foreach (var (configuration, symbol) in byConfiguration)
+        {
+            var field = records.OfType<MemberRecord>().FirstOrDefault(member =>
+                string.Equals(member.DeclarationId, declaration.Id, StringComparison.Ordinal)
+                && string.Equals(member.Kind, "static_field", StringComparison.Ordinal)
+                && string.Equals(member.Name, fieldName, StringComparison.Ordinal)
+                && string.Equals(member.Configuration, configuration, StringComparison.Ordinal));
+            if (field is null)
+            {
+                continue;
+            }
+
+            field.Symbol = symbol.Symbol;
+            field.Rva = symbol.Rva;
+            field.Address = symbol.Address;
+        }
+    }
+
+    return records;
 }
 
 static void PrintHelp()

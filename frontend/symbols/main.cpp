@@ -95,6 +95,7 @@ struct Configuration {
     uint64_t StringDestructorAddress = 0;
     std::map<std::string, SupportSymbol> RecordDestructors;
     std::map<std::string, SupportSymbol> RecordCopyConstructors;
+    std::map<std::string, SupportSymbol> StaticFields;
     std::map<std::string, std::vector<RttiBase>> RttiBases;
     std::map<uint64_t, uint64_t> ElfRelocations;
     std::map<std::string, uint64_t> TypeInfoByName;
@@ -366,6 +367,47 @@ ParsedMethod parseDemangled(const std::string& Demangled, const std::string& Cla
     return Result;
 }
 
+std::string parseMsvcStaticData(const std::string& Mangled) {
+    size_t At = Mangled.find('@');
+    if (At == std::string::npos || At < 2) {
+        return "";
+    }
+    size_t DoubleAt = Mangled.find("@@", At);
+    if (DoubleAt == std::string::npos || DoubleAt + 2 >= Mangled.size()
+        || Mangled[DoubleAt + 2] != '2') {
+        return "";
+    }
+    std::string Field = Mangled.substr(1, At - 1);
+    std::string Class = Mangled.substr(At + 1, DoubleAt - At - 1);
+    if (Field.empty() || Class.empty()
+        || Class.find('@') != std::string::npos
+        || Class.find('?') != std::string::npos) {
+        return "";
+    }
+    return Class + "::" + Field;
+}
+
+bool parseItaniumStaticData(const std::string& Mangled, const std::string& ClassName, std::string& Field) {
+    std::string Prefix = "_ZN" + std::to_string(ClassName.size()) + ClassName;
+    if (!startsWith(Mangled, Prefix)) {
+        return false;
+    }
+    size_t Position = Prefix.size();
+    size_t Length = 0;
+    size_t Digits = 0;
+    while (Position < Mangled.size()
+           && std::isdigit(static_cast<unsigned char>(Mangled[Position])) != 0) {
+        Length = Length * 10 + static_cast<size_t>(Mangled[Position] - '0');
+        ++Position;
+        ++Digits;
+    }
+    if (Digits == 0 || Mangled.back() != 'E' || Position + Length + 1 != Mangled.size()) {
+        return false;
+    }
+    Field = Mangled.substr(Position, Length);
+    return !Field.empty();
+}
+
 bool isSameRecordType(std::string Type, const std::string& Record) {
     Type = trim(Type);
     while (Type.ends_with("&")) {
@@ -606,6 +648,17 @@ bool loadPdb(const Inputs& Inputs, const object::COFFObjectFile& Coff, Configura
         }
 
         std::string Mangled = Public->Name.str();
+        if (Mangled.size() > 1 && Mangled[0] == '?') {
+            std::string StaticKey = parseMsvcStaticData(Mangled);
+            if (!StaticKey.empty()) {
+                std::string ClassName = StaticKey.substr(0, StaticKey.rfind("::"));
+                if (std::find(Inputs.Classes.begin(), Inputs.Classes.end(), ClassName)
+                    != Inputs.Classes.end()) {
+                    uint64_t Rva = rvaForPublic(Coff, *Public);
+                    Config.StaticFields[StaticKey] = SupportSymbol{Mangled, Rva, ImageBase + Rva};
+                }
+            }
+        }
         if (Mangled.rfind("??0", 0) == 0 || Mangled.rfind("??1", 0) == 0) {
             std::string Demangled = demangle(Mangled);
             std::string ClassName;
@@ -892,6 +945,14 @@ bool loadElf(const Inputs& Inputs, const object::ObjectFile& Elf, Configuration&
             continue;
         }
         uint64_t SymbolValue = *SymbolValueResult;
+        for (const auto& ClassName : Inputs.Classes) {
+            std::string Field;
+            if (parseItaniumStaticData(Mangled, ClassName, Field)) {
+                Config.StaticFields[ClassName + "::" + Field] =
+                    SupportSymbol{Mangled, 0, SymbolValue};
+                break;
+            }
+        }
         if (Mangled.rfind("_ZN", 0) == 0
             && (Mangled.find("C1E") != std::string::npos
                 || Mangled.find("C2E") != std::string::npos
@@ -1481,6 +1542,39 @@ bool emitIr(const Inputs& Inputs, const Configuration& Windows, const Configurat
         }
     }
     Manifest["recordSupport"] = std::move(RecordSupportJson);
+
+    std::set<std::string> StaticFieldNames;
+    for (const auto& [Name, Symbol] : Windows.StaticFields) {
+        StaticFieldNames.insert(Name);
+    }
+    for (const auto& [Name, Symbol] : Linux.StaticFields) {
+        StaticFieldNames.insert(Name);
+    }
+    json::Object StaticFieldsJson;
+    for (const auto& Name : StaticFieldNames) {
+        json::Object Configs;
+        auto addConfig = [&](const char* ConfigId, const Configuration& Config) {
+            auto Symbol = Config.StaticFields.find(Name);
+            if (Symbol == Config.StaticFields.end()) {
+                return;
+            }
+            json::Object Entry;
+            Entry["symbol"] = Symbol->second.Symbol;
+            if (Symbol->second.Rva != 0) {
+                Entry["rva"] = Symbol->second.Rva;
+            }
+            Entry["address"] = Symbol->second.Address;
+            Configs[ConfigId] = std::move(Entry);
+        };
+        addConfig("win-x64-server", Windows);
+        if (HasLinux) {
+            addConfig("linux-x64-server", Linux);
+        }
+        if (!Configs.empty()) {
+            StaticFieldsJson[Name] = std::move(Configs);
+        }
+    }
+    Manifest["staticFields"] = std::move(StaticFieldsJson);
 
     json::Object Counts;
     Counts["declarations"] = static_cast<int64_t>(DeclarationIds.size());

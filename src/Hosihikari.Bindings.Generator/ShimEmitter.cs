@@ -2382,6 +2382,55 @@ internal static class ShimEmitter
         bool destroyStringViaGame)
     {
         var returnType = AbiPlan.CppType(function.ReturnKind);
+        if (function.Kind == AbiFunctionKind.Get && function.Static)
+        {
+            if (!members.TryGetValue(function.MemberId ?? "", out var staticField)
+                || (staticField.Symbol is null && staticField.Rva is null && staticField.Address is null))
+            {
+                yield return $"static {returnType} {function.CppName}() try";
+                yield return "{";
+                yield return "    setLastError(\"the static field symbol is unavailable\");";
+                yield return "    " + DefaultReturn(function.ReturnKind);
+                foreach (var line in SymbolCatchTail(function.ReturnKind))
+                {
+                    yield return line;
+                }
+
+                yield break;
+            }
+
+            var (staticOffset, staticSymbol) = SymbolFacts(staticField, configuration.Os);
+            yield return $"static {returnType} {function.CppName}() try";
+            yield return "{";
+            yield return $"    auto const hs_target = hs_resolve({staticOffset}, {CppLiteral(staticSymbol)});";
+            yield return "    if (hs_target == nullptr)";
+            yield return "    {";
+            yield return "        setLastError(\"symbol was not resolved\");";
+            yield return "        " + DefaultReturn(function.ReturnKind);
+            yield return "    }";
+            if (function.ReturnKind == AbiKind.StringView)
+            {
+                yield return "    auto const* hs_text = static_cast<char const*>(hs_target);";
+                yield return "    return HosihikariStringView{hs_text, std::strlen(hs_text)};";
+            }
+            else if (function.ReturnKind == AbiKind.Opaque)
+            {
+                yield return "    return hs_target;";
+            }
+            else
+            {
+                var staticType = AbiPlan.CppType(function.ReturnKind);
+                yield return $"    return *reinterpret_cast<{staticType} const*>(hs_target);";
+            }
+
+            foreach (var line in SymbolCatchTail(function.ReturnKind))
+            {
+                yield return line;
+            }
+
+            yield break;
+        }
+
         var parameters = new List<string>();
         if (function.Kind != AbiFunctionKind.Create && !function.Static)
         {

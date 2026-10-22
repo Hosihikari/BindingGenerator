@@ -253,6 +253,7 @@ internal sealed class AbiFunction
 
     /// <summary>Absolute bit offset for symbol-dispatched field accessors.</summary>
     public long? FieldBitOffset { get; init; }
+
     public bool CreateViaBorrowedHolder { get; init; }
     public bool DestroyViaBorrowedHolder { get; init; }
     public bool ReturnExpected { get; init; }
@@ -1021,6 +1022,7 @@ internal sealed class AbiPlan
                             field.BitOffset ?? -1,
                             field.Id,
                             declarationNames,
+                            publicDeclarationsByQualifiedName,
                             enumUnderlyingByName,
                             out var symbolGetter,
                             out var symbolSetter,
@@ -1104,6 +1106,7 @@ internal sealed class AbiPlan
                             bitOffset,
                             syntheticId,
                             declarationNames,
+                            publicDeclarationsByQualifiedName,
                             enumUnderlyingByName,
                             out var inheritedGetter,
                             out var inheritedSetter,
@@ -6057,6 +6060,7 @@ internal sealed class AbiPlan
         long bitOffset,
         string memberId,
         IReadOnlyDictionary<string, DeclarationName> declarationNames,
+        IReadOnlyDictionary<string, DeclarationRecord> publicDeclarationsByQualifiedName,
         IReadOnlyDictionary<string, string> enumUnderlyingByName,
         out AbiFunction getter,
         out AbiFunction? setter,
@@ -6075,6 +6079,67 @@ internal sealed class AbiPlan
         {
             reason = "bitfields are not supported by symbol dispatch";
             return false;
+        }
+
+        if (field.Static)
+        {
+            if (field.Type is null || string.IsNullOrWhiteSpace(field.Type.Canonical))
+            {
+                reason = "the field type is unavailable";
+                return false;
+            }
+
+            if (field.Symbol is null && field.Rva is null && field.Address is null)
+            {
+                reason = "the static field has no symbol in the IR";
+                return false;
+            }
+
+            var staticCanonical = NormalizeTypeName(field.Type.Canonical);
+            AbiKind staticKind;
+            string? staticWrapperType = null;
+            if (TryMapEnumUnderlying(staticCanonical, enumUnderlyingByName, out staticKind)
+                || TryMapFundamental(staticCanonical, out staticKind))
+            {
+            }
+            else if (IsStringViewType(field.Type.Canonical)
+                || string.Equals(staticCanonical, "char[]", StringComparison.Ordinal))
+            {
+                staticKind = AbiKind.StringView;
+            }
+            else if (IsPointerType(staticCanonical))
+            {
+                staticKind = AbiKind.Opaque;
+            }
+            else if (publicDeclarationsByQualifiedName.TryGetValue(staticCanonical, out var staticDeclaration)
+                && declarationNames.TryGetValue(staticDeclaration.Id, out var staticName))
+            {
+                staticKind = AbiKind.Opaque;
+                staticWrapperType = "global::" + staticName.NamespaceName + "." + staticName.ClassName;
+            }
+            else
+            {
+                reason = "the static field type is not supported by symbol dispatch";
+                return false;
+            }
+
+            getter = new AbiFunction
+            {
+                CppName = "hs_get_" + CSharpNaming.ShortHash(memberId + "#" + declaration.Id),
+                Kind = AbiFunctionKind.Get,
+                Surface = declaration.Surface,
+                DeclarationId = declaration.Id,
+                MemberId = memberId,
+                ClassCppName = declaration.QualifiedName,
+                ClassName = declarationNames[declaration.Id],
+                NativeMemberName = field.Name,
+                CSharpMemberName = TypeNames.Sanitize(field.Name),
+                ReturnKind = staticKind,
+                NativeReturnType = staticCanonical,
+                ReturnWrapperType = staticWrapperType,
+                Static = true,
+            };
+            return true;
         }
 
         if (bitOffset < 0 || bitOffset % 8 != 0)
