@@ -672,11 +672,21 @@ internal static class ShimEmitter
 
         foreach (var parameter in function.Parameters.Where(parameter => parameter.IsVector))
         {
-            parameters.Add("const " + (parameter.VectorElementOwnership == ArrayElementOwnership.PairCopy
-                ? "HosihikariMapEntry"
-                : parameter.VectorElementKind == AbiKind.StringView
-                    ? "HosihikariStringView"
-                    : AbiPlan.CppType(parameter.VectorElementKind)) + "*");
+            if (parameter.VectorElementKind == AbiKind.Opaque
+                && parameter.VectorElementOwnership != ArrayElementOwnership.PairCopy)
+            {
+                // Handles are pointers to mutable objects; the array itself is read-only.
+                parameters.Add("void* const*");
+            }
+            else
+            {
+                parameters.Add("const " + (parameter.VectorElementOwnership == ArrayElementOwnership.PairCopy
+                    ? "HosihikariMapEntry"
+                    : parameter.VectorElementKind == AbiKind.StringView
+                        ? "HosihikariStringView"
+                        : AbiPlan.CppType(parameter.VectorElementKind)) + "*");
+            }
+
             parameters.Add("std::size_t");
         }
 
@@ -761,12 +771,21 @@ internal static class ShimEmitter
             if (parameter.IsVector)
             {
                 var name = CppParameterName(parameter, index);
-                var elementType = parameter.VectorElementOwnership == ArrayElementOwnership.PairCopy
-                    ? "HosihikariMapEntry"
-                    : parameter.VectorElementKind == AbiKind.StringView
-                        ? "HosihikariStringView"
-                        : AbiPlan.CppType(parameter.VectorElementKind);
-                parameters.Add($"const {elementType}* {name}_data");
+                if (parameter.VectorElementKind == AbiKind.Opaque
+                    && parameter.VectorElementOwnership != ArrayElementOwnership.PairCopy)
+                {
+                    parameters.Add($"void* const* {name}_data");
+                }
+                else
+                {
+                    var elementType = parameter.VectorElementOwnership == ArrayElementOwnership.PairCopy
+                        ? "HosihikariMapEntry"
+                        : parameter.VectorElementKind == AbiKind.StringView
+                            ? "HosihikariStringView"
+                            : AbiPlan.CppType(parameter.VectorElementKind);
+                    parameters.Add($"const {elementType}* {name}_data");
+                }
+
                 parameters.Add($"std::size_t {name}_count");
             }
         }
@@ -1919,6 +1938,7 @@ internal static class ShimEmitter
             "#include <new>",
             "#include <string>",
             "#include <string_view>",
+            "#include <vector>",
             "#ifdef _WIN32",
             "#include <windows.h>",
             "#else",
@@ -1935,9 +1955,60 @@ internal static class ShimEmitter
 
         AppendSymbolResolution(source, configuration.Os, targetModule);
 
+        source.Add("template <class T, class U>");
+        source.Add("std::vector<T> hs_make_vector(U const* data, std::size_t count)");
+        source.Add("{");
+        source.Add("    std::vector<T> result;");
+        source.Add("    result.reserve(count);");
+        source.Add("    for (std::size_t i = 0; i < count; ++i) { result.push_back(static_cast<T>(data[i])); }");
+        source.Add("    return result;");
+        source.Add("}");
+        source.Add("inline std::vector<std::basic_string<char>> hs_make_string_vector(HosihikariStringView const* data, std::size_t count)");
+        source.Add("{");
+        source.Add("    std::vector<std::basic_string<char>> result;");
+        source.Add("    result.reserve(count);");
+        source.Add("    for (std::size_t i = 0; i < count; ++i) { result.emplace_back(data[i].data, data[i].size); }");
+        source.Add("    return result;");
+        source.Add("}");
+        source.Add("inline std::vector<std::basic_string_view<char>> hs_make_string_view_vector(HosihikariStringView const* data, std::size_t count)");
+        source.Add("{");
+        source.Add("    std::vector<std::basic_string_view<char>> result;");
+        source.Add("    result.reserve(count);");
+        source.Add("    for (std::size_t i = 0; i < count; ++i) { result.emplace_back(data[i].data, data[i].size); }");
+        source.Add("    return result;");
+        source.Add("}");
+        source.Add("template <std::size_t Size, std::size_t Align>");
+        source.Add("struct hs_blob");
+        source.Add("{");
+        source.Add("    alignas(Align) unsigned char data[Size];");
+        source.Add("};");
+        source.Add("template <std::size_t Size, std::size_t Align>");
+        source.Add("std::vector<hs_blob<Size, Align>> hs_make_blob_vector(void* const* data, std::size_t count)");
+        source.Add("{");
+        source.Add("    std::vector<hs_blob<Size, Align>> result;");
+        source.Add("    result.reserve(count);");
+        source.Add("    for (std::size_t i = 0; i < count; ++i)");
+        source.Add("    {");
+        source.Add("        hs_blob<Size, Align> blob{};");
+        source.Add("        if (data[i] != nullptr) { std::memcpy(blob.data, data[i], Size); }");
+        source.Add("        result.push_back(blob);");
+        source.Add("    }");
+        source.Add("    return result;");
+        source.Add("}");
+        source.Add("");
+
+        var layoutsByQualifiedName = new Dictionary<string, LayoutInfo>(StringComparer.Ordinal);
+        foreach (var declaration in records.OfType<DeclarationRecord>())
+        {
+            if (layouts.TryGetValue(declaration.Id, out var declarationLayout))
+            {
+                layoutsByQualifiedName[declaration.QualifiedName] = declarationLayout;
+            }
+        }
+
         foreach (var function in functions)
         {
-            foreach (var line in EmitSymbolFunction(function, configuration, members, layouts))
+            foreach (var line in EmitSymbolFunction(function, configuration, members, layouts, layoutsByQualifiedName))
             {
                 source.Add(line);
             }
@@ -2084,7 +2155,8 @@ internal static class ShimEmitter
         AbiFunction function,
         IrConfiguration configuration,
         IReadOnlyDictionary<string, MemberRecord> members,
-        IReadOnlyDictionary<string, LayoutInfo> layouts)
+        IReadOnlyDictionary<string, LayoutInfo> layouts,
+        IReadOnlyDictionary<string, LayoutInfo> layoutsByQualifiedName)
     {
         var returnType = AbiPlan.CppType(function.ReturnKind);
         var parameters = new List<string>();
@@ -2096,6 +2168,11 @@ internal static class ShimEmitter
         for (var index = 0; index < function.Parameters.Count; index++)
         {
             var parameter = function.Parameters[index];
+            if (parameter.IsVector)
+            {
+                continue;
+            }
+
             var name = CppParameterName(parameter, index);
             if (parameter.Kind == AbiKind.StringView)
             {
@@ -2110,6 +2187,44 @@ internal static class ShimEmitter
             {
                 parameters.Add($"{AbiPlan.CppType(parameter.Kind)} {name}");
             }
+        }
+
+        for (var index = 0; index < function.Parameters.Count; index++)
+        {
+            var parameter = function.Parameters[index];
+            if (!parameter.IsVector)
+            {
+                continue;
+            }
+
+            var name = CppParameterName(parameter, index);
+            if (parameter.VectorElementKind == AbiKind.Opaque)
+            {
+                parameters.Add($"void* const* {name}_data");
+            }
+            else
+            {
+                var elementType = parameter.VectorElementKind == AbiKind.StringView
+                    ? "HosihikariStringView"
+                    : AbiPlan.CppType(parameter.VectorElementKind);
+                parameters.Add($"const {elementType}* {name}_data");
+            }
+
+            parameters.Add($"std::size_t {name}_count");
+        }
+
+        for (var index = 0; index < function.Parameters.Count; index++)
+        {
+            var parameter = function.Parameters[index];
+            if (parameter.IsOptional)
+            {
+                parameters.Add($"bool {CppParameterName(parameter, index)}_hasValue");
+            }
+        }
+
+        if (function.NeedsPresenceFlag)
+        {
+            parameters.Add("bool* hs_hasValue");
         }
 
         yield return $"static {returnType} {function.CppName}({string.Join(", ", parameters)}) try";
@@ -2128,6 +2243,48 @@ internal static class ShimEmitter
                 ? "std::basic_string_view<char>"
                 : "std::basic_string<char>";
             yield return $"    {stringType} hs_str{index}({name}_data, {name}_size);";
+        }
+
+        for (var index = 0; index < function.Parameters.Count; index++)
+        {
+            var parameter = function.Parameters[index];
+            if (!parameter.IsVector)
+            {
+                continue;
+            }
+
+            var name = CppParameterName(parameter, index);
+            if (parameter.VectorElementKind == AbiKind.StringView)
+            {
+                var helper = AbiPlan.IsStringViewType(parameter.VectorElementType ?? "")
+                    ? "hs_make_string_view_vector"
+                    : "hs_make_string_vector";
+                yield return $"    auto hs_vec{index} = {helper}({name}_data, {name}_count);";
+                continue;
+            }
+
+            if (parameter.VectorElementKind == AbiKind.Opaque)
+            {
+                if (parameter.VectorElementNativeType is null
+                    || !layoutsByQualifiedName.TryGetValue(parameter.VectorElementNativeType, out var elementLayout)
+                    || elementLayout.Size <= 0)
+                {
+                    yield return $"    setLastError(\"the layout of {EscapeCpp(parameter.VectorElementNativeType ?? "the vector element")} is unavailable\");";
+                    yield return "    " + DefaultReturn(function.ReturnKind);
+                    foreach (var line in SymbolCatchTail(function.ReturnKind))
+                    {
+                        yield return line;
+                    }
+
+                    yield break;
+                }
+
+                var elementAlign = elementLayout.Align > 0 ? elementLayout.Align : 8;
+                yield return $"    auto hs_vec{index} = hs_make_blob_vector<{elementLayout.Size.ToString(CultureInfo.InvariantCulture)}, {elementAlign.ToString(CultureInfo.InvariantCulture)}>({name}_data, {name}_count);";
+                continue;
+            }
+
+            yield return $"    auto hs_vec{index} = hs_make_vector<{AbiPlan.CppType(parameter.VectorElementKind)}>({name}_data, {name}_count);";
         }
 
         for (var index = 0; index < function.Parameters.Count; index++)
@@ -2304,7 +2461,6 @@ internal static class ShimEmitter
             && function.ReturnOwned
             && !function.NativeReturnType.TrimEnd().EndsWith("*", StringComparison.Ordinal)
             && !function.NativeReturnType.TrimEnd().EndsWith("&", StringComparison.Ordinal);
-        var staticRecordReturn = false;
         LayoutInfo? returnLayout = null;
         if (ownedRecordReturn && function.ReturnDeclarationId is not null)
         {
@@ -2313,7 +2469,6 @@ internal static class ShimEmitter
 
         var smallRecordReturn = ownedRecordReturn && returnLayout is { Size: <= 8 };
         var largeRecordReturn = ownedRecordReturn && !smallRecordReturn;
-        staticRecordReturn = largeRecordReturn && function.Static;
         var returnNeedsCopy = largeRecordReturn && function.ReturnRequiresCopy;
         MemberRecord? returnCopyConstructor = null;
         MemberRecord? returnDestructor = null;
@@ -2362,6 +2517,50 @@ internal static class ShimEmitter
             yield break;
         }
 
+        // A vector return is read as a standard three-pointer vector view. Element bytes stay
+        // valid until the caller copies them; queued records are released without destructors.
+        var arrayReturn = function.ReturnKind == AbiKind.ArrayView;
+        var borrowedVectorReturn = arrayReturn
+            && (AbiPlan.IsPointerType(function.NativeReturnType)
+                || AbiPlan.IsReferenceType(function.NativeReturnType));
+        string? vectorElementType = null;
+        LayoutInfo? vectorElementLayout = null;
+        if (arrayReturn)
+        {
+            switch (function.ArrayElementKind)
+            {
+                case AbiKind.StringView:
+                    vectorElementType = AbiPlan.IsStringViewType(function.ArrayElementType ?? "")
+                        ? "std::basic_string_view<char>"
+                        : "std::basic_string<char>";
+                    break;
+                case AbiKind.Opaque when function.ArrayElementOwnership == ArrayElementOwnership.None:
+                    vectorElementType = "void*";
+                    break;
+                case AbiKind.Opaque:
+                    if (function.ArrayElementNativeType is null
+                        || !layoutsByQualifiedName.TryGetValue(function.ArrayElementNativeType, out vectorElementLayout)
+                        || vectorElementLayout.Size <= 0)
+                    {
+                        yield return $"    setLastError(\"the layout of {EscapeCpp(function.ArrayElementNativeType ?? "the vector element")} is unavailable\");";
+                        yield return "    " + DefaultReturn(function.ReturnKind);
+                        foreach (var line in SymbolCatchTail(function.ReturnKind))
+                        {
+                            yield return line;
+                        }
+
+                        yield break;
+                    }
+
+                    var elementAlign = vectorElementLayout.Align > 0 ? vectorElementLayout.Align : 8;
+                    vectorElementType = $"hs_blob<{vectorElementLayout.Size.ToString(CultureInfo.InvariantCulture)}, {elementAlign.ToString(CultureInfo.InvariantCulture)}>";
+                    break;
+                default:
+                    vectorElementType = AbiPlan.CppType(function.ArrayElementKind);
+                    break;
+            }
+        }
+
         var callParameters = new List<string>();
         if (!function.Static)
         {
@@ -2371,6 +2570,12 @@ internal static class ShimEmitter
         for (var index = 0; index < function.Parameters.Count; index++)
         {
             var parameter = function.Parameters[index];
+            if (parameter.IsVector)
+            {
+                callParameters.Add("void*");
+                continue;
+            }
+
             callParameters.Add(parameter.Kind switch
             {
                 AbiKind.Opaque when parameter.IsByValueRecord =>
@@ -2407,17 +2612,35 @@ internal static class ShimEmitter
             callReturn = RegisterType(returnLayout!);
         }
 
+        if (arrayReturn)
+        {
+            callReturn = borrowedVectorReturn ? "void*" : "void";
+            yield return $"    using HsVector = std::vector<{vectorElementType}>;";
+        }
+
         if (memberStringReturn)
         {
-            callParameters.Insert(1, function.NativeReturnType + "*");
             yield return $"    using HsString = {function.NativeReturnType};";
             yield return "    alignas(HsString) unsigned char hs_stringStorage[sizeof(HsString)];";
         }
         else if (largeRecordReturn)
         {
-            callParameters.Insert(function.Static ? 0 : 1, "void*");
             var align = returnLayout!.Align > 0 ? returnLayout.Align : 8;
             yield return $"    alignas({align.ToString(CultureInfo.InvariantCulture)}) unsigned char hs_recordStorage[{returnLayout.Size.ToString(CultureInfo.InvariantCulture)}];";
+        }
+        else if (arrayReturn && !borrowedVectorReturn)
+        {
+            yield return "    alignas(HsVector) unsigned char hs_vectorStorage[sizeof(HsVector)];";
+        }
+
+        // MSVC places the hidden return buffer after `this`; the Itanium ABI places it before
+        // every explicit argument, including `this`. Static members use the first slot on both.
+        var sretIndex = !function.Static && string.Equals(configuration.Os, "windows", StringComparison.Ordinal)
+            ? 1
+            : 0;
+        if (memberStringReturn || largeRecordReturn || (arrayReturn && !borrowedVectorReturn))
+        {
+            callParameters.Insert(sretIndex, memberStringReturn ? function.NativeReturnType + "*" : "void*");
         }
 
         yield return $"    using HsFn = {callReturn} (*)({string.Join(", ", callParameters)});";
@@ -2450,27 +2673,41 @@ internal static class ShimEmitter
             {
                 callArguments.Add("hs_memory");
             }
-            else if (!function.Static)
+            else
             {
-                callArguments.Add("hs_self");
-                if (memberStringReturn)
+                var sretArgument = memberStringReturn
+                    ? "reinterpret_cast<HsString*>(hs_stringStorage)"
+                    : largeRecordReturn
+                        ? "static_cast<void*>(hs_recordStorage)"
+                        : arrayReturn && !borrowedVectorReturn
+                            ? "static_cast<void*>(hs_vectorStorage)"
+                            : null;
+                if (sretArgument is not null && sretIndex == 0)
                 {
-                    callArguments.Add("reinterpret_cast<HsString*>(hs_stringStorage)");
+                    callArguments.Add(sretArgument);
                 }
-                else if (largeRecordReturn)
+
+                if (!function.Static)
                 {
-                    callArguments.Add("static_cast<void*>(hs_recordStorage)");
+                    callArguments.Add("hs_self");
                 }
-            }
-            else if (staticRecordReturn)
-            {
-                callArguments.Add("static_cast<void*>(hs_recordStorage)");
+
+                if (sretArgument is not null && sretIndex == 1)
+                {
+                    callArguments.Add(sretArgument);
+                }
             }
 
             for (var index = 0; index < function.Parameters.Count; index++)
             {
                 var parameter = function.Parameters[index];
                 var name = CppParameterName(parameter, index);
+                if (parameter.IsVector)
+                {
+                    callArguments.Add($"static_cast<void*>(&hs_vec{index})");
+                    continue;
+                }
+
                 callArguments.Add(parameter.Kind switch
                 {
                     AbiKind.StringView => $"hs_str{index}",
@@ -2511,6 +2748,81 @@ internal static class ShimEmitter
                 yield return $"    std::memcpy(hs_record, &hs_value, static_cast<std::size_t>({returnLayout.Size.ToString(CultureInfo.InvariantCulture)}));";
                 yield return "    return hs_record;";
             }
+            else if (arrayReturn)
+            {
+                if (borrowedVectorReturn)
+                {
+                    // A reference or pointer result borrows the vector owned by the native side.
+                    yield return $"    auto* hs_vectorResult = static_cast<HsVector*>({call});";
+                    yield return "    if (hs_vectorResult == nullptr) { return HosihikariArrayView{nullptr, 0}; }";
+                }
+                else
+                {
+                    yield return $"    {call};";
+                    yield return "    auto* hs_vectorResult = reinterpret_cast<HsVector*>(hs_vectorStorage);";
+                }
+
+                if (function.ArrayElementKind == AbiKind.StringView)
+                {
+                    yield return "    thread_local std::vector<std::string> hs_arrayStrings;";
+                    yield return "    thread_local std::vector<HosihikariStringView> hs_arrayViews;";
+                    yield return "    hs_arrayStrings.clear();";
+                    yield return "    hs_arrayViews.clear();";
+                    yield return "    hs_arrayStrings.reserve(hs_vectorResult->size());";
+                    yield return "    for (auto const& item : *hs_vectorResult) { hs_arrayStrings.emplace_back(item.data(), item.size()); }";
+                    yield return "    hs_arrayViews.reserve(hs_arrayStrings.size());";
+                    yield return "    for (auto const& item : hs_arrayStrings) { hs_arrayViews.push_back(HosihikariStringView{item.data(), item.size()}); }";
+                    if (!borrowedVectorReturn)
+                    {
+                        yield return "    hs_vectorResult->~HsVector();";
+                    }
+
+                    yield return "    return HosihikariArrayView{hs_arrayViews.data(), hs_arrayViews.size()};";
+                }
+                else if (function.ArrayElementKind == AbiKind.Opaque)
+                {
+                    yield return "    thread_local std::vector<void*> hs_arrayResult;";
+                    yield return "    hs_arrayResult.clear();";
+                    yield return "    hs_arrayResult.reserve(hs_vectorResult->size());";
+                    if (function.ArrayElementOwnership == ArrayElementOwnership.None)
+                    {
+                        yield return "    for (auto const& item : *hs_vectorResult) { hs_arrayResult.push_back(const_cast<void*>(static_cast<void const*>(item))); }";
+                    }
+                    else
+                    {
+                        var size = vectorElementLayout!.Size.ToString(CultureInfo.InvariantCulture);
+                        var align = (vectorElementLayout.Align > 0 ? vectorElementLayout.Align : 8)
+                            .ToString(CultureInfo.InvariantCulture);
+                        yield return "    for (auto const& item : *hs_vectorResult)";
+                        yield return "    {";
+                        yield return $"        auto* const hs_copy = static_cast<void*>(::operator new(static_cast<std::size_t>({size}), std::align_val_t({align})));";
+                        yield return $"        std::memcpy(hs_copy, item.data, static_cast<std::size_t>({size}));";
+                        yield return "        hs_arrayResult.push_back(hs_copy);";
+                        yield return "    }";
+                    }
+
+                    if (!borrowedVectorReturn)
+                    {
+                        yield return "    hs_vectorResult->~HsVector();";
+                    }
+
+                    yield return "    return HosihikariArrayView{hs_arrayResult.data(), hs_arrayResult.size()};";
+                }
+                else
+                {
+                    var elementType = AbiPlan.CppType(function.ArrayElementKind);
+                    yield return $"    thread_local std::vector<{elementType}> hs_arrayResult;";
+                    yield return "    hs_arrayResult.clear();";
+                    yield return "    hs_arrayResult.reserve(hs_vectorResult->size());";
+                    yield return $"    for (auto const& item : *hs_vectorResult) {{ hs_arrayResult.push_back(static_cast<{elementType}>(item)); }}";
+                    if (!borrowedVectorReturn)
+                    {
+                        yield return "    hs_vectorResult->~HsVector();";
+                    }
+
+                    yield return "    return HosihikariArrayView{hs_arrayResult.data(), hs_arrayResult.size()};";
+                }
+            }
             else if (ownedRecordReturn)
             {
                 yield return $"    {call};";
@@ -2532,7 +2844,16 @@ internal static class ShimEmitter
             }
             else if (function.ReturnKind == AbiKind.Opaque)
             {
-                yield return $"    return {call};";
+                if (function.ReturnOptional)
+                {
+                    yield return $"    auto hs_result = {call};";
+                    yield return "    *hs_hasValue = hs_result != nullptr;";
+                    yield return "    return hs_result;";
+                }
+                else
+                {
+                    yield return $"    return {call};";
+                }
             }
             else
             {

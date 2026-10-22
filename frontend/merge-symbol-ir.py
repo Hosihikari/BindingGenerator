@@ -208,6 +208,9 @@ def main():
         symbol_declaration["triviallyCopyable"] = header_declaration.get(
             "triviallyCopyable", symbol_declaration.get("triviallyCopyable", False)
         )
+        symbol_declaration["triviallyDestructible"] = header_declaration.get(
+            "triviallyDestructible", symbol_declaration.get("triviallyDestructible", False)
+        )
 
         header_variant = header_variants.get(declaration_id, {})
         layout = header_variant.get("layout")
@@ -321,17 +324,55 @@ def main():
         )
         return name
 
+    def split_template_arguments(text):
+        arguments = []
+        depth = 0
+        start = 0
+        for index, character in enumerate(text):
+            if character == "<":
+                depth += 1
+            elif character == ">":
+                depth -= 1
+            elif character == "," and depth == 0:
+                arguments.append(text[start:index].strip())
+                start = index + 1
+        arguments.append(text[start:].strip())
+        return [argument for argument in arguments if argument]
+
+    def referenced_record_names(text):
+        name = base_type_name(text)
+        if not name:
+            return []
+        prefix = None
+        for candidate in ("std::vector<", "std::optional<", "std::unordered_set<", "std::shared_ptr<", "std::unique_ptr<"):
+            if name.startswith(candidate) and name.endswith(">"):
+                prefix = candidate
+                break
+        if prefix is not None:
+            arguments = split_template_arguments(name[len(prefix):-1])
+            return referenced_record_names(arguments[0]) if arguments else []
+        if name.startswith("std::pair<") and name.endswith(">"):
+            names = []
+            for argument in split_template_arguments(name[len("std::pair<"):-1]):
+                names.extend(referenced_record_names(argument))
+            return names
+        if name.startswith("std::") or "(" in name or ")" in name:
+            return []
+        return [name]
+
     # Record types that appear by value in signatures need a declaration with a layout
     # and the trivially-copyable fact. Copy those header declarations as dependencies.
+    # Sequence element types are referenced through std::vector/std::optional, so recurse
+    # into the template arguments instead of looking only at the outermost spelling.
     referenced_types = set()
     for records in symbol_records.values():
         for record in records:
             if record.get("recordType") != "member":
                 continue
             signature = record.get("signature") or {}
-            referenced_types.add(base_type_name(signature.get("returnType", "")))
+            referenced_types.update(referenced_record_names(signature.get("returnType", "")))
             for parameter in signature.get("parameters", []):
-                referenced_types.add(base_type_name(parameter.get("type", "")))
+                referenced_types.update(referenced_record_names(parameter.get("type", "")))
 
     for type_name in sorted(referenced_types):
         if not type_name or type_name.startswith("std::") or "(" in type_name or ")" in type_name:

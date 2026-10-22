@@ -28,8 +28,51 @@ if (block.scale(5) != 25)
     throw new InvalidOperationException("The second vtable slot returned an unexpected value.");
 }
 
+if (block.label() != "5")
+{
+    throw new InvalidOperationException("The by-value string return is incorrect.");
+}
+
+if (!block.numbers().SequenceEqual([2, 3]))
+{
+    throw new InvalidOperationException("The by-value int vector return is incorrect.");
+}
+
+// The checked-in Linux fixture IR covers the member string/vector returns above. The PDB-derived
+// Windows IR additionally contains the parameter and static cases; reflect so both IRs share
+// this program.
+if (typeof(FixtureBlock).GetMethod("names") is not null)
+{
+    if (!Call<string[]>(block, "names").SequenceEqual(["2", "3"]))
+    {
+        throw new InvalidOperationException("The by-value string vector return is incorrect.");
+    }
+
+    if (!Call<int[]>(block, "squares", 3).SequenceEqual([0, 1, 4]))
+    {
+        throw new InvalidOperationException("The static int vector return is incorrect.");
+    }
+
+    if (Call<int>(block, "countNames", (object)new[] { "a", "b" }) != 4)
+    {
+        throw new InvalidOperationException("The string vector parameter is incorrect.");
+    }
+
+    if (Call<int>(block, "sumValues", (object)new[] { 1, 2, 3 }) != 9)
+    {
+        throw new InvalidOperationException("The int vector parameter is incorrect.");
+    }
+}
+
 FixtureBlock.release(block);
 FixtureBlock.release(null);
 
 Console.WriteLine("Symbol dispatch smoke test passed.");
 return 0;
+
+static T Call<T>(FixtureBlock target, string name, params object?[] arguments)
+{
+    var method = typeof(FixtureBlock).GetMethod(name)
+        ?? throw new InvalidOperationException($"FixtureBlock.{name} is unavailable.");
+    return (T)method.Invoke(method.IsStatic ? null : target, arguments)!;
+}

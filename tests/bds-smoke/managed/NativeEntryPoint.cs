@@ -61,6 +61,15 @@ public static class NativeEntryPoint
             var eduModeAgain = platform is not null && platform.isEduMode();
             var maxRequestsAgain = platform?.getMaxSimultaneousServiceRequests() ?? uint.MaxValue;
 
+            // These virtual getters return std::vector<std::string> through the hidden sret
+            // buffer. The shim copies the elements into a thread-local view that the managed
+            // side decodes immediately.
+            var addresses = platform?.getIPAddresses() ?? [];
+            var addressesAgain = platform?.getIPAddresses() ?? [];
+            var broadcast = platform?.getBroadcastAddresses() ?? [];
+            var userInput = platform?.getUserInput() ?? [];
+            var addressSample = addresses.Length > 0 ? addresses[0] : "";
+
             var ok = textA.Length > 0
                 && textA == textB
                 && textA != textC
@@ -76,7 +85,10 @@ public static class NativeEntryPoint
                 && platform is not null
                 && eduMode == eduModeAgain
                 && maxRequests == maxRequestsAgain
-                && float.IsFinite(screenX);
+                && float.IsFinite(screenX)
+                && addresses.SequenceEqual(addressesAgain)
+                && broadcast is not null
+                && userInput is not null;
             var result =
                 "load=managed\n"
                 + $"a={textA}\n"
@@ -96,7 +108,11 @@ public static class NativeEntryPoint
                 + $"edu={eduMode}\n"
                 + $"maxRequests={maxRequests}\n"
                 + $"screenX={screenX}\n"
-                + $"stable={eduMode == eduModeAgain && maxRequests == maxRequestsAgain}\n"
+                + $"addresses={addresses.Length}\n"
+                + $"address={addressSample}\n"
+                + $"broadcast={broadcast.Length}\n"
+                + $"userInput={userInput.Length}\n"
+                + $"stable={eduMode == eduModeAgain && maxRequests == maxRequestsAgain && addresses.SequenceEqual(addressesAgain)}\n"
                 + $"result={(ok ? "OK" : "FAIL")}\n";
             if (resultPath is not null)
             {

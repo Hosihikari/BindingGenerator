@@ -4,6 +4,9 @@
 // slots without any headers. Only the exported behaviour is stable; the compiler
 // is free to lay out the class as it sees fit.
 
+#include <string>
+#include <vector>
+
 class FixtureBlock
 {
 public:
@@ -11,6 +14,12 @@ public:
     int add(int value) const;
     virtual int isReady() const;
     virtual int scale(int factor) const;
+    std::string label() const;
+    std::vector<int> numbers() const;
+    std::vector<std::string> names() const;
+    static std::vector<int> squares(int count);
+    int countNames(std::vector<std::string> const& values) const;
+    int sumValues(std::vector<int> const& values) const;
     static FixtureBlock* create(int x, int y);
     static void release(FixtureBlock* block);
 
@@ -34,6 +43,48 @@ int FixtureBlock::isReady() const
 int FixtureBlock::scale(int factor) const
 {
     return (x_ + y_) * factor;
+}
+
+std::string FixtureBlock::label() const
+{
+    return std::to_string(x_ + y_);
+}
+
+std::vector<int> FixtureBlock::numbers() const
+{
+    return {x_, y_};
+}
+
+std::vector<std::string> FixtureBlock::names() const
+{
+    return {std::to_string(x_), std::to_string(y_)};
+}
+
+std::vector<int> FixtureBlock::squares(int count)
+{
+    std::vector<int> result;
+    for (int i = 0; i < count; ++i)
+    {
+        result.push_back(i * i);
+    }
+
+    return result;
+}
+
+int FixtureBlock::countNames(std::vector<std::string> const& values) const
+{
+    return static_cast<int>(values.size()) + x_;
+}
+
+int FixtureBlock::sumValues(std::vector<int> const& values) const
+{
+    int total = 0;
+    for (int value : values)
+    {
+        total += value;
+    }
+
+    return total + y_;
 }
 
 FixtureBlock* FixtureBlock::create(int x, int y)

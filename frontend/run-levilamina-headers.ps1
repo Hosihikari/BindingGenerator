@@ -24,7 +24,13 @@ $Headers = @(
     "mc/world/level/ChunkPos.h",
     "mc/world/level/BlockSource.h",
     "mc/world/level/Level.h",
-    "mc/world/item/registry/ItemStack.h"
+    "mc/world/item/registry/ItemStack.h",
+    "mc/world/phys/AABB.h",
+    "mc/network/packet/ActorLink.h",
+    "mc/world/ActorUniqueID.h",
+    "mc/world/effect/MobEffectInstance.h",
+    "mc/world/actor/DistanceSortedActor.h",
+    "mc/world/item/ItemDescriptor.h"
 )
 foreach ($header in $Headers) {
     if (-not (Test-Path (Join-Path $SourceRoot $header))) {

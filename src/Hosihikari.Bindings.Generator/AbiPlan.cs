@@ -448,6 +448,7 @@ internal sealed class AbiPlan
         var syntheticMembers = new Dictionary<string, List<MemberRecord>>(StringComparer.Ordinal);
         var symbolByValueReturns = new Dictionary<string, DeclarationRecord>(StringComparer.Ordinal);
         var symbolByValueCopyRequired = new Dictionary<string, bool>(StringComparer.Ordinal);
+        var symbolVectorElements = new Dictionary<string, DeclarationRecord>(StringComparer.Ordinal);
         if (symbolDispatch)
         {
             foreach (var candidate in publicDeclarationsByQualifiedName.Values)
@@ -485,6 +486,23 @@ internal sealed class AbiPlan
 
                 symbolByValueReturns[candidate.QualifiedName] = candidate;
                 symbolByValueCopyRequired[candidate.QualifiedName] = destructor is not null;
+            }
+
+            // Vector elements are copied as bytes and released without running a destructor.
+            // A user-provided copy constructor such as AABB's is compatible with that rule as
+            // long as the record's storage is trivially destructible.
+            foreach (var candidate in publicDeclarationsByQualifiedName.Values)
+            {
+                if (candidate.Kind is not ("class" or "struct" or "union")
+                    || candidate.Abstract
+                    || !candidate.TriviallyDestructible
+                    || !layoutByDeclarationId.TryGetValue(candidate.Id, out var vectorLayout)
+                    || vectorLayout.Size <= 0)
+                {
+                    continue;
+                }
+
+                symbolVectorElements[candidate.QualifiedName] = candidate;
             }
         }
 
@@ -894,7 +912,7 @@ internal sealed class AbiPlan
                     continue;
                 }
 
-                if (symbolDispatch && !IsSymbolDispatchSupported(create, symbolByValueReturns, out reason))
+                if (symbolDispatch && !IsSymbolDispatchSupported(create, symbolByValueReturns, symbolVectorElements, out reason))
                 {
                     skipReasons[constructor.Id] = reason ?? "the constructor is not supported by symbol dispatch";
                     continue;
@@ -1113,6 +1131,7 @@ internal sealed class AbiPlan
                         symbolDispatch,
                         symbolByValueReturns,
                         symbolByValueCopyRequired,
+                        symbolVectorElements,
                         variants,
                         callables,
                         out var function,
@@ -1122,7 +1141,7 @@ internal sealed class AbiPlan
                     continue;
                 }
 
-                if (symbolDispatch && !IsSymbolDispatchSupported(function, symbolByValueReturns, out reason))
+                if (symbolDispatch && !IsSymbolDispatchSupported(function, symbolByValueReturns, symbolVectorElements, out reason))
                 {
                     skipReasons[method.Id] = reason ?? "the member is not supported by symbol dispatch";
                     continue;
@@ -1603,6 +1622,7 @@ internal sealed class AbiPlan
                             destroyableDeclarationIds,
                             enumUnderlyingByName,
                             linkCarrier,
+                            null,
                             variants,
                             callables,
                             out var returnKind,
@@ -1730,6 +1750,35 @@ internal sealed class AbiPlan
                         Static = true,
                     });
                 }
+            }
+        }
+
+        if (symbolDispatch)
+        {
+            // A by-value vector return copies record elements into owned, aligned blocks. The
+            // managed array constructs owning wrappers, so each element type needs a destroy
+            // entry even when the class has no constructors or other owned path.
+            var destroyableIds = functions
+                .Where(function => function.Kind == AbiFunctionKind.Destroy)
+                .Select(function => function.DeclarationId)
+                .ToHashSet(StringComparer.Ordinal);
+            var ownedElementNames = functions
+                .Where(function => function.ReturnArray
+                    && function.ArrayElementOwnership == ArrayElementOwnership.RecordCopy)
+                .Select(function => function.ArrayElementNativeType)
+                .OfType<string>()
+                .Distinct(StringComparer.Ordinal)
+                .ToList();
+            foreach (var elementName in ownedElementNames)
+            {
+                if (!symbolVectorElements.TryGetValue(elementName, out var elementDeclaration)
+                    || !declarationNames.ContainsKey(elementDeclaration.Id)
+                    || !destroyableIds.Add(elementDeclaration.Id))
+                {
+                    continue;
+                }
+
+                functions.Add(BuildDestroy(elementDeclaration, declarationNames, false));
             }
         }
 
@@ -2632,6 +2681,7 @@ internal sealed class AbiPlan
         bool symbolDispatch,
         IReadOnlyDictionary<string, DeclarationRecord> symbolByValueReturns,
         IReadOnlyDictionary<string, bool> symbolByValueCopyRequired,
+        IReadOnlyDictionary<string, DeclarationRecord> symbolVectorElements,
         VariantRegistry variants,
         CallableRegistry callables,
         out AbiFunction function,
@@ -2710,6 +2760,7 @@ internal sealed class AbiPlan
                 destroyableDeclarationIds,
                 enumUnderlyingByName,
                 linkCarrier,
+                symbolDispatch ? symbolVectorElements : null,
                 variants,
                 callables,
                 out returnKind,
@@ -2833,6 +2884,7 @@ internal sealed class AbiPlan
         IReadOnlySet<string> destroyableDeclarationIds,
         IReadOnlyDictionary<string, string> enumUnderlyingByName,
         bool linkCarrier,
+        IReadOnlyDictionary<string, DeclarationRecord>? symbolVectorElements,
         VariantRegistry variants,
         CallableRegistry callables,
         out AbiKind kind,
@@ -2933,6 +2985,7 @@ internal sealed class AbiPlan
                     destroyableDeclarationIds,
                     enumUnderlyingByName,
                     linkCarrier,
+                    symbolVectorElements,
                     variants,
                     callables,
                     out kind,
@@ -3231,13 +3284,22 @@ internal sealed class AbiPlan
                 return true;
             }
 
-            if (TryResolveRecordWrapper(
+            // Symbol dispatch owns record elements through the shim's aligned byte copies, so
+            // it does not require a compiled-in destroy function for the element type.
+            var recordWrapper = TryResolveRecordWrapper(
                     sequenceElement,
                     declarationsByQualifiedName,
                     declarationNames,
                     destroyableDeclarationIds,
                     false,
-                    out var recordWrapper))
+                    out var resolvedRecordWrapper)
+                ? resolvedRecordWrapper
+                : symbolVectorElements is not null
+                    && symbolVectorElements.TryGetValue(sequenceElement, out var symbolVectorElement)
+                    && declarationNames.TryGetValue(symbolVectorElement.Id, out var symbolVectorElementName)
+                        ? "global::" + symbolVectorElementName.NamespaceName + "." + symbolVectorElementName.ClassName
+                        : null;
+            if (recordWrapper is not null)
             {
                 kind = AbiKind.ArrayView;
                 arrayElementKind = AbiKind.Opaque;
@@ -3499,7 +3561,12 @@ internal sealed class AbiPlan
         }
 
         var arguments = SplitTemplateArguments(text[prefix.Length..^1].Trim()).ToList();
-        if (arguments.Count != 1)
+        // The symbol frontend spells the default allocator explicitly; the header frontend
+        // omits it. A custom allocator is a different type and must not be reinterpreted.
+        if (arguments.Count is not (1 or 2)
+            || (arguments.Count == 2
+                && !arguments[1].Replace(" ", "", StringComparison.Ordinal)
+                    .StartsWith("std::allocator<", StringComparison.Ordinal)))
         {
             return false;
         }
@@ -5771,6 +5838,7 @@ internal sealed class AbiPlan
     private static bool IsSymbolDispatchSupported(
         AbiFunction function,
         IReadOnlyDictionary<string, DeclarationRecord> symbolByValueReturns,
+        IReadOnlyDictionary<string, DeclarationRecord> symbolVectorElements,
         out string? reason)
     {
         reason = null;
@@ -5786,10 +5854,12 @@ internal sealed class AbiPlan
         var ownedRecordReturn = function.ReturnOwned
             && function.ReturnKind == AbiKind.Opaque
             && !IsSingleLevelPointerOrReference(function.NativeReturnType);
+        var optionalRefReturn = function.ReturnOptional
+            && function.ReturnKind == AbiKind.Opaque
+            && !function.ReturnOwned;
         if (function.ReturnExpected
-            || function.ReturnOptional
+            || (function.ReturnOptional && !optionalRefReturn)
             || function.ReturnUniquePtr
-            || function.ReturnArray
             || (function.ReturnOwned && !ownedRecordReturn)
             || function.SharedWrapper != SharedWrapperKind.None
             || function.TimeConversion != TimeConversion.None
@@ -5798,6 +5868,16 @@ internal sealed class AbiPlan
             || function.MapValueKind != AbiKind.Void)
         {
             reason = "the return type needs a generated C++ type";
+            return false;
+        }
+
+        if (function.ReturnArray && !IsSymbolVectorElementSupported(
+                function.ArrayElementKind,
+                function.ArrayElementOwnership,
+                function.ArrayElementNativeType,
+                symbolVectorElements))
+        {
+            reason = "the vector element type is not supported by symbol dispatch";
             return false;
         }
 
@@ -5818,9 +5898,12 @@ internal sealed class AbiPlan
             case AbiKind.F32:
             case AbiKind.F64:
             case AbiKind.StringView:
+            case AbiKind.ArrayView:
                 break;
             case AbiKind.Opaque:
-                if (!ownedRecordReturn && !IsSingleLevelPointerOrReference(function.NativeReturnType))
+                if (!ownedRecordReturn
+                    && !optionalRefReturn
+                    && !IsSingleLevelPointerOrReference(function.NativeReturnType))
                 {
                     reason = "by-value record returns are not supported by symbol dispatch";
                     return false;
@@ -5834,10 +5917,10 @@ internal sealed class AbiPlan
 
         foreach (var parameter in function.Parameters)
         {
-            if (parameter.IsOptional
-                || parameter.IsOptionalRef
+            var optionalRefParameter = parameter.IsOptionalRef && parameter.Kind == AbiKind.Opaque;
+            if ((parameter.IsOptional && !optionalRefParameter)
+                || (parameter.IsOptionalRef && !optionalRefParameter)
                 || parameter.IsUniquePtrParam
-                || parameter.IsVector
                 || parameter.IsMap
                 || parameter.VariantInfo is not null
                 || parameter.Callback is not null
@@ -5846,6 +5929,35 @@ internal sealed class AbiPlan
             {
                 reason = "the parameter needs a generated C++ type";
                 return false;
+            }
+
+            if (optionalRefParameter)
+            {
+                continue;
+            }
+
+            if (parameter.IsVector)
+            {
+                // A by-value vector parameter is destroyed by the callee under the MSVC ABI;
+                // the shim's local vector would then be destroyed twice. References and
+                // pointers stay owned by the shim for the duration of the call.
+                if (!IsReferenceType(parameter.NativeType) && !IsPointerType(parameter.NativeType))
+                {
+                    reason = "by-value vector parameters are not supported by symbol dispatch";
+                    return false;
+                }
+
+                if (!IsSymbolVectorElementSupported(
+                        parameter.VectorElementKind,
+                        parameter.VectorElementOwnership,
+                        parameter.VectorElementNativeType,
+                        symbolVectorElements))
+                {
+                    reason = "the vector element type is not supported by symbol dispatch";
+                    return false;
+                }
+
+                continue;
             }
 
             switch (parameter.Kind)
@@ -5888,9 +6000,17 @@ internal sealed class AbiPlan
                     if (parameter.IsByValueRecord)
                     {
                         if (parameter.NativePointee is null
-                            || !symbolByValueReturns.ContainsKey(parameter.NativePointee))
+                            || !symbolByValueReturns.TryGetValue(parameter.NativePointee, out var byValueRecord))
                         {
                             reason = "the by-value record parameter has no eligible layout";
+                            return false;
+                        }
+
+                        // The callee destroys non-trivial by-value parameters. A byte copy of
+                        // an owning record would then release the same resources as the source.
+                        if (!byValueRecord.TriviallyDestructible)
+                        {
+                            reason = "by-value record parameters must be trivially destructible";
                             return false;
                         }
 
@@ -5911,6 +6031,47 @@ internal sealed class AbiPlan
         }
 
         return true;
+    }
+
+    private static bool IsSymbolVectorElementSupported(
+        AbiKind elementKind,
+        ArrayElementOwnership ownership,
+        string? elementNativeType,
+        IReadOnlyDictionary<string, DeclarationRecord> symbolVectorElements)
+    {
+        switch (elementKind)
+        {
+            case AbiKind.StringView:
+                return true;
+            case AbiKind.Opaque:
+                return ownership switch
+                {
+                    // A single-level pointer element keeps its pointer bits.
+                    ArrayElementOwnership.None => true,
+                    // The shim copies record elements into an aligned byte blob.
+                    ArrayElementOwnership.RecordCopy => elementNativeType is not null
+                        && symbolVectorElements.ContainsKey(elementNativeType),
+                    _ => false,
+                };
+            case AbiKind.Bool:
+                // std::vector<bool> is a bit-packed specialization.
+                return false;
+            case AbiKind.I8:
+            case AbiKind.U8:
+            case AbiKind.I16:
+            case AbiKind.U16:
+            case AbiKind.I32:
+            case AbiKind.U32:
+            case AbiKind.I64:
+            case AbiKind.U64:
+            case AbiKind.USize:
+            case AbiKind.ISize:
+            case AbiKind.F32:
+            case AbiKind.F64:
+                return true;
+            default:
+                return false;
+        }
     }
 
     private static bool IsSingleLevelPointerOrReference(string canonical)

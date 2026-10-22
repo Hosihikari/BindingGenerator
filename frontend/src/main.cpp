@@ -1074,6 +1074,7 @@ private:
                 Object["abstract"] = Record->isAbstract();
                 Object["copyConstructible"] = CopyConstructible;
                 Object["triviallyCopyable"] = Record->isTriviallyCopyable();
+                Object["triviallyDestructible"] = Record->hasTrivialDestructor();
             }
         }
 
@@ -1339,7 +1340,7 @@ int main(int argc, char** argv) {
 
     llvm::json::Object Manifest;
     Manifest["schema"] = "hosihikari.bindings.ir/1";
-    Manifest["irVersion"] = "1.5.0";
+    Manifest["irVersion"] = "1.5.1";
 
     llvm::json::Object Frontend;
     Frontend["name"] = "libtooling";

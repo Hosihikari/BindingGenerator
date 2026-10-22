@@ -77,7 +77,7 @@ The ELF reader resolves `_ZTI` objects through `.rela.dyn` addends and reads `__
 - `Mob : Actor`
 - `Player : Mob`
 
-Results are written to `variant.bases` (IR 1.4.1+), and the header supplement adds `declaration.triviallyCopyable` in IR 1.5.0. The PDB publics for this build contain no `??_R*` symbols for game classes, so Windows inheritance comes from the header supplement or stays empty.
+Results are written to `variant.bases` (IR 1.4.1+), and the header supplement adds `declaration.triviallyCopyable` in IR 1.5.0 and `declaration.triviallyDestructible` in IR 1.5.1. The PDB publics for this build contain no `??_R*` symbols for game classes, so Windows inheritance comes from the header supplement or stays empty.
 
 ## Header supplement
 
@@ -93,9 +93,9 @@ python frontend/merge-symbol-ir.py `
 
 The merge:
 
-- copies class traits (`abstract`, `copyConstructible`, `triviallyCopyable`) and instance/static field members into both configurations;
+- copies class traits (`abstract`, `copyConstructible`, `triviallyCopyable`, `triviallyDestructible`) and instance/static field members into both configurations;
 - copies a merged class layout only when it has fields or bases, and drops header vtable slots (the symbol IR keeps per-configuration `vtableIndex`);
-- copies every enum declaration and every record declaration referenced by a signature with a by-value type, including a size/align-only layout (template records use the demangler's compact `A<B,int>` spelling);
+- copies every enum declaration and every record declaration referenced by a signature with a by-value type, recursing into `std::vector`, `std::optional`, `std::pair`, and smart-pointer template arguments so sequence element records get a declaration and a size/align-only layout (template records use the demangler's compact `A<B,int>` spelling);
 - moves `layout.bases` into `variant.bases`, deduplicating against RTTI results;
 - adds header-only inline methods when no symbol method with the same normalized signature exists;
 - recursively copies base declarations, their layouts, and their fields.

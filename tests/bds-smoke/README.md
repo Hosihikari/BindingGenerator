@@ -48,11 +48,15 @@ platform=0x34B482203F0
 edu=True
 maxRequests=0
 screenX=0
+addresses=0
+address=
+broadcast=0
+userInput=0
 stable=True
 result=OK
 ```
 
-The smoke verifies the real module base and RVAs, the MSVC member-return convention for `std::string` and by-value records, inherited field access (`x`/`y`/`z` read and `a.x = 7` write), `BlockPos::neighbor`, `ChunkPos` construction from `BlockPos`, `ChunkPos::toBlockSpaceVec3` returning `Vec3`, `Vec3` field reads and `length`/`normalized`/`abs`, CLR hosting inside the server process, the generated C# wrapper (`Create`, `randomSeed`, `Dispose`), and three virtual calls on the live `AppPlatform` object (`isEduMode` slot 138, `getMaxSimultaneousServiceRequests` slot 79, `getDefaultScreenPositionX` slot 98) with stable repeat results.
+The smoke verifies the real module base and RVAs, the MSVC member-return convention for `std::string` and by-value records, inherited field access (`x`/`y`/`z` read and `a.x = 7` write), `BlockPos::neighbor`, `ChunkPos` construction from `BlockPos`, `ChunkPos::toBlockSpaceVec3` returning `Vec3`, `Vec3` field reads and `length`/`normalized`/`abs`, CLR hosting inside the server process, the generated C# wrapper (`Create`, `randomSeed`, `Dispose`), and virtual calls on the live `AppPlatform` object (`isEduMode` slot 138, `getMaxSimultaneousServiceRequests` slot 79, `getDefaultScreenPositionX` slot 98) with stable repeat results. It also calls the `std::vector<std::string>` getters `getIPAddresses`, `getBroadcastAddresses`, and `getUserInput` through their virtual slots, exercising the hidden sret buffer and the thread-local array view; this server returns empty arrays, and two `getIPAddresses` calls compare equal.
 
 `Level` itself is not reachable in this setup: LeviLamina's hook-based `ll::service::bedrock::getLevel()` returns an empty reference here, while BDS's own `ServiceLocator<AppPlatform>::mService` is populated. The AppPlatform object provides the live vtable/RTTI check; Level-level tests need a loader path that exposes the Level service.
 
