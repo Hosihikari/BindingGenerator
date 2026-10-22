@@ -52,6 +52,15 @@ public static class NativeEntryPoint
             using var absolute = vector.abs();
             var absoluteLength = absolute.length();
 
+            // The native host reads ServiceLocator<AppPlatform>::mService, a live server
+            // object with a real vtable. `isEduMode` is a pure virtual getter.
+            var platform = argument != IntPtr.Zero ? AppPlatform.Borrow(argument) : null;
+            var eduMode = platform is not null && platform.isEduMode();
+            var maxRequests = platform?.getMaxSimultaneousServiceRequests() ?? 0;
+            var screenX = platform?.getDefaultScreenPositionX() ?? float.NaN;
+            var eduModeAgain = platform is not null && platform.isEduMode();
+            var maxRequestsAgain = platform?.getMaxSimultaneousServiceRequests() ?? uint.MaxValue;
+
             var ok = textA.Length > 0
                 && textA == textB
                 && textA != textC
@@ -63,7 +72,11 @@ public static class NativeEntryPoint
                 && vectorLength > 0.0f
                 && MathF.Abs(vectorLength - expectedLength) < 0.01f
                 && MathF.Abs(normalizedLength - 1.0f) < 0.01f
-                && MathF.Abs(absoluteLength - vectorLength) < 0.01f;
+                && MathF.Abs(absoluteLength - vectorLength) < 0.01f
+                && platform is not null
+                && eduMode == eduModeAgain
+                && maxRequests == maxRequestsAgain
+                && float.IsFinite(screenX);
             var result =
                 "load=managed\n"
                 + $"a={textA}\n"
@@ -79,6 +92,11 @@ public static class NativeEntryPoint
                 + $"length={vectorLength}\n"
                 + $"normalized={normalizedLength}\n"
                 + $"absolute={absoluteLength}\n"
+                + $"platform=0x{argument:X}\n"
+                + $"edu={eduMode}\n"
+                + $"maxRequests={maxRequests}\n"
+                + $"screenX={screenX}\n"
+                + $"stable={eduMode == eduModeAgain && maxRequests == maxRequestsAgain}\n"
                 + $"result={(ok ? "OK" : "FAIL")}\n";
             if (resultPath is not null)
             {

@@ -7,6 +7,7 @@
 
 #include <windows.h>
 
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -37,7 +38,7 @@ void write_error(std::filesystem::path const& path, std::string const& message) 
     output << "result=FAIL\n";
 }
 
-bool host_and_run(std::filesystem::path const& directory, std::string& error) {
+bool host_and_run(std::filesystem::path const& directory, std::uintptr_t service, std::string& error) {
     auto const managedDll = directory / "Hosihikari.SymbolSmoke.dll";
     auto const runtimeConfig = directory / "Hosihikari.SymbolSmoke.runtimeconfig.json";
     auto const nethostPath = directory / "nethost.dll";
@@ -115,7 +116,7 @@ bool host_and_run(std::filesystem::path const& directory, std::string& error) {
         return false;
     }
 
-    const int result = run(nullptr, 0);
+    const int result = run(reinterpret_cast<void*>(service), 0);
     close(context);
     if (result != 0) {
         error = "managed symbol smoke returned a failure";
@@ -136,8 +137,26 @@ DWORD WINAPI worker(LPVOID) {
     SetEnvironmentVariableW(L"HS_SYMBOL_SHIM", shimPath.c_str());
     SetEnvironmentVariableW(L"HS_SYMBOL_RESULT", resultPath.c_str());
 
+    // PeEditor exports the game's data symbols. ServiceLocator<T>::mService is a
+    // NonOwnerPointer whose first pointer is the live service object. AppPlatform is a
+    // server-side service with a real vtable, so the managed side can call a virtual
+    // getter on it without constructing anything.
+    std::uintptr_t platform = 0;
+    HMODULE executable = GetModuleHandleW(nullptr);
+    auto service = reinterpret_cast<void* const*>(GetProcAddress(
+        executable,
+        R"(?mService@?$ServiceLocator@VAppPlatform@@@@2V?$NonOwnerPointer@VAppPlatform@@@Bedrock@@A)"));
+    if (service != nullptr) {
+        platform = reinterpret_cast<std::uintptr_t>(*service);
+    }
+
+    {
+        std::ofstream diagnostic(directory / "symbol-smoke-plugin.txt", std::ios::binary);
+        diagnostic << "appplatform=0x" << std::hex << platform << std::dec << std::endl;
+    }
+
     std::string error;
-    if (!host_and_run(directory, error)) {
+    if (!host_and_run(directory, platform, error) && !std::filesystem::exists(resultPath)) {
         write_error(resultPath, error);
     }
 
