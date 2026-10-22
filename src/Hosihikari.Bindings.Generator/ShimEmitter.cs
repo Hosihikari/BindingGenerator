@@ -2853,14 +2853,23 @@ internal static class ShimEmitter
 
         // A typed non-trivial return through a free-function pointer would place the return
         // buffer first, which mismatches MSVC member functions. Pass the buffer explicitly and
-        // construct/destroy the optional or smart pointer inside it instead.
+        // construct/destroy the optional or smart pointer inside it instead. The Itanium ABI
+        // puts the buffer first for members as well, and returns small trivially copyable
+        // optionals in registers, so Linux uses the typed return.
         var sharedReturnType = function.ReturnKind == AbiKind.Shared
             ? (function.SharedWrapper == SharedWrapperKind.WeakPtr ? "std::weak_ptr<void>" : "std::shared_ptr<void>")
             : null;
+        var manualOptionalSret = optionalReturnType is not null
+            && string.Equals(configuration.Os, "windows", StringComparison.Ordinal);
+        var manualTypedSret = manualOptionalSret || sharedReturnType is not null;
         var typedReturnType = optionalReturnType ?? sharedReturnType;
-        if (typedReturnType is not null)
+        if (manualTypedSret)
         {
             callReturn = "void";
+        }
+        else if (optionalReturnType is not null)
+        {
+            callReturn = optionalReturnType;
         }
 
         if (memberStringReturn)
@@ -2877,7 +2886,7 @@ internal static class ShimEmitter
         {
             yield return "    alignas(HsVector) unsigned char hs_vectorStorage[sizeof(HsVector)];";
         }
-        else if (typedReturnType is not null)
+        else if (manualTypedSret)
         {
             yield return $"    using HsTypedResult = {typedReturnType};";
             yield return "    alignas(HsTypedResult) unsigned char hs_typedStorage[sizeof(HsTypedResult)];";
@@ -2891,7 +2900,7 @@ internal static class ShimEmitter
         if (memberStringReturn
             || largeRecordReturn
             || (arrayReturn && !borrowedVectorReturn)
-            || typedReturnType is not null)
+            || manualTypedSret)
         {
             callParameters.Insert(sretIndex, memberStringReturn ? function.NativeReturnType + "*" : "void*");
         }
@@ -2934,7 +2943,7 @@ internal static class ShimEmitter
                         ? "static_cast<void*>(hs_recordStorage)"
                         : arrayReturn && !borrowedVectorReturn
                             ? "static_cast<void*>(hs_vectorStorage)"
-                            : typedReturnType is not null
+                            : manualTypedSret
                                 ? "static_cast<void*>(hs_typedStorage)"
                                 : null;
                 if (sretArgument is not null && sretIndex == 0)
@@ -3012,30 +3021,58 @@ internal static class ShimEmitter
             }
             else if (optionalReturnType is not null)
             {
-                yield return $"    {call};";
-                yield return "    auto& hs_result = *reinterpret_cast<HsTypedResult*>(hs_typedStorage);";
+                if (manualOptionalSret)
+                {
+                    yield return $"    {call};";
+                    yield return "    auto& hs_result = *reinterpret_cast<HsTypedResult*>(hs_typedStorage);";
+                }
+                else
+                {
+                    yield return $"    auto hs_result = {call};";
+                }
+
                 yield return "    *hs_hasValue = hs_result.has_value();";
                 if (function.ReturnOptionalRecord)
                 {
                     var optionalRecordLayout = layouts[function.ReturnDeclarationId!];
                     var size = optionalRecordLayout.Size.ToString(CultureInfo.InvariantCulture);
                     var align = (optionalRecordLayout.Align > 0 ? optionalRecordLayout.Align : 8).ToString(CultureInfo.InvariantCulture);
-                    yield return "    if (!*hs_hasValue) { hs_result.~HsTypedResult(); return nullptr; }";
+                    if (manualOptionalSret)
+                    {
+                        yield return "    if (!*hs_hasValue) { hs_result.~HsTypedResult(); return nullptr; }";
+                    }
+                    else
+                    {
+                        yield return "    if (!*hs_hasValue) { return nullptr; }";
+                    }
+
                     yield return $"    auto* const hs_record = static_cast<void*>(::operator new(static_cast<std::size_t>({size}), std::align_val_t({align})));";
                     yield return $"    std::memcpy(hs_record, hs_result->data, static_cast<std::size_t>({size}));";
-                    yield return "    hs_result.~HsTypedResult();";
+                    if (manualOptionalSret)
+                    {
+                        yield return "    hs_result.~HsTypedResult();";
+                    }
+
                     yield return "    return hs_record;";
                 }
                 else if (function.ReturnKind == AbiKind.StringView)
                 {
                     yield return "    g_stringResult.assign(hs_result ? hs_result->data() : \"\", hs_result ? hs_result->size() : 0);";
-                    yield return "    hs_result.~HsTypedResult();";
+                    if (manualOptionalSret)
+                    {
+                        yield return "    hs_result.~HsTypedResult();";
+                    }
+
                     yield return "    return HosihikariStringView{g_stringResult.data(), g_stringResult.size()};";
                 }
                 else
                 {
                     yield return $"    auto hs_value = hs_result ? static_cast<{returnType}>(*hs_result) : {returnType}{{}};";
-                    yield return "    hs_result.~HsTypedResult();";
+                    if (manualOptionalSret)
+                    {
+                        yield return "    hs_result.~HsTypedResult();";
+                    }
+
                     yield return "    return hs_value;";
                 }
             }
