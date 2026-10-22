@@ -2183,8 +2183,9 @@ internal static class ShimEmitter
 
         if (virtualCall)
         {
-            var index = entry!.VTableIndex!.Value
-                + (string.Equals(configuration.Os, "windows", StringComparison.Ordinal) ? 0 : 2);
+            // The IR index is relative to the address point: Windows records the raw slot,
+            // and the Linux reader subtracts the two Itanium prefix entries already.
+            var index = entry!.VTableIndex!.Value;
             yield return "    auto* const hs_vtable = *reinterpret_cast<void***>(hs_self);";
             yield return $"    auto const hs_target = hs_vtable[{index.ToString(CultureInfo.InvariantCulture)}];";
         }
