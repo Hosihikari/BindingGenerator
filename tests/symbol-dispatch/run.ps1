@@ -43,11 +43,8 @@ try {
     }
     & (Join-Path $RepoRoot "frontend\run-symbols.ps1") @symbolArguments
 
-    $AbiHeader = @(
-        (Join-Path $RepoRoot "..\Bindings.Abi\native\hosihikari_abi.h"),
-        (Join-Path $RepoRoot "..\Abi\native\hosihikari_abi.h")
-    ) | Where-Object { Test-Path $_ } | Select-Object -First 1
-    if (-not $AbiHeader) { throw "hosihikari_abi.h was not found in a sibling Abi checkout." }
+    $AbiHeader = Join-Path $RepoRoot "..\Bindings.Abi\native\hosihikari_abi.h"
+    if (-not (Test-Path $AbiHeader)) { throw "hosihikari_abi.h was not found under ..\Bindings.Abi." }
 
     dotnet run --project (Join-Path $RepoRoot "src\Hosihikari.Bindings.Generator\Hosihikari.Bindings.Generator.csproj") -c Release -- `
         emit (Join-Path $IrDirectory "ir-manifest.json") $IrDirectory $DispatchDirectory `

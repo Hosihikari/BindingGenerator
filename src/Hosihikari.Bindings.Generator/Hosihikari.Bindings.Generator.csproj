@@ -20,7 +20,7 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <ProjectReference Include="../../../Ir/src/Hosihikari.Bindings.Ir/Hosihikari.Bindings.Ir.csproj" />
+    <ProjectReference Include="../../../Bindings.Ir/src/Hosihikari.Bindings.Ir/Hosihikari.Bindings.Ir.csproj" />
   </ItemGroup>
 
 </Project>
