@@ -5153,14 +5153,9 @@ internal sealed class AbiPlan
                 return false;
             }
 
-            if (!declarationsByQualifiedName.TryGetValue(optionalInner, out var optionalDeclaration)
-                && !declarationsByQualifiedName.TryGetValue(CompactTemplateName(optionalInner), out optionalDeclaration))
-            {
-                reason = $"optional record parameter '{optionalInner}' is not a known bindable declaration";
-                return false;
-            }
-
-            if (optionalDeclaration.Abstract
+            if ((!declarationsByQualifiedName.TryGetValue(optionalInner, out var optionalDeclaration)
+                    && !declarationsByQualifiedName.TryGetValue(CompactTemplateName(optionalInner), out optionalDeclaration))
+                || optionalDeclaration.Abstract
                 || !optionalDeclaration.CopyConstructible)
             {
                 reason = $"optional record parameter '{optionalInner}' is abstract or not copy-constructible";
