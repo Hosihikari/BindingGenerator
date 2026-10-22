@@ -43,11 +43,22 @@ try {
     }
     & (Join-Path $RepoRoot "frontend\run-symbols.ps1") @symbolArguments
 
+    # The PDB carries signatures only. Merge the hand-authored header facts (FixturePair's
+    # layout and trivially-destructible trait) so by-value record dispatch can be exercised.
+    $HeaderFixture = Join-Path $RepoRoot "tests\fixtures\symbol-dispatch-header"
+    $MergedDirectory = Join-Path $Output "ir-merged"
+    & python (Join-Path $RepoRoot "frontend\merge-symbol-ir.py") `
+        --symbol $IrDirectory `
+        --header $HeaderFixture `
+        --output $MergedDirectory `
+        --classes FixtureBlock
+    if ($LASTEXITCODE -ne 0) { throw "merge-symbol-ir.py exited with $LASTEXITCODE" }
+
     $AbiHeader = Join-Path $RepoRoot "..\Bindings.Abi\native\hosihikari_abi.h"
     if (-not (Test-Path $AbiHeader)) { throw "hosihikari_abi.h was not found under ..\Bindings.Abi." }
 
     dotnet run --project (Join-Path $RepoRoot "src\Hosihikari.Bindings.Generator\Hosihikari.Bindings.Generator.csproj") -c Release -- `
-        emit (Join-Path $IrDirectory "ir-manifest.json") $IrDirectory $DispatchDirectory `
+        emit (Join-Path $MergedDirectory "ir-manifest.json") $MergedDirectory $DispatchDirectory `
         --abi-header $AbiHeader `
         --symbol-dispatch --target-module "fixture-bds.dll"
 

@@ -2309,7 +2309,7 @@ internal static class ShimEmitter
                 yield break;
             }
 
-            if (parameterLayout.Size <= 8)
+            if (parameterLayout.Size <= 8 && parameter.ByValueTriviallyCopyable)
             {
                 // Small trivial records are passed in a register; the call argument reads
                 // the handle's bytes directly.
@@ -2467,7 +2467,9 @@ internal static class ShimEmitter
             layouts.TryGetValue(function.ReturnDeclarationId, out returnLayout);
         }
 
-        var smallRecordReturn = ownedRecordReturn && returnLayout is { Size: <= 8 };
+        var smallRecordReturn = ownedRecordReturn
+            && function.ReturnTriviallyCopyable
+            && returnLayout is { Size: <= 8 };
         var largeRecordReturn = ownedRecordReturn && !smallRecordReturn;
         var returnNeedsCopy = largeRecordReturn && function.ReturnRequiresCopy;
         MemberRecord? returnCopyConstructor = null;
@@ -2902,14 +2904,18 @@ internal static class ShimEmitter
     private static string? ByValueRegisterType(
         AbiParameter parameter,
         IReadOnlyDictionary<string, LayoutInfo> layouts) =>
-        ByValueLayout(parameter, layouts)?.Size switch
-        {
-            1 => "std::uint8_t",
-            2 => "std::uint16_t",
-            4 => "std::uint32_t",
-            8 => "std::uint64_t",
-            _ => null,
-        };
+        // A user-provided copy constructor makes the record non-trivial for calls, so the
+        // MSVC and Itanium ABIs pass it by hidden reference even when it is small.
+        parameter.ByValueTriviallyCopyable
+            ? ByValueLayout(parameter, layouts)?.Size switch
+            {
+                1 => "std::uint8_t",
+                2 => "std::uint16_t",
+                4 => "std::uint32_t",
+                8 => "std::uint64_t",
+                _ => null,
+            }
+            : null;
 
     private static string ByValueArgument(
         AbiParameter parameter,

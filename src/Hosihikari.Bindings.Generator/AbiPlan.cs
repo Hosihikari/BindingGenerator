@@ -54,6 +54,12 @@ internal sealed class AbiParameter
     public string? NativePointee { get; init; }
     public string? ByValueDeclarationId { get; init; }
     public bool IsByValueRecord { get; init; }
+
+    /// <summary>
+    /// True when a by-value record can travel in integer registers. Records that are only
+    /// trivially destructible use the memory convention even when they are small.
+    /// </summary>
+    public bool ByValueTriviallyCopyable { get; init; }
     public bool IsPointer => AbiPlan.IsPointerType(NativeType);
     public bool IsReference { get; init; }
     public bool IsRValueReference { get; init; }
@@ -232,6 +238,9 @@ internal sealed class AbiFunction
     public bool ReturnNullable { get; init; }
     public string? ReturnDeclarationId { get; init; }
     public bool ReturnRequiresCopy { get; init; }
+
+    /// <summary>True when a by-value record return can be read from the register result.</summary>
+    public bool ReturnTriviallyCopyable { get; init; }
 
     /// <summary>Absolute bit offset for symbol-dispatched field accessors.</summary>
     public long? FieldBitOffset { get; init; }
@@ -462,30 +471,47 @@ internal sealed class AbiPlan
                 }
 
                 var candidateMembers = membersByDeclaration.TryGetValue(candidate.Id, out var value) ? value : [];
-                var destructor = candidateMembers.FirstOrDefault(member =>
-                    member.Kind == "destructor" && member.Access == "public");
-                if (destructor is null)
+                var hasVirtual = candidateMembers.Any(member => member.Virtual);
+                if (candidate.TriviallyDestructible)
                 {
-                    // The memcpy/register paths are only valid for trivially copyable types.
-                    if (!candidate.TriviallyCopyable
-                        || candidateMembers.Any(member => member.Virtual)
-                        || (layout.Size <= 8 && layout.Size is not (1 or 2 or 4 or 8)))
+                    if (candidate.TriviallyCopyable)
+                    {
+                        // Trivial records use the register path when small and the memory path
+                        // otherwise.
+                        if (hasVirtual || (layout.Size <= 8 && layout.Size is not (1 or 2 or 4 or 8)))
+                        {
+                            continue;
+                        }
+                    }
+                    else if (hasVirtual)
+                    {
+                        // A user-provided copy constructor makes the record non-trivial for
+                        // calls, so it always uses the memory convention.
+                        continue;
+                    }
+                }
+                else
+                {
+                    // A non-trivial destructor requires the copy-constructor and destructor
+                    // symbols so the shim can release the returned temporary.
+                    var destructor = candidateMembers.FirstOrDefault(member =>
+                        member.Kind == "destructor"
+                        && member.Access == "public"
+                        && HasSymbolAddress(member));
+                    if (destructor is null
+                        || layout.Size <= 8
+                        || !candidateMembers.Any(member =>
+                            member.Kind == "constructor"
+                            && member.Access == "public"
+                            && IsCopyConstructor(member, candidate.QualifiedName)
+                            && HasSymbolAddress(member)))
                     {
                         continue;
                     }
                 }
-                else if (layout.Size <= 8
-                    || !candidateMembers.Any(member =>
-                        member.Kind == "constructor"
-                        && member.Access == "public"
-                        && IsCopyConstructor(member, candidate.QualifiedName)
-                        && HasSymbolAddress(member)))
-                {
-                    continue;
-                }
 
                 symbolByValueReturns[candidate.QualifiedName] = candidate;
-                symbolByValueCopyRequired[candidate.QualifiedName] = destructor is not null;
+                symbolByValueCopyRequired[candidate.QualifiedName] = !candidate.TriviallyDestructible;
             }
 
             // Vector elements are copied as bytes and released without running a destructor.
@@ -794,7 +820,10 @@ internal sealed class AbiPlan
         {
             if (!membersByDeclaration.TryGetValue(declaration.Id, out var declarationMembers))
             {
-                if (!destroyableDeclarationIds.Contains(declaration.Id))
+                // Header-derived dependency records carry no members. A by-value eligible
+                // record still needs its destroy entry because returned copies are owned.
+                if (!destroyableDeclarationIds.Contains(declaration.Id)
+                    && !(symbolDispatch && symbolByValueReturns.ContainsKey(declaration.QualifiedName)))
                 {
                     continue;
                 }
@@ -2738,6 +2767,7 @@ internal sealed class AbiPlan
         CallableAbiInfo? returnCallable = null;
         DeclarationRecord? byValueReturn = null;
         var returnRequiresCopy = false;
+        var returnTriviallyCopyable = false;
 
         if (symbolDispatch
             && method.Kind is "method" or "operator"
@@ -2747,6 +2777,7 @@ internal sealed class AbiPlan
             byValueReturn = byValueDeclaration;
             returnRequiresCopy = symbolByValueCopyRequired.TryGetValue(nativeReturnType, out var requiresCopy)
                 && requiresCopy;
+            returnTriviallyCopyable = byValueDeclaration.TriviallyCopyable;
             returnKind = AbiKind.Opaque;
             returnOwned = true;
             returnWrapperType = "global::" + declarationNames[byValueDeclaration.Id].NamespaceName + "."
@@ -2866,6 +2897,7 @@ internal sealed class AbiPlan
             ReturnNullable = returnNullable,
             ReturnDeclarationId = byValueReturn?.Id,
             ReturnRequiresCopy = returnRequiresCopy,
+            ReturnTriviallyCopyable = returnTriviallyCopyable,
             ReturnExpected = returnExpected,
             ExpectedErrorType = expectedErrorType,
             VariantInfo = returnVariant,
@@ -5233,6 +5265,7 @@ internal sealed class AbiPlan
                 NativePointee = byValueName,
                 ByValueDeclarationId = byValueDeclaration.Id,
                 IsByValueRecord = true,
+                ByValueTriviallyCopyable = byValueDeclaration.TriviallyCopyable,
                 IsReference = true,
                 IsConst = true,
                 WrapperType = LookupWrapperType(text, declarationsByQualifiedName, declarationNames),

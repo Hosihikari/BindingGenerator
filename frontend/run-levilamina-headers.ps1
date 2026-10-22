@@ -28,9 +28,25 @@ $Headers = @(
     "mc/world/phys/AABB.h",
     "mc/network/packet/ActorLink.h",
     "mc/world/ActorUniqueID.h",
+    "mc/world/ActorRuntimeID.h",
     "mc/world/effect/MobEffectInstance.h",
     "mc/world/actor/DistanceSortedActor.h",
-    "mc/world/item/ItemDescriptor.h"
+    "mc/world/item/ItemDescriptor.h",
+    "mc/math/Vec2.h",
+    "mc/common/Brightness.h",
+    "mc/common/BrightnessPair.h",
+    "mc/deps/core/data/InterpolationPair.h",
+    "mc/world/level/LevelSeed64.h",
+    "mc/deps/core/mce/Color.h",
+    "mc/enums/PlatformType.h",
+    "mc/enums/ARVRPlatform.h",
+    "mc/enums/AppFocusState.h",
+    "mc/enums/OsVersion.h",
+    "mc/enums/DeviceSunsetTier.h",
+    "mc/enums/UIScalingRules.h",
+    "mc/enums/VRControllerType.h",
+    "mc/network/NetworkConnectionType.h",
+    "mc/deps/core/secure_storage/SecureStorageKey.h"
 )
 foreach ($header in $Headers) {
     if (-not (Test-Path (Join-Path $SourceRoot $header))) {

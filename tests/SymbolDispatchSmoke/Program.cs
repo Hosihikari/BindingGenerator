@@ -38,6 +38,16 @@ if (!block.numbers().SequenceEqual([2, 3]))
     throw new InvalidOperationException("The by-value int vector return is incorrect.");
 }
 
+// FixturePair has a user-provided copy constructor but a trivial destructor, so it is passed
+// by hidden reference even though it is only 8 bytes.
+using (var pair = block.pair())
+{
+    if (block.sumPair(pair) != 7)
+    {
+        throw new InvalidOperationException("The trivially destructible by-value record is incorrect.");
+    }
+}
+
 // The checked-in Linux fixture IR covers the member string/vector returns above. The PDB-derived
 // Windows IR additionally contains the parameter and static cases; reflect so both IRs share
 // this program.

@@ -7,6 +7,19 @@
 #include <string>
 #include <vector>
 
+struct FixturePair
+{
+    int x;
+    int y;
+
+    FixturePair(int x_, int y_);
+    FixturePair(FixturePair const& other);
+};
+
+FixturePair::FixturePair(int x_, int y_) : x(x_), y(y_) {}
+
+FixturePair::FixturePair(FixturePair const& other) : x(other.x), y(other.y) {}
+
 class FixtureBlock
 {
 public:
@@ -20,6 +33,8 @@ public:
     static std::vector<int> squares(int count);
     int countNames(std::vector<std::string> const& values) const;
     int sumValues(std::vector<int> const& values) const;
+    FixturePair pair() const;
+    int sumPair(FixturePair value) const;
     static FixtureBlock* create(int x, int y);
     static void release(FixtureBlock* block);
 
@@ -85,6 +100,16 @@ int FixtureBlock::sumValues(std::vector<int> const& values) const
     }
 
     return total + y_;
+}
+
+FixturePair FixtureBlock::pair() const
+{
+    return FixturePair(x_, y_);
+}
+
+int FixtureBlock::sumPair(FixturePair value) const
+{
+    return value.x + value.y + x_;
 }
 
 FixtureBlock* FixtureBlock::create(int x, int y)
