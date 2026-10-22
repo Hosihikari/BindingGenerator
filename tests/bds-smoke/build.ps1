@@ -57,6 +57,7 @@ try {
 
     dotnet build (Join-Path $PSScriptRoot "managed\Hosihikari.SymbolSmoke.csproj") -c Release --nologo -v:q `
         -p:InteropDirectory=$Output/interop
+    if ($LASTEXITCODE -ne 0) { throw "managed smoke build failed with $LASTEXITCODE" }
 
     $ManagedOutput = Join-Path $PSScriptRoot "managed\bin\Release\net10.0"
     New-Item -ItemType Directory -Force -Path $PluginSource | Out-Null

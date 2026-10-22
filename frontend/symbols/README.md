@@ -30,7 +30,7 @@ dotnet run --project ../src/Hosihikari.Bindings.Generator/Hosihikari.Bindings.Ge
 ## What the symbols provide
 
 - Mangled public symbols and addresses from both images.
-- Demangled method names, parameter types, `const`, `static`, and MSVC access specifiers.
+- Demangled method names, parameter types, `const`, `static`, and MSVC access specifiers. Member ids include the `const` qualifier, so const and non-const overloads remain distinct records.
 - Windows return types (MSVC mangling) merged into Linux records by `qualified name + parameters + const`.
 - Vtable membership: Windows slots are read from the PE as image-base VAs; Linux slots are reconstructed from `R_X86_64_RELATIVE` addends in `.rela.dyn`.
 - No field layout, class size, field types, or `inline`/`defined` facts. The ELF DWARF covers only NetherNet/webrtc, and the PDB type stream is stripped.

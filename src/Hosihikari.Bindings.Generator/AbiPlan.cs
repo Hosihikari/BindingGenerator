@@ -884,7 +884,8 @@ internal sealed class AbiPlan
 
             var hasDestroy = created
                 || (hasPublicDestructor && !virtualDispatch)
-                || (allowOwnedByValue && destroyableDeclarationIds.Contains(declaration.Id));
+                || (allowOwnedByValue && destroyableDeclarationIds.Contains(declaration.Id))
+                || (symbolDispatch && symbolByValueReturns.ContainsKey(declaration.QualifiedName));
             if (hasDestroy)
             {
                 functions.Add(BuildDestroy(declaration, declarationNames, ownsBorrowedString));

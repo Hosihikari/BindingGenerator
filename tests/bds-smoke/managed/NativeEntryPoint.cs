@@ -20,20 +20,37 @@ public static class NativeEntryPoint
             using var b = BlockPos.Create(1.0f, 2.0f, 3.0f);
             using var c = BlockPos.Create(1.0f, 2.0f, 4.0f);
 
-            var textA = a.toString_f7aee3c8();
-            var textB = b.toString_f7aee3c8();
-            var textC = c.toString_f7aee3c8();
+            // The hash suffix on toString depends on the IR; resolve it by shape instead.
+            var toString = typeof(BlockPos).GetMethods()
+                .First(method => method.Name.StartsWith("toString", StringComparison.Ordinal)
+                    && method.GetParameters().Length == 0
+                    && method.ReturnType == typeof(string));
+            string Text(BlockPos value) => (string)toString.Invoke(value, null)!;
+
+            var textA = Text(a);
+            var textB = Text(b);
+            var textC = Text(c);
             var seedA = a.randomSeed();
             var seedB = b.randomSeed();
 
             var fields = a.x == 1 && a.y == 2 && a.z == 3;
             a.x = 7;
-            var textA2 = a.toString_f7aee3c8();
+            var textA2 = Text(a);
 
             using var moved = a.neighbor(0);
-            var movedText = moved.toString_f7aee3c8();
+            var movedText = Text(moved);
             using var rebuilt = BlockPos.Create((float)moved.x, (float)moved.y, (float)moved.z);
-            var rebuiltText = rebuilt.toString_f7aee3c8();
+            var rebuiltText = Text(rebuilt);
+
+            using var origin = BlockPos.Create(17.0f, 34.0f, 51.0f);
+            using var chunk = ChunkPos.Create(origin);
+            using var vector = chunk.toBlockSpaceVec3(64.0f);
+            var vectorLength = vector.length();
+            var expectedLength = MathF.Sqrt(vector.x * vector.x + vector.y * vector.y + vector.z * vector.z);
+            using var normalized = vector.normalized();
+            var normalizedLength = normalized.length();
+            using var absolute = vector.abs();
+            var absoluteLength = absolute.length();
 
             var ok = textA.Length > 0
                 && textA == textB
@@ -41,7 +58,12 @@ public static class NativeEntryPoint
                 && seedA == seedB
                 && fields
                 && textA2 != textA
-                && movedText == rebuiltText;
+                && movedText == rebuiltText
+                && chunk.x == 1
+                && vectorLength > 0.0f
+                && MathF.Abs(vectorLength - expectedLength) < 0.01f
+                && MathF.Abs(normalizedLength - 1.0f) < 0.01f
+                && MathF.Abs(absoluteLength - vectorLength) < 0.01f;
             var result =
                 "load=managed\n"
                 + $"a={textA}\n"
@@ -52,6 +74,11 @@ public static class NativeEntryPoint
                 + $"rebuilt={rebuiltText}\n"
                 + $"seedA={seedA}\n"
                 + $"seedB={seedB}\n"
+                + $"chunk=({chunk.x},{chunk.y},{chunk.z})\n"
+                + $"vec=({vector.x},{vector.y},{vector.z})\n"
+                + $"length={vectorLength}\n"
+                + $"normalized={normalizedLength}\n"
+                + $"absolute={absoluteLength}\n"
                 + $"result={(ok ? "OK" : "FAIL")}\n";
             if (resultPath is not null)
             {

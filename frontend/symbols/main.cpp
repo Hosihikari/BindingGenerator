@@ -944,7 +944,8 @@ std::string memberId(const std::string& ClassName, const MergedMethod& MergedMet
         Signature += ",";
     }
     Signature += ")";
-    return "bedrock:" + ClassName + "@" + ClassName + "::" + Base.Name + "#" + Signature;
+    return "bedrock:" + ClassName + "@" + ClassName + "::" + Base.Name + "#" + Signature
+        + (Base.Const ? " const" : "");
 }
 
 json::Object makeMemberRecord(
