@@ -92,7 +92,20 @@ internal static class InteropEmitter
                 "    }",
             };
 
-            if (members.TryGetValue(declaration.Id, out var declarationMembers))
+            var declarationMembers = members.TryGetValue(declaration.Id, out var ownMembers)
+                ? ownMembers
+                : [];
+            if (plan.SyntheticMembers.TryGetValue(declaration.Id, out var syntheticMembers))
+            {
+                declarationMembers = declarationMembers
+                    .Concat(syntheticMembers)
+                    .GroupBy(member => member.Id, StringComparer.Ordinal)
+                    .Select(group => group.First())
+                    .OrderBy(member => member.Id, StringComparer.Ordinal)
+                    .ToList();
+            }
+
+            if (declarationMembers.Count > 0)
             {
                 var memberNames = BuildMemberNames(declarationMembers, plan);
                 foreach (var member in declarationMembers)

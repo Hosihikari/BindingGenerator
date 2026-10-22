@@ -118,5 +118,5 @@ The C# projection is unchanged. `tests/symbol-dispatch/run.ps1` builds a synthet
 ## Next steps
 
 - Validate class/field facts against LeviLamina headers as a supplement; symbols remain the primary input.
-- Extend symbol dispatch beyond scalars, strings, and single-level pointers: field offsets, by-value records, and containers need new layout and ABI facts.
+- Extend symbol dispatch beyond scalars, strings, single-level pointers, offset-based fields, and trivially destructible by-value records: containers, optional/shared values, and non-trivial record returns need new layout and ABI facts.
 - Broaden the class set (Level, ItemStack, Vec3) and record per-configuration coverage.

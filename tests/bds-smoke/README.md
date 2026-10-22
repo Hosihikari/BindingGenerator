@@ -34,11 +34,14 @@ load=managed
 a=Pos(1,2,3)
 b=Pos(1,2,3)
 c=Pos(1,2,4)
+a2=Pos(7,2,3)
+moved=Pos(7,1,3)
+rebuilt=Pos(7,1,3)
 seedA=972575194
 seedB=972575194
 result=OK
 ```
 
-The smoke verifies the real module base and RVAs, the MSVC member-return convention for `std::string`, CLR hosting inside the server process, and the generated C# wrapper (`Create`, `toString_*`, `randomSeed`, `Dispose`).
+The smoke verifies the real module base and RVAs, the MSVC member-return convention for `std::string`, inherited field access (`x`/`y`/`z` read and `a.x = 7` write), a by-value `BlockPos` return (`neighbor`), CLR hosting inside the server process, and the generated C# wrapper (`Create`, `toString_*`, `randomSeed`, `Dispose`).
 
 This test is not part of CI because it requires the proprietary 1.21.3 server and the matching LeviLamina loader. The PE/PDB fixture in `tests/symbol-dispatch` and the Linux fixture in `tests/fixtures/symbol-dispatch` cover the dispatch mechanics in CI.

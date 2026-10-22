@@ -26,12 +26,30 @@ public static class NativeEntryPoint
             var seedA = a.randomSeed();
             var seedB = b.randomSeed();
 
-            var ok = textA.Length > 0 && textA == textB && textA != textC && seedA == seedB;
+            var fields = a.x == 1 && a.y == 2 && a.z == 3;
+            a.x = 7;
+            var textA2 = a.toString_f7aee3c8();
+
+            using var moved = a.neighbor(0);
+            var movedText = moved.toString_f7aee3c8();
+            using var rebuilt = BlockPos.Create((float)moved.x, (float)moved.y, (float)moved.z);
+            var rebuiltText = rebuilt.toString_f7aee3c8();
+
+            var ok = textA.Length > 0
+                && textA == textB
+                && textA != textC
+                && seedA == seedB
+                && fields
+                && textA2 != textA
+                && movedText == rebuiltText;
             var result =
                 "load=managed\n"
                 + $"a={textA}\n"
                 + $"b={textB}\n"
                 + $"c={textC}\n"
+                + $"a2={textA2}\n"
+                + $"moved={movedText}\n"
+                + $"rebuilt={rebuiltText}\n"
                 + $"seedA={seedA}\n"
                 + $"seedB={seedB}\n"
                 + $"result={(ok ? "OK" : "FAIL")}\n";
