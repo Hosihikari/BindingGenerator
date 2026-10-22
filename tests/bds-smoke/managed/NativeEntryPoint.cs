@@ -53,7 +53,8 @@ public static class NativeEntryPoint
             var absoluteLength = absolute.length();
 
             // The native host reads ServiceLocator<AppPlatform>::mService, a live server
-            // object with a real vtable. `isEduMode` is a pure virtual getter.
+            // object with a real vtable. The getters below exercise scalar, container, and
+            // string results against the running server.
             var platform = argument != IntPtr.Zero ? AppPlatform.Borrow(argument) : null;
             var eduMode = platform is not null && platform.isEduMode();
             var maxRequests = platform?.getMaxSimultaneousServiceRequests() ?? 0;
@@ -69,6 +70,12 @@ public static class NativeEntryPoint
             var broadcast = platform?.getBroadcastAddresses() ?? [];
             var userInput = platform?.getUserInput() ?? [];
             var addressSample = addresses.Length > 0 ? addresses[0] : "";
+
+            // Core::PathBuffer<std::string> is a single string member; the shim reads it with
+            // the std::string return ABI and releases it with the game's own string destructor.
+            var storagePath = platform?.getInternalStoragePath() ?? "";
+            var userdataPath = platform?.getUserdataPath() ?? "";
+            var currentStoragePath = platform?.getCurrentStoragePath() ?? "";
 
             var ok = textA.Length > 0
                 && textA == textB
@@ -88,7 +95,10 @@ public static class NativeEntryPoint
                 && float.IsFinite(screenX)
                 && addresses.SequenceEqual(addressesAgain)
                 && broadcast is not null
-                && userInput is not null;
+                && userInput is not null
+                && storagePath.Length > 0
+                && userdataPath.Length > 0
+                && currentStoragePath.Length > 0;
             var result =
                 "load=managed\n"
                 + $"a={textA}\n"
@@ -112,6 +122,9 @@ public static class NativeEntryPoint
                 + $"address={addressSample}\n"
                 + $"broadcast={broadcast.Length}\n"
                 + $"userInput={userInput.Length}\n"
+                + $"storagePath={storagePath}\n"
+                + $"userdataPath={userdataPath}\n"
+                + $"currentStoragePath={currentStoragePath}\n"
                 + $"stable={eduMode == eduModeAgain && maxRequests == maxRequestsAgain && addresses.SequenceEqual(addressesAgain)}\n"
                 + $"result={(ok ? "OK" : "FAIL")}\n";
             if (resultPath is not null)

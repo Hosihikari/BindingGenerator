@@ -804,6 +804,9 @@ internal static class InteropEmitter
                 case AbiKind.Opaque:
                     lines.Add($"        get => (nint){call};");
                     break;
+                case AbiKind.Bool:
+                    lines.Add($"        get => {call} != 0;");
+                    break;
                 default:
                     lines.Add($"        get => {call};");
                     break;
@@ -1057,6 +1060,21 @@ internal static class InteropEmitter
 
                 break;
             default:
+                if (method.ReturnKind == AbiKind.Bool)
+                {
+                    if (method.ReturnOptional)
+                    {
+                        lines.Add(indent + $"var __hs_value = {call};");
+                        lines.Add(indent + "return __hs_hasValue ? __hs_value != 0 : (bool?)null;");
+                    }
+                    else
+                    {
+                        lines.Add(indent + $"return {call} != 0;");
+                    }
+
+                    break;
+                }
+
                 if (method.ReturnOptional)
                 {
                     lines.Add(indent + $"var __hs_value = {call};");

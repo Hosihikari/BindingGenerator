@@ -54,6 +54,7 @@ internal static class ShimEmitter
                     plan.LlAllocator,
                     plan.SymbolDispatch,
                     targetModule,
+                    manifest,
                     abiHeader);
             }
         }
@@ -117,6 +118,7 @@ internal static class ShimEmitter
         bool llAllocator,
         bool symbolDispatch,
         string targetModule,
+        IrManifest manifest,
         string abiHeader)
     {
         var directory = Path.Combine(outputDirectory, "shim", configuration.Id, surface);
@@ -174,7 +176,8 @@ internal static class ShimEmitter
                 surface,
                 functions,
                 records,
-                targetModule);
+                targetModule,
+                manifest);
             return;
         }
 
@@ -2019,7 +2022,8 @@ internal static class ShimEmitter
         string surface,
         IReadOnlyList<AbiFunction> functions,
         IReadOnlyList<IrRecord> records,
-        string targetModule)
+        string targetModule,
+        IrManifest manifest)
     {
         var members = records.OfType<MemberRecord>()
             .Where(member => string.Equals(member.Configuration, configuration.Id, StringComparison.Ordinal))
@@ -2066,6 +2070,19 @@ internal static class ShimEmitter
 
         AppendSymbolResolution(source, configuration.Os, targetModule);
 
+        var stringDestructor = StringDestructor(manifest, configuration);
+        if (stringDestructor is not null)
+        {
+            source.Add("");
+            source.Add("inline void hs_destroy_string(std::basic_string<char>* value)");
+            source.Add("{");
+            source.Add("    using HsDestroy = void (*)(std::basic_string<char>*);");
+            source.Add($"    static HsDestroy const destroy = reinterpret_cast<HsDestroy>(hs_resolve({stringDestructor.Value.Offset}, {CppLiteral(stringDestructor.Value.Symbol)}));");
+            source.Add("    if (destroy != nullptr) { destroy(value); } else { value->~basic_string(); }");
+            source.Add("}");
+        }
+
+        source.Add("");
         source.Add("template <class T, class U>");
         source.Add("std::vector<T> hs_make_vector(U const* data, std::size_t count)");
         source.Add("{");
@@ -2173,7 +2190,7 @@ internal static class ShimEmitter
 
         foreach (var function in functions)
         {
-            foreach (var line in EmitSymbolFunction(function, configuration, members, layouts, layoutsByQualifiedName))
+            foreach (var line in EmitSymbolFunction(function, configuration, members, layouts, layoutsByQualifiedName, stringDestructor is not null))
             {
                 source.Add(line);
             }
@@ -2321,7 +2338,8 @@ internal static class ShimEmitter
         IrConfiguration configuration,
         IReadOnlyDictionary<string, MemberRecord> members,
         IReadOnlyDictionary<string, LayoutInfo> layouts,
-        IReadOnlyDictionary<string, LayoutInfo> layoutsByQualifiedName)
+        IReadOnlyDictionary<string, LayoutInfo> layoutsByQualifiedName,
+        bool destroyStringViaGame)
     {
         var returnType = AbiPlan.CppType(function.ReturnKind);
         var parameters = new List<string>();
@@ -3081,7 +3099,7 @@ internal static class ShimEmitter
                 yield return $"    {call};";
                 yield return "    auto& hs_result = *reinterpret_cast<HsString*>(hs_stringStorage);";
                 yield return "    g_stringResult.assign(hs_result.data(), hs_result.size());";
-                yield return "    hs_result.~HsString();";
+                yield return destroyStringViaGame ? "    hs_destroy_string(&hs_result);" : "    hs_result.~HsString();";
                 yield return "    return HosihikariStringView{g_stringResult.data(), g_stringResult.size()};";
             }
             else if (function.ReturnKind == AbiKind.StringView)
@@ -3302,6 +3320,25 @@ internal static class ShimEmitter
             .Replace(" volatile", "", StringComparison.Ordinal)
             .Trim();
         return string.Equals(type, typeName.Trim(), StringComparison.Ordinal);
+    }
+
+    private static (string Offset, string Symbol)? StringDestructor(IrManifest manifest, IrConfiguration configuration)
+    {
+        if (!manifest.SupportSymbols.TryGetValue("stdStringDestructor", out var symbols)
+            || !symbols.TryGetValue(configuration.Id, out var symbol))
+        {
+            return null;
+        }
+
+        var offset = string.Equals(configuration.Os, "windows", StringComparison.Ordinal)
+            ? symbol.Rva
+            : symbol.Address;
+        if (offset is not > 0 || string.IsNullOrWhiteSpace(symbol.Symbol))
+        {
+            return null;
+        }
+
+        return ("std::uintptr_t{" + offset.Value.ToString(CultureInfo.InvariantCulture) + "}", symbol.Symbol);
     }
 
     private static (string Offset, string Symbol) SymbolFacts(MemberRecord member, string os)

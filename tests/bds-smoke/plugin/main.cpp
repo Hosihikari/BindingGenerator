@@ -138,7 +138,8 @@ DWORD WINAPI worker(LPVOID) {
     SetEnvironmentVariableW(L"HS_SYMBOL_RESULT", resultPath.c_str());
 
     // PeEditor exports the game's data symbols. ServiceLocator<T>::mService is a
-    // NonOwnerPointer whose first pointer is the live service object. AppPlatform is a
+    // NonOwnerPointer, which holds a shared_ptr to the service's control block; the
+    // control block's first field points at the live service object. AppPlatform is a
     // server-side service with a real vtable, so the managed side can call a virtual
     // getter on it without constructing anything.
     std::uintptr_t platform = 0;
@@ -147,12 +148,10 @@ DWORD WINAPI worker(LPVOID) {
         executable,
         R"(?mService@?$ServiceLocator@VAppPlatform@@@@2V?$NonOwnerPointer@VAppPlatform@@@Bedrock@@A)"));
     if (service != nullptr) {
-        platform = reinterpret_cast<std::uintptr_t>(*service);
-    }
-
-    {
-        std::ofstream diagnostic(directory / "symbol-smoke-plugin.txt", std::ios::binary);
-        diagnostic << "appplatform=0x" << std::hex << platform << std::dec << std::endl;
+        auto const controlBlock = *service;
+        if (controlBlock != nullptr) {
+            platform = *reinterpret_cast<std::uintptr_t const*>(controlBlock);
+        }
     }
 
     std::string error;

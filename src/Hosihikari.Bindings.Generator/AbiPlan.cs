@@ -1947,6 +1947,9 @@ internal sealed class AbiPlan
 
     public static string CSharpTableType(AbiKind kind) => kind switch
     {
+        // Managed bool returns are normalized to 0/1; the native side only guarantees
+        // the low byte of the return register, so read it as a byte and compare.
+        AbiKind.Bool => "byte",
         AbiKind.Opaque => "void*",
         AbiKind.StringView => "global::Hosihikari.Bindings.Abi.StringView",
         AbiKind.ArrayView => "global::Hosihikari.Bindings.Abi.ArrayView",
@@ -3568,6 +3571,15 @@ internal sealed class AbiPlan
             return true;
         }
 
+        if (TryParsePathBuffer(nativeType, out var pathBufferType))
+        {
+            // Core::PathBuffer<T> stores exactly one T value. For std::string the layout and the
+            // non-trivial return ABI match std::string, so the shim can read the string directly.
+            kind = AbiKind.StringView;
+            nativeType = pathBufferType;
+            return true;
+        }
+
         if (TryParseUniquePtr(nativeType, out var uniquePointee))
         {
             if (!declarationsByQualifiedName.TryGetValue(uniquePointee, out var pointeeDeclaration))
@@ -4582,6 +4594,33 @@ internal sealed class AbiPlan
 
         pointee = StripTopLevelQualifiers(arguments[0].Trim());
         return pointee.Length > 0;
+    }
+
+    /// <summary>
+    /// Recognizes <c>Core::PathBuffer&lt;std::string&gt;</c>. The wrapper has a single string
+    /// member and no other state, so its size, alignment, and non-trivial return ABI equal
+    /// <c>std::string</c>.
+    /// </summary>
+    private static bool TryParsePathBuffer(string canonical, out string stringType)
+    {
+        stringType = "";
+        var text = NormalizeTypeName(canonical);
+        const string prefix = "Core::PathBuffer<";
+        if (!text.StartsWith(prefix, StringComparison.Ordinal)
+            || !text.EndsWith(">", StringComparison.Ordinal)
+            || IsPointerOrReferenceType(canonical))
+        {
+            return false;
+        }
+
+        var arguments = SplitTemplateArguments(text[prefix.Length..^1].Trim()).ToList();
+        if (arguments.Count != 1 || !IsStringType(arguments[0]))
+        {
+            return false;
+        }
+
+        stringType = "std::basic_string<char>";
+        return true;
     }
 
     private static bool TryParseWeakPtr(string canonical, out string pointee)

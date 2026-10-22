@@ -84,6 +84,9 @@ struct Configuration {
     std::map<std::string, Method> Methods;
     std::map<std::string, std::string> VtableSymbols;
     std::map<std::string, uint64_t> VtableAddresses;
+    std::string StringDestructorSymbol;
+    uint64_t StringDestructorRva = 0;
+    uint64_t StringDestructorAddress = 0;
     std::map<std::string, std::vector<RttiBase>> RttiBases;
     std::map<uint64_t, uint64_t> ElfRelocations;
     std::map<std::string, uint64_t> TypeInfoByName;
@@ -416,7 +419,7 @@ bool readCoffBytes(const object::COFFObjectFile& Coff, uint64_t ImageBase, uint6
     return true;
 }
 
-void mapVtableAddresses(Configuration& Config, uint64_t VtableAddress, bool Windows, uint64_t ImageBase, const object::COFFObjectFile* Coff, const object::ObjectFile* Elf) {
+void mapVtableAddresses(Configuration& Config, const std::string& ClassName, uint64_t VtableAddress, bool Windows, uint64_t ImageBase, const object::COFFObjectFile* Coff, const object::ObjectFile* Elf) {
     if (!Windows) {
         auto* ElfObject = dyn_cast<object::ELFObjectFileBase>(Elf);
         if (ElfObject == nullptr) {
@@ -443,7 +446,7 @@ void mapVtableAddresses(Configuration& Config, uint64_t VtableAddress, bool Wind
                 }
                 uint64_t Target = static_cast<uint64_t>(*Addend);
                 for (auto& [Key, Method] : Config.Methods) {
-                    if (Method.Va == Target) {
+                    if (Method.ClassName == ClassName && Method.Va == Target) {
                         Method.VtableIndex = static_cast<int>(Slot - 2);
                         Method.Virtual = true;
                     }
@@ -460,7 +463,8 @@ void mapVtableAddresses(Configuration& Config, uint64_t VtableAddress, bool Wind
         }
         uint64_t TargetAddress = Target - ImageBase;
         for (auto& [Key, Method] : Config.Methods) {
-            if (Method.Rva == TargetAddress || Method.Va == TargetAddress) {
+            if (Method.ClassName == ClassName
+                && (Method.Rva == TargetAddress || Method.Va == TargetAddress)) {
                 Method.VtableIndex = static_cast<int>(Slot);
                 Method.Virtual = true;
             }
@@ -498,9 +502,15 @@ bool loadPdb(const Inputs& Inputs, const object::COFFObjectFile& Coff, Configura
             continue;
         }
 
+        std::string Mangled = Public->Name.str();
+        if (Mangled == "??1?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QEAA@XZ") {
+            Config.StringDestructorSymbol = Mangled;
+            Config.StringDestructorRva = rvaForPublic(Coff, *Public);
+        }
+
         bool Wanted = false;
         for (const auto& ClassName : Inputs.Classes) {
-            if (matchesClass(Public->Name.str(), ClassName)) {
+            if (matchesClass(Mangled, ClassName)) {
                 Wanted = true;
                 break;
             }
@@ -508,8 +518,6 @@ bool loadPdb(const Inputs& Inputs, const object::COFFObjectFile& Coff, Configura
         if (!Wanted) {
             continue;
         }
-
-        std::string Mangled = Public->Name.str();
         if (Mangled.find("??_7") == 0) {
             for (const auto& ClassName : Inputs.Classes) {
                 if (Mangled == "??_7" + ClassName + "@@6B@") {
@@ -743,6 +751,11 @@ bool loadElf(const Inputs& Inputs, const object::ObjectFile& Elf, Configuration&
             continue;
         }
         uint64_t SymbolValue = *SymbolValueResult;
+        if (Mangled == "_ZNSt3__112basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEED1Ev"
+            || Mangled == "_ZNSsD1Ev") {
+            Config.StringDestructorSymbol = Mangled;
+            Config.StringDestructorAddress = SymbolValue;
+        }
         if (Mangled == "_ZTVN10__cxxabiv117__class_type_infoE") {
             Config.ClassTypeInfoVtable = SymbolValue + 16;
         } else if (Mangled == "_ZTVN10__cxxabiv120__si_class_type_infoE") {
@@ -1220,6 +1233,24 @@ bool emitIr(const Inputs& Inputs, const Configuration& Windows, const Configurat
     Diagnostics["shardsWithErrors"] = json::Array();
     Manifest["diagnostics"] = std::move(Diagnostics);
 
+    json::Object SupportSymbols;
+    json::Object StringDestructorConfigs;
+    if (Windows.StringDestructorRva != 0) {
+        json::Object Entry;
+        Entry["symbol"] = Windows.StringDestructorSymbol;
+        Entry["rva"] = Windows.StringDestructorRva;
+        Entry["address"] = ImageBase + Windows.StringDestructorRva;
+        StringDestructorConfigs["win-x64-server"] = std::move(Entry);
+    }
+    if (HasLinux && Linux.StringDestructorAddress != 0) {
+        json::Object Entry;
+        Entry["symbol"] = Linux.StringDestructorSymbol;
+        Entry["address"] = Linux.StringDestructorAddress;
+        StringDestructorConfigs["linux-x64-server"] = std::move(Entry);
+    }
+    SupportSymbols["stdStringDestructor"] = std::move(StringDestructorConfigs);
+    Manifest["supportSymbols"] = std::move(SupportSymbols);
+
     json::Object Counts;
     Counts["declarations"] = static_cast<int64_t>(DeclarationIds.size());
     Counts["variants"] = static_cast<int64_t>(Inputs.Classes.size() * (HasLinux ? 2 : 1));
@@ -1331,11 +1362,11 @@ int main(int argc, char** argv) {
     }
 
     for (auto& [ClassName, Symbol] : Windows.VtableSymbols) {
-        mapVtableAddresses(Windows, Windows.VtableAddresses[ClassName], true, Coff->getImageBase(), Coff, nullptr);
+        mapVtableAddresses(Windows, ClassName, Windows.VtableAddresses[ClassName], true, Coff->getImageBase(), Coff, nullptr);
     }
     if (HasLinux) {
         for (auto& [ClassName, Symbol] : Linux.VtableSymbols) {
-            mapVtableAddresses(Linux, Linux.VtableAddresses[ClassName], false, 0, nullptr, Elf);
+            mapVtableAddresses(Linux, ClassName, Linux.VtableAddresses[ClassName], false, 0, nullptr, Elf);
         }
     }
 
