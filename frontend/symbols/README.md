@@ -113,7 +113,7 @@ dotnet run --project ../src/Hosihikari.Bindings.Generator/Hosihikari.Bindings.Ge
   --symbol-dispatch --target-module bedrock_server
 ```
 
-The C# projection is unchanged. `tests/symbol-dispatch/run.ps1` builds a synthetic PE/PDB fixture, generates its IR, emits the dispatch shim, and runs `tests/SymbolDispatchSmoke`; `tests/fixtures/symbol-dispatch` covers the Linux resolver and Itanium vtable offset in CI.
+The C# projection is unchanged. `tests/symbol-dispatch/run.ps1` builds a synthetic PE/PDB fixture, generates its IR, emits the dispatch shim, and runs `tests/SymbolDispatchSmoke`; `tests/fixtures/symbol-dispatch` covers the Linux resolver and Itanium vtable offset in CI. `tests/bds-smoke` deploys the shim to a real 1.21.3 LeviLamina server and calls the managed `BlockPos` projection from a CLR hosted inside the server process.
 
 ## Next steps
 

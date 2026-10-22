@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <EnableDynamicLoading>true</EnableDynamicLoading>
+    <AssemblyName>Hosihikari.SymbolSmoke</AssemblyName>
+    <RootNamespace>Hosihikari.SymbolSmoke</RootNamespace>
+    <InteropDirectory Condition="'$(InteropDirectory)' == ''">$(MSBuildThisFileDirectory)..\..\..\artifacts\bds-smoke\interop</InteropDirectory>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="$(InteropDirectory)/**/*.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../../../Bindings.Abi/src/Hosihikari.Bindings.Abi/Hosihikari.Bindings.Abi.csproj" />
+  </ItemGroup>
+
+</Project>

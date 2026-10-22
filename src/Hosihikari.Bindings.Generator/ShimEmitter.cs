@@ -2242,6 +2242,15 @@ internal static class ShimEmitter
             });
         }
 
+        // An instance member uses RCX for `this` and RDX for the hidden return buffer,
+        // while a free function uses RCX for the return buffer and RDX for the first
+        // argument. Declare a free-function pointer with (this, result*) to match the
+        // member ABI for non-trivial returns.
+        var memberStringReturn = function.Kind == AbiFunctionKind.Method
+            && !function.Static
+            && function.ReturnKind == AbiKind.StringView
+            && !function.NativeReturnType.TrimEnd().EndsWith("&", StringComparison.Ordinal);
+
         var callReturn = function.ReturnKind switch
         {
             AbiKind.Void => "void",
@@ -2249,9 +2258,16 @@ internal static class ShimEmitter
             AbiKind.StringView => function.NativeReturnType,
             _ => returnType,
         };
-        if (function.Kind is AbiFunctionKind.Create or AbiFunctionKind.Destroy)
+        if (function.Kind is AbiFunctionKind.Create or AbiFunctionKind.Destroy || memberStringReturn)
         {
             callReturn = "void";
+        }
+
+        if (memberStringReturn)
+        {
+            callParameters.Insert(1, function.NativeReturnType + "*");
+            yield return $"    using HsString = {function.NativeReturnType};";
+            yield return "    alignas(HsString) unsigned char hs_stringStorage[sizeof(HsString)];";
         }
 
         yield return $"    using HsFn = {callReturn} (*)({string.Join(", ", callParameters)});";
@@ -2274,6 +2290,10 @@ internal static class ShimEmitter
             else if (!function.Static)
             {
                 callArguments.Add("hs_self");
+                if (memberStringReturn)
+                {
+                    callArguments.Add("reinterpret_cast<HsString*>(hs_stringStorage)");
+                }
             }
 
             for (var index = 0; index < function.Parameters.Count; index++)
@@ -2292,6 +2312,14 @@ internal static class ShimEmitter
             else if (function.ReturnKind == AbiKind.Void)
             {
                 yield return $"    {call};";
+            }
+            else if (memberStringReturn)
+            {
+                yield return $"    {call};";
+                yield return "    auto& hs_result = *reinterpret_cast<HsString*>(hs_stringStorage);";
+                yield return "    g_stringResult.assign(hs_result.data(), hs_result.size());";
+                yield return "    hs_result.~HsString();";
+                yield return "    return HosihikariStringView{g_stringResult.data(), g_stringResult.size()};";
             }
             else if (function.ReturnKind == AbiKind.StringView)
             {
