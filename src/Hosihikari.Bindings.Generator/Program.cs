@@ -10,7 +10,7 @@ if (args.Length == 0 || args[0] is "-h" or "--help" or "help")
 switch (args[0])
 {
     case "version":
-        Console.WriteLine($"Hosihikari.Bindings.Generator 0.2.0 (IR {IrSchema.Version})");
+        Console.WriteLine($"Hosihikari.Bindings.Generator 0.3.0 (IR {IrSchema.Version})");
         return 0;
 
     case "validate-ir":
@@ -39,7 +39,7 @@ switch (args[0])
         if (args.Length < 4)
         {
             Console.Error.WriteLine(
-                "usage: emit <ir-manifest.json> <shard-directory> <output-directory> --abi-header <path> [--native-root <path>] [--link-carrier] [--ll-allocator] [--virtual-dispatch]");
+                "usage: emit <ir-manifest.json> <shard-directory> <output-directory> --abi-header <path> [--native-root <path>] [--link-carrier] [--ll-allocator] [--virtual-dispatch] [--symbol-dispatch] [--target-module <name>]");
             return 2;
         }
 
@@ -48,6 +48,8 @@ switch (args[0])
         var linkCarrier = false;
         var llAllocator = false;
         var virtualDispatch = false;
+        var symbolDispatch = false;
+        var targetModule = "bedrock_server";
         for (var index = 4; index < args.Length; index++)
         {
             switch (args[index])
@@ -66,6 +68,12 @@ switch (args[0])
                     break;
                 case "--virtual-dispatch":
                     virtualDispatch = true;
+                    break;
+                case "--symbol-dispatch":
+                    symbolDispatch = true;
+                    break;
+                case "--target-module" when index + 1 < args.Length:
+                    targetModule = args[++index];
                     break;
                 default:
                     Console.Error.WriteLine($"unknown option: {args[index]}");
@@ -97,6 +105,12 @@ switch (args[0])
             return 2;
         }
 
+        if (symbolDispatch && (linkCarrier || llAllocator || virtualDispatch))
+        {
+            Console.Error.WriteLine("--symbol-dispatch cannot be combined with source-based emit modes.");
+            return 2;
+        }
+
         var manifest = ReadManifest(args[1]);
         var records = ReadRecords(args[2]);
         var validation = IrValidator.Validate(manifest, records);
@@ -108,7 +122,7 @@ switch (args[0])
 
         var manifestHash = "sha256:" + IrHash.CanonicalJsonSha256(File.ReadAllText(args[1]));
         var output = Path.GetFullPath(args[3]);
-        var plan = AbiPlan.Build(records, nativeRoot, linkCarrier, llAllocator, virtualDispatch);
+        var plan = AbiPlan.Build(records, nativeRoot, linkCarrier, llAllocator, virtualDispatch, symbolDispatch);
         foreach (var subdirectory in new[] { "interop", "shim", "coverage" })
         {
             DeleteDirectory(Path.Combine(output, subdirectory));
@@ -116,7 +130,7 @@ switch (args[0])
 
         Directory.CreateDirectory(output);
         InteropEmitter.Emit(records, output, plan);
-        ShimEmitter.Emit(manifest, records, output, manifestHash, plan, abiHeader);
+        ShimEmitter.Emit(manifest, records, output, manifestHash, plan, abiHeader, targetModule);
         CoverageEmitter.Emit(manifest, records, output, manifestHash, plan);
         Console.WriteLine(
             $"emitted {records.Count} records to {output} ({plan.Functions.Count} BindingShim functions)");

@@ -1,0 +1,41 @@
+{
+ "schema": "hosihikari.bindings.ir/1",
+ "irVersion": "1.4.1",
+ "frontend": {
+  "name": "symbol-dispatch-fixture",
+  "version": "0.1.0",
+  "llvm": "n/a"
+ },
+ "configurations": [
+  {
+   "id": "linux-x64-server",
+   "os": "linux",
+   "arch": "x64",
+   "target": "server",
+   "defines": [],
+   "definesHash": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  }
+ ],
+ "shards": [
+  {
+   "surface": "bedrock",
+   "configuration": "linux-x64-server",
+   "module": "bedrock",
+   "path": "linux-x64-server.jsonl",
+   "sha256": "sha256:110a738cae48f52b014b0f3d8883c67f9cd229fe5ae47428ceb8669c560a760c",
+   "sha256Compressed": "sha256:110a738cae48f52b014b0f3d8883c67f9cd229fe5ae47428ceb8669c560a760c",
+   "records": 7
+  }
+ ],
+ "diagnostics": {
+  "errors": 0,
+  "warnings": 0,
+  "shardsWithErrors": []
+ },
+ "counts": {
+  "declarations": 1,
+  "variants": 1,
+  "members": 5
+ },
+ "sources": []
+}

@@ -81,6 +81,26 @@ jobs:
         working-directory: Generator
         run: dotnet run --project tests/RealShimSmoke/RealShimSmoke.csproj -c Release -p:InteropDirectory=${{ github.workspace }}/Generator/artifacts/emitted-linked/interop -- ${{ github.workspace }}/Generator/artifacts/liblinked-shim.so
 
+      - name: Validate symbol-dispatch fixture IR
+        working-directory: Generator
+        run: dotnet run --project src/Hosihikari.Bindings.Generator/Hosihikari.Bindings.Generator.csproj -c Release -- validate-ir tests/fixtures/symbol-dispatch/ir-manifest.json tests/fixtures/symbol-dispatch
+
+      - name: Emit symbol-dispatch fixture
+        working-directory: Generator
+        run: dotnet run --project src/Hosihikari.Bindings.Generator/Hosihikari.Bindings.Generator.csproj -c Release -- emit tests/fixtures/symbol-dispatch/ir-manifest.json tests/fixtures/symbol-dispatch artifacts/symbol-dispatch-fixture --abi-header ../Abi/native/hosihikari_abi.h --symbol-dispatch --target-module libsymbol-fixture.so
+
+      - name: Build symbol-dispatch fixture
+        working-directory: Generator
+        run: |
+          g++ -std=c++20 -shared -fPIC -O0 -g -o artifacts/libsymbol-fixture.so tests/symbol-dispatch/linux-fixture.cpp
+          g++ -std=c++20 -fPIC -shared -I artifacts/symbol-dispatch-fixture/shim/linux-x64-server/bedrock -o artifacts/libsymbol-shim.so artifacts/symbol-dispatch-fixture/shim/linux-x64-server/bedrock/binding_table.cpp
+
+      - name: Run symbol-dispatch smoke
+        working-directory: Generator
+        env:
+          LD_LIBRARY_PATH: ${{ github.workspace }}/Generator/artifacts
+        run: dotnet run --project tests/SymbolDispatchSmoke/SymbolDispatchSmoke.csproj -c Release -p:InteropDirectory=${{ github.workspace }}/Generator/artifacts/symbol-dispatch-fixture/interop -- ${{ github.workspace }}/Generator/artifacts/libsymbol-fixture.so ${{ github.workspace }}/Generator/artifacts/libsymbol-shim.so
+
   endstone-linux-ir:
     runs-on: ubuntu-latest
     steps:

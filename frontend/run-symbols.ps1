@@ -3,8 +3,7 @@ param(
     [string]$Pdb,
     [Parameter(Mandatory = $true)]
     [string]$Exe,
-    [Parameter(Mandatory = $true)]
-    [string]$Elf,
+    [string]$Elf = "",
     [string]$Output = "artifacts/symbol-ir/prototype.json",
     [string]$IrOutput = "",
     [switch]$NoPrototype,
@@ -19,7 +18,9 @@ $ErrorActionPreference = "Stop"
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $Pdb = (Resolve-Path $Pdb).Path
 $Exe = (Resolve-Path $Exe).Path
-$Elf = (Resolve-Path $Elf).Path
+if (-not [string]::IsNullOrWhiteSpace($Elf)) {
+    $Elf = (Resolve-Path $Elf).Path
+}
 $Output = if ($NoPrototype) {
     ""
 } elseif ([string]::IsNullOrWhiteSpace($Output)) {
@@ -52,10 +53,12 @@ if (-not (Test-Path $Frontend)) {
 $Arguments = @(
     "--pdb", $Pdb,
     "--exe", $Exe,
-    "--elf", $Elf,
     "--version", $Version,
     "--classes", ($Classes -join ",")
 )
+if (-not [string]::IsNullOrWhiteSpace($Elf)) {
+    $Arguments += @("--elf", $Elf)
+}
 if (-not [string]::IsNullOrWhiteSpace($Output)) {
     $Arguments += @("--output", $Output)
 }

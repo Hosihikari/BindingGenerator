@@ -6,7 +6,7 @@ Extracts a symbol-level IR from a publics-only PDB and an ELF symbol table. It e
 
 - `--pdb`: the 1.21.3 `bedrock_server.pdb` (publics/globals, vtable and RTTI symbols; the TPI type stream is empty).
 - `--exe`: the matching `bedrock_server.exe`, used for section RVAs and vtable bytes.
-- `--elf`: `bedrock_server_symbols.debug`, used for the game `.symtab` and `.rela.dyn` vtable relocations.
+- `--elf`: optional `bedrock_server_symbols.debug`, used for the game `.symtab` and `.rela.dyn` vtable relocations. When omitted, the frontend emits only the `win-x64-server` configuration, which is what the synthetic fixture uses.
 - `--classes`: comma-separated class names, currently `Actor,BlockPos`.
 
 ## Run
@@ -101,8 +101,22 @@ The merge:
 
 For the 1.21.3 slice, `Actor` gets size 1096, base `ActorStatusProvider`, and its `filler[1088]` field; `Mob : Actor`, `Player : Mob`; `BlockPos` gets size 12 and base `ll::math::intN3<BlockPos>`, whose flattened fields `x`/`y`/`z` sit at 0/32/64. The header layout is written to both configurations; for these plain-int value types the layout is identical on Windows and Linux, but virtual/inherited classes would need per-configuration confirmation. `Actor`'s generated header collapses its instance fields into `filler`, so individual Actor fields are not recoverable from this source.
 
+## Symbol dispatch
+
+`emit --symbol-dispatch` consumes this IR without any game headers. Direct calls resolve the module base plus `rva` (Windows) or the link-time `address` (Linux), falling back to `GetProcAddress`/`dlsym` on the recorded `symbol`; virtual calls index the per-configuration `vtableIndex`. Pass `--target-module <name>` when the symbols live in a module other than `bedrock_server`.
+
+```powershell
+./frontend/run-symbols.ps1 -Pdb <pdb> -Exe <exe> -Elf <debug> -IrOutput artifacts/symbol-ir/ir -NoPrototype
+dotnet run --project ../src/Hosihikari.Bindings.Generator/Hosihikari.Bindings.Generator.csproj -c Release -- `
+  emit artifacts/symbol-ir/ir/ir-manifest.json artifacts/symbol-ir/ir artifacts/symbol-dispatch `
+  --abi-header ../../Bindings.Abi/native/hosihikari_abi.h `
+  --symbol-dispatch --target-module bedrock_server
+```
+
+The C# projection is unchanged. `tests/symbol-dispatch/run.ps1` builds a synthetic PE/PDB fixture, generates its IR, emits the dispatch shim, and runs `tests/SymbolDispatchSmoke`; `tests/fixtures/symbol-dispatch` covers the Linux resolver and Itanium vtable offset in CI.
+
 ## Next steps
 
-- Validate class/field facts against LiteLoaderBDS headers as a supplement; symbols remain the primary input.
-- Decide whether the formal IR gets `symbol`, `address`, `vtableIndex`, and optional `layout`/`returnType` fields, or whether symbol records are a separate schema.
-- Add a symbol-dispatch shim mode that calls by RVA/vtable rather than by generated C++ declarations.
+- Validate class/field facts against LeviLamina headers as a supplement; symbols remain the primary input.
+- Extend symbol dispatch beyond scalars, strings, and single-level pointers: field offsets, by-value records, and containers need new layout and ABI facts.
+- Broaden the class set (Level, ItemStack, Vec3) and record per-configuration coverage.

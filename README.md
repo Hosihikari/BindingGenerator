@@ -41,7 +41,22 @@ dotnet run --project src/Hosihikari.Bindings.Generator/Hosihikari.Bindings.Gener
 
 `--abi-header` points at `Hosihikari/Bindings.Abi`'s `native/hosihikari_abi.h`; the emitter copies it into every shim directory so the shim build stays self-contained. Generated C# references `Hosihikari.Bindings.Abi` for `StringView`, `ArrayView`, `SharedHandle`, and the version-checking `ShimLibrary` loader.
 
-Without `--native-root`, `emit` writes the contract stubs used by the fixture CI.
+Without `--native-root`, `emit` writes the contract stubs used by the fixture CI, unless `--symbol-dispatch` is set.
+
+### Symbol dispatch
+
+`--symbol-dispatch` emits the same C# Interop and binding table from symbol-level IR without game headers:
+
+```shell
+dotnet run --project src/Hosihikari.Bindings.Generator/Hosihikari.Bindings.Generator.csproj -c Release -- emit \
+  artifacts/symbol-ir-1.21.3/merged-levi-final/ir-manifest.json artifacts/symbol-ir-1.21.3/merged-levi-final \
+  artifacts/symbol-dispatch --abi-header ../Abi/native/hosihikari_abi.h \
+  --symbol-dispatch --target-module bedrock_server
+```
+
+Direct members resolve `module base + rva` on Windows or `module base + address` on Linux; if no address is recorded, the shim falls back to `GetProcAddress`/`dlsym` with the symbol name. Virtual members use the per-configuration `vtableIndex` (the Linux Itanium prefix adds two slots). `--target-module` names the hosting module. The mode accepts scalars, `std::string`/`std::string_view`, and single-level pointers/references; records stay opaque handles, and vectors, maps, optionals, fields, and by-value records remain stubs. Constructors require a recorded layout so the shim can allocate; a class without a layout can still expose borrowed handles from static factories.
+
+`tests/symbol-dispatch/run.ps1` builds a synthetic PE/PDB fixture, runs the symbol frontend, emits the dispatch shim, and runs the C# smoke test. `tests/fixtures/symbol-dispatch` plus `tests/symbol-dispatch/linux-fixture.cpp` cover the Linux resolver and vtable offset in the `cli` CI job.
 
 ### Real BindingShim v1
 

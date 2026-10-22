@@ -50,13 +50,15 @@ The script emits `linux-x64-server` IR and validates it with the .NET CLI. On li
 
 ## Symbol prototype (Bedrock 1.21.3)
 
-`hosihikari-symbol-ir-frontend` reads a publics-only PDB and an ELF symbol table, demangles a selected set of classes, merges Windows return types into the Linux records, and reconstructs vtable slots. `--output` writes a prototype JSON; `--ir-output` writes formal IR 1.4.0 shards and a manifest with `symbol`, `address`, `rva`, and per-configuration vtable records. See `symbols/README.md`.
+`hosihikari-symbol-ir-frontend` reads a publics-only PDB and an optional ELF symbol table, demangles a selected set of classes, merges Windows return types into the Linux records, and reconstructs vtable slots. `--output` writes a prototype JSON; `--ir-output` writes formal IR 1.4.1 shards and a manifest with `symbol`, `address`, `rva`, and per-configuration vtable records. Omitting `--elf` emits the Windows configuration alone, which the synthetic fixture uses. See `symbols/README.md`.
 
 ```powershell
 ./frontend/run-symbols.ps1 -Pdb <pdb> -Exe <pe> -Elf <debug> -Classes Actor,BlockPos
 ```
 
 `frontend/run-levilamina-headers.ps1` generates a header supplement from a LeviLamina v0.13.5 checkout targeting BDS 1.21.3.01. It passes `--flatten-anonymous-fields`, which emits fields nested in anonymous unions/structs with absolute bit offsets; the flag is off by default so existing IRs stay unchanged. `frontend/merge-symbol-ir.py` then merges fields, layouts, inheritance, and inline methods from that IR into the symbol IR.
+
+The generator's `emit --symbol-dispatch` mode turns that IR into a shim that does not include game headers: direct calls use the module base plus `rva`/`address` (or `GetProcAddress`/`dlsym` on the recorded symbol), and virtual calls use the per-configuration `vtableIndex`. `tests/symbol-dispatch/run.ps1` exercises the Windows PE/PDB path end-to-end with a synthetic fixture; the `cli` CI job runs the Linux fixture and resolver smoke.
 
 ## Current state
 

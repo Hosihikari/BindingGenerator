@@ -10,7 +10,7 @@
   </PropertyGroup>
 
   <PropertyGroup>
-    <Version>0.1.0</Version>
+    <Version>0.3.0</Version>
     <Authors>Hosihikari</Authors>
     <Description>Generates C ABI BindingShim and native-style .NET Interop from versioned IR.</Description>
     <PackageLicenseExpression>GPL-3.0-or-later</PackageLicenseExpression>

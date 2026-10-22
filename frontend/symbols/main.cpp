@@ -1037,7 +1037,7 @@ bool writeFile(const std::filesystem::path& Path, StringRef Text) {
     return true;
 }
 
-bool emitIr(const Inputs& Inputs, const Configuration& Windows, const Configuration& Linux, uint64_t ImageBase) {
+bool emitIr(const Inputs& Inputs, const Configuration& Windows, const Configuration& Linux, uint64_t ImageBase, bool HasLinux) {
     std::filesystem::create_directories(Inputs.IrOutput);
     const auto OutputDirectory = std::filesystem::path(Inputs.IrOutput);
 
@@ -1092,8 +1092,12 @@ bool emitIr(const Inputs& Inputs, const Configuration& Windows, const Configurat
         Declaration["consteval"] = false;
         WinRecords.push_back(std::move(Declaration));
 
-        for (const auto& [ConfigId, Config] : {std::pair<const char*, const Configuration*>{ "win-x64-server", &Windows },
-                                               { "linux-x64-server", &Linux }}) {
+        std::vector<std::pair<const char*, const Configuration*>> Configs{
+            { "win-x64-server", &Windows }};
+        if (HasLinux) {
+            Configs.emplace_back("linux-x64-server", &Linux);
+        }
+        for (const auto& [ConfigId, Config] : Configs) {
             json::Object Variant;
             Variant["recordType"] = "variant";
             Variant["declarationId"] = DeclarationId;
@@ -1142,9 +1146,9 @@ bool emitIr(const Inputs& Inputs, const Configuration& Windows, const Configurat
     const int64_t WinRecordCount = static_cast<int64_t>(WinRecords.size());
     const int64_t LinuxRecordCount = static_cast<int64_t>(LinuxRecords.size());
     const std::string WinText = serializeRecords(WinRecords);
-    const std::string LinuxText = serializeRecords(LinuxRecords);
+    const std::string LinuxText = HasLinux ? serializeRecords(LinuxRecords) : std::string();
     if (!writeFile(OutputDirectory / "win-x64-server.jsonl", WinText)
-        || !writeFile(OutputDirectory / "linux-x64-server.jsonl", LinuxText)) {
+        || (HasLinux && !writeFile(OutputDirectory / "linux-x64-server.jsonl", LinuxText))) {
         return false;
     }
 
@@ -1158,7 +1162,11 @@ bool emitIr(const Inputs& Inputs, const Configuration& Windows, const Configurat
     Manifest["frontend"] = std::move(Frontend);
 
     json::Array Sources;
-    for (const auto& Source : {Inputs.Pdb, Inputs.Elf}) {
+    std::vector<std::string> SourcePaths{Inputs.Pdb, Inputs.Exe};
+    if (!Inputs.Elf.empty()) {
+        SourcePaths.push_back(Inputs.Elf);
+    }
+    for (const auto& Source : SourcePaths) {
         json::Object Pin;
         Pin["surface"] = "bedrock";
         Pin["repo"] = "local";
@@ -1170,8 +1178,11 @@ bool emitIr(const Inputs& Inputs, const Configuration& Windows, const Configurat
 
     const std::string EmptyHash = sha256Text("");
     json::Array Configurations;
-    for (const auto& [Id, Os] : {std::pair<const char*, const char*>{ "win-x64-server", "windows" },
-                                 { "linux-x64-server", "linux" }}) {
+    std::vector<std::pair<const char*, const char*>> ConfigIds{{ "win-x64-server", "windows" }};
+    if (HasLinux) {
+        ConfigIds.emplace_back("linux-x64-server", "linux");
+    }
+    for (const auto& [Id, Os] : ConfigIds) {
         json::Object Configuration;
         Configuration["id"] = Id;
         Configuration["os"] = Os;
@@ -1184,11 +1195,12 @@ bool emitIr(const Inputs& Inputs, const Configuration& Windows, const Configurat
     Manifest["configurations"] = std::move(Configurations);
 
     json::Array Shards;
-    for (const auto& [Id, Path, Text, RecordCount] : {
-             std::tuple<const char*, const char*, const std::string*, int64_t>{
-                 "win-x64-server", "win-x64-server.jsonl", &WinText, WinRecordCount },
-             std::tuple<const char*, const char*, const std::string*, int64_t>{
-                 "linux-x64-server", "linux-x64-server.jsonl", &LinuxText, LinuxRecordCount }}) {
+    std::vector<std::tuple<const char*, const char*, const std::string*, int64_t>> ShardInputs{
+        { "win-x64-server", "win-x64-server.jsonl", &WinText, WinRecordCount }};
+    if (HasLinux) {
+        ShardInputs.emplace_back("linux-x64-server", "linux-x64-server.jsonl", &LinuxText, LinuxRecordCount);
+    }
+    for (const auto& [Id, Path, Text, RecordCount] : ShardInputs) {
         json::Object Shard;
         Shard["surface"] = "bedrock";
         Shard["configuration"] = Id;
@@ -1209,8 +1221,8 @@ bool emitIr(const Inputs& Inputs, const Configuration& Windows, const Configurat
 
     json::Object Counts;
     Counts["declarations"] = static_cast<int64_t>(DeclarationIds.size());
-    Counts["variants"] = static_cast<int64_t>(Inputs.Classes.size() * 2);
-    Counts["members"] = WinMembers + LinuxMembers;
+    Counts["variants"] = static_cast<int64_t>(Inputs.Classes.size() * (HasLinux ? 2 : 1));
+    Counts["members"] = WinMembers + (HasLinux ? LinuxMembers : 0);
     Manifest["counts"] = std::move(Counts);
 
     std::string ManifestText;
@@ -1265,9 +1277,9 @@ int main(int argc, char** argv) {
         }
     }
 
-    if (Inputs.Pdb.empty() || Inputs.Exe.empty() || Inputs.Elf.empty()
+    if (Inputs.Pdb.empty() || Inputs.Exe.empty()
         || (Inputs.Output.empty() && Inputs.IrOutput.empty()) || Inputs.Classes.empty()) {
-        errs() << "usage: hosihikari-symbol-ir-frontend --pdb <pdb> --exe <pe> --elf <debug> "
+        errs() << "usage: hosihikari-symbol-ir-frontend --pdb <pdb> --exe <pe> [--elf <debug>] "
                   "[--output <prototype.json>] [--ir-output <dir>] [--version <id>] --classes <A,B>\n";
         return 2;
     }
@@ -1284,16 +1296,22 @@ int main(int argc, char** argv) {
     }
     errs() << "PE loaded, image base " << format_hex(Coff->getImageBase(), 0, false) << "\n";
 
-    auto ElfBinary = object::createBinary(Inputs.Elf);
-    if (!ElfBinary) {
-        errs() << "cannot read ELF: " << toString(ElfBinary.takeError()) << "\n";
-        return 1;
+    std::optional<object::OwningBinary<object::Binary>> ElfBinary;
+    const object::ObjectFile* Elf = nullptr;
+    if (!Inputs.Elf.empty()) {
+        auto LoadedElf = object::createBinary(Inputs.Elf);
+        if (!LoadedElf) {
+            errs() << "cannot read ELF: " << toString(LoadedElf.takeError()) << "\n";
+            return 1;
+        }
+        ElfBinary.emplace(std::move(*LoadedElf));
+        Elf = dyn_cast<object::ObjectFile>(ElfBinary->getBinary());
+        if (Elf == nullptr) {
+            errs() << "input is not an object file\n";
+            return 1;
+        }
     }
-    auto* Elf = dyn_cast<object::ObjectFile>(ElfBinary->getBinary());
-    if (Elf == nullptr) {
-        errs() << "input is not an object file\n";
-        return 1;
-    }
+    const bool HasLinux = Elf != nullptr;
 
     Configuration Windows;
     Windows.Id = "win-x64-server";
@@ -1304,19 +1322,23 @@ int main(int argc, char** argv) {
     if (!loadPdb(Inputs, *Coff, Windows)) {
         return 1;
     }
-    errs() << "reading ELF configuration\n";
-    if (!loadElf(Inputs, *Elf, Linux)) {
-        return 1;
+    if (HasLinux) {
+        errs() << "reading ELF configuration\n";
+        if (!loadElf(Inputs, *Elf, Linux)) {
+            return 1;
+        }
     }
 
     for (auto& [ClassName, Symbol] : Windows.VtableSymbols) {
         mapVtableAddresses(Windows, Windows.VtableAddresses[ClassName], true, Coff->getImageBase(), Coff, nullptr);
     }
-    for (auto& [ClassName, Symbol] : Linux.VtableSymbols) {
-        mapVtableAddresses(Linux, Linux.VtableAddresses[ClassName], false, 0, nullptr, Elf);
+    if (HasLinux) {
+        for (auto& [ClassName, Symbol] : Linux.VtableSymbols) {
+            mapVtableAddresses(Linux, Linux.VtableAddresses[ClassName], false, 0, nullptr, Elf);
+        }
     }
 
-    if (!Inputs.IrOutput.empty() && !emitIr(Inputs, Windows, Linux, Coff->getImageBase())) {
+    if (!Inputs.IrOutput.empty() && !emitIr(Inputs, Windows, Linux, Coff->getImageBase(), HasLinux)) {
         return 1;
     }
     if (Inputs.Output.empty()) {
