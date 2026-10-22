@@ -1,2 +1,4 @@
 {"abstract":false,"access":"public","consteval":false,"copyConstructible":true,"defined":true,"id":"bedrock:FixturePair","inline":false,"kind":"struct","linkage":"external","qualifiedName":"FixturePair","recordType":"declaration","surface":"bedrock","triviallyCopyable":false,"triviallyDestructible":true}
 {"availability":"present","configuration":"win-x64-server","declarationId":"bedrock:FixturePair","layout":{"align":4,"bases":[],"fieldOffsets":[],"size":8},"recordType":"variant"}
+{"abstract":false,"access":"public","consteval":false,"copyConstructible":true,"defined":true,"id":"bedrock:FixtureValue","inline":false,"kind":"struct","linkage":"external","qualifiedName":"FixtureValue","recordType":"declaration","surface":"bedrock","triviallyCopyable":true,"triviallyDestructible":true}
+{"availability":"present","configuration":"win-x64-server","declarationId":"bedrock:FixtureValue","layout":{"align":4,"bases":[],"fieldOffsets":[],"size":8},"recordType":"variant"}

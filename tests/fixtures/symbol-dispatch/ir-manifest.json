@@ -22,9 +22,9 @@
    "configuration": "linux-x64-server",
    "module": "bedrock",
    "path": "linux-x64-server.jsonl",
-   "sha256": "sha256:e878f95de9c4e570bbf53570d6cd1fcbb98a3b8c4cc91a9f295f2443d3702f51",
-   "sha256Compressed": "sha256:e878f95de9c4e570bbf53570d6cd1fcbb98a3b8c4cc91a9f295f2443d3702f51",
-   "records": 13
+   "sha256": "sha256:ecde36e90cd488e8671f2ea4a15a8f22bee9b00ed1f365cabaf18b7a1b1b8eb6",
+   "sha256Compressed": "sha256:ecde36e90cd488e8671f2ea4a15a8f22bee9b00ed1f365cabaf18b7a1b1b8eb6",
+   "records": 25
   }
  ],
  "diagnostics": {
@@ -33,9 +33,9 @@
   "shardsWithErrors": []
  },
  "counts": {
-  "declarations": 2,
-  "variants": 2,
-  "members": 9
+  "declarations": 3,
+  "variants": 3,
+  "members": 19
  },
  "sources": []
 }

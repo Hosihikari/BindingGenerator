@@ -48,6 +48,84 @@ using (var pair = block.pair())
     }
 }
 
+if (block.maybeNumber(true) != 2 || block.maybeNumber(false) is not null)
+{
+    throw new InvalidOperationException("The optional scalar value is incorrect.");
+}
+
+if (block.sumOptional(5) != 7)
+{
+    throw new InvalidOperationException("The optional scalar parameter is incorrect.");
+}
+
+using (var value = block.maybeValue(true))
+{
+    if (value is null || block.sumValueOptional(value) != 7)
+    {
+        throw new InvalidOperationException("The optional record value is incorrect.");
+    }
+}
+
+if (block.maybeValue(false) is not null)
+{
+    throw new InvalidOperationException("The empty optional record value is incorrect.");
+}
+
+// std::optional<string> is only present in the PDB-derived Windows IR; the checked-in Linux
+// fixture keeps to manglings that do not depend on the cxx11 ABI tag.
+if (typeof(FixtureBlock).GetMethod("maybeLabel") is not null)
+{
+    var maybeLabel = typeof(FixtureBlock).GetMethod("maybeLabel")!;
+    if ((string?)maybeLabel.Invoke(block, [true]) != "2" || (string?)maybeLabel.Invoke(block, [false]) is not null)
+    {
+        throw new InvalidOperationException("The optional string value is incorrect.");
+    }
+
+    var labelSize = typeof(FixtureBlock).GetMethod("labelSize")!;
+    if ((int)labelSize.Invoke(block, ["abc"])! != 5)
+    {
+        throw new InvalidOperationException("The optional string parameter is incorrect.");
+    }
+}
+
+var shared = block.makeShared(42)
+    ?? throw new InvalidOperationException("FixtureBlock.makeShared returned null.");
+try
+{
+    if (block.sharedValue(shared) != 44)
+    {
+        throw new InvalidOperationException("The shared_ptr parameter is incorrect.");
+    }
+}
+finally
+{
+    shared.Dispose();
+}
+
+var weak = block.weakRef()
+    ?? throw new InvalidOperationException("FixtureBlock.weakRef returned an expired handle.");
+try
+{
+    if (block.sharedValue(weak) != 44)
+    {
+        throw new InvalidOperationException("The weak_ptr snapshot is incorrect.");
+    }
+}
+finally
+{
+    weak.Dispose();
+}
+
+var objectA = block.makeObject(10);
+var objectB = block.makeObject(20);
+if (block.sumObjectValues([objectA, objectB]) != 32)
+{
+    throw new InvalidOperationException("The pointer vector parameter is incorrect.");
+}
+
+block.releaseObject(objectA);
+block.releaseObject(objectB);
+
 // The checked-in Linux fixture IR covers the member string/vector returns above. The PDB-derived
 // Windows IR additionally contains the parameter and static cases; reflect so both IRs share
 // this program.

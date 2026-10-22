@@ -1648,6 +1648,18 @@ internal static class InteropEmitter
 
         if (vector.VectorElementKind == AbiKind.Opaque)
         {
+            if (vector.VectorElementWrapperType is null)
+            {
+                // Pointer elements have no wrapper type; the parameter is already nint[].
+                lines.Add(indent + $"var __hs_vectorItems{suffix} = {vectorName} ?? global::System.Array.Empty<nint>();");
+                lines.Add(indent + $"fixed (nint* __hs_vectorHandleData{suffix} = __hs_vectorItems{suffix})");
+                lines.Add(indent + "{");
+                lines.Add(indent + $"    var __hs_vectorData{suffix} = (void**)__hs_vectorHandleData{suffix};");
+                EmitVectorBlocks(lines, parameters, stringIndices, vectorIndices, position + 1, indent + "    ", emitBody);
+                lines.Add(indent + "}");
+                return;
+            }
+
             lines.Add(indent + $"var __hs_vectorItems{suffix} = {vectorName};");
             lines.Add(indent + $"var __hs_vectorHandles{suffix} = new nint[__hs_vectorItems{suffix}?.Length ?? 0];");
             lines.Add(indent + $"for (var __hs_i{suffix} = 0; __hs_i{suffix} < __hs_vectorHandles{suffix}.Length; __hs_i{suffix}++)");

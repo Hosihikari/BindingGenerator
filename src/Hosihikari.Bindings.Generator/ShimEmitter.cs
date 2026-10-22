@@ -1897,6 +1897,112 @@ internal static class ShimEmitter
         yield return "};";
     }
 
+    /// <summary>
+    /// The typed C++ optional used for symbol dispatch. A user-provided copy constructor makes
+    /// the native optional non-trivial, so the compiler must own the call ABI and destruction.
+    /// </summary>
+    private static LayoutInfo? OptionalRecordLayout(
+        string? inner,
+        IReadOnlyDictionary<string, LayoutInfo> layoutsByQualifiedName)
+    {
+        if (inner is null)
+        {
+            return null;
+        }
+
+        var name = inner.Replace("const ", "", StringComparison.Ordinal).Replace(" const", "", StringComparison.Ordinal).Trim();
+        return layoutsByQualifiedName.TryGetValue(name, out var layout)
+            || layoutsByQualifiedName.TryGetValue(AbiPlan.CompactTemplateName(name), out layout)
+                ? layout
+                : null;
+    }
+
+    private static string? SymbolOptionalType(
+        AbiParameter parameter,
+        IReadOnlyDictionary<string, LayoutInfo> layoutsByQualifiedName)
+    {
+        if (!parameter.IsOptional || parameter.IsOptionalRef)
+        {
+            return null;
+        }
+
+        if (parameter.IsOptionalRecord)
+        {
+            var layout = OptionalRecordLayout(parameter.OptionalInnerType, layoutsByQualifiedName);
+            if (layout is not { Size: > 0 })
+            {
+                return null;
+            }
+
+            var align = layout.Align > 0 ? layout.Align : 8;
+            return $"std::optional<hs_blob<{layout.Size.ToString(CultureInfo.InvariantCulture)}, {align.ToString(CultureInfo.InvariantCulture)}>>";
+        }
+
+        if (parameter.Kind == AbiKind.StringView)
+        {
+            var inner = AbiPlan.IsStringViewType(parameter.OptionalInnerType ?? parameter.NativeType)
+                ? "std::basic_string_view<char>"
+                : "std::basic_string<char>";
+            return $"std::optional<{inner}>";
+        }
+
+        return AbiPlan.IsSymbolScalarKind(parameter.Kind)
+            ? $"std::optional<{AbiPlan.CppType(parameter.Kind)}>"
+            : null;
+    }
+
+    private static string? SymbolOptionalReturnType(
+        AbiFunction function,
+        IReadOnlyDictionary<string, LayoutInfo> layouts)
+    {
+        if (!function.ReturnOptional)
+        {
+            return null;
+        }
+
+        if (function.ReturnOptionalRecord
+            && function.ReturnDeclarationId is not null
+            && layouts.TryGetValue(function.ReturnDeclarationId, out var layout)
+            && layout.Size > 0)
+        {
+            var align = layout.Align > 0 ? layout.Align : 8;
+            return $"std::optional<hs_blob<{layout.Size.ToString(CultureInfo.InvariantCulture)}, {align.ToString(CultureInfo.InvariantCulture)}>>";
+        }
+
+        if (function.ReturnKind == AbiKind.StringView)
+        {
+            var inner = AbiPlan.IsStringViewType(function.NativeReturnType)
+                ? "std::basic_string_view<char>"
+                : "std::basic_string<char>";
+            return $"std::optional<{inner}>";
+        }
+
+        return AbiPlan.IsSymbolScalarKind(function.ReturnKind)
+            ? $"std::optional<{AbiPlan.CppType(function.ReturnKind)}>"
+            : null;
+    }
+
+    private static string? SymbolOptionalArgument(AbiParameter parameter, int index)
+    {
+        if (!parameter.IsOptional || parameter.IsOptionalRef)
+        {
+            return null;
+        }
+
+        var name = CppParameterName(parameter, index);
+        if (parameter.Kind == AbiKind.StringView)
+        {
+            var inner = AbiPlan.IsStringViewType(parameter.OptionalInnerType ?? parameter.NativeType)
+                ? "std::basic_string_view<char>"
+                : "std::basic_string<char>";
+            return $"{inner}({name}_data, {name}_size)";
+        }
+
+        return AbiPlan.IsSymbolScalarKind(parameter.Kind)
+            ? $"static_cast<{AbiPlan.CppType(parameter.Kind)}>({name})"
+            : null;
+    }
+
     private static string CppParameterName(AbiParameter parameter, int index)
     {
         var name = string.IsNullOrWhiteSpace(parameter.Name)
@@ -1935,9 +2041,14 @@ internal static class ShimEmitter
             "#include <cstdint>",
             "#include <cstring>",
             "#include <exception>",
+            "#include <memory>",
             "#include <new>",
+            "#include <optional>",
+            "#include <stdexcept>",
             "#include <string>",
             "#include <string_view>",
+            "#include <typeindex>",
+            "#include <utility>",
             "#include <vector>",
             "#ifdef _WIN32",
             "#include <windows.h>",
@@ -1994,6 +2105,60 @@ internal static class ShimEmitter
         source.Add("        result.push_back(blob);");
         source.Add("    }");
         source.Add("    return result;");
+        source.Add("}");
+        source.Add("struct hs_shared_holder_base");
+        source.Add("{");
+        source.Add("    virtual ~hs_shared_holder_base() = default;");
+        source.Add("    virtual std::shared_ptr<const void> hs_share() const = 0;");
+        source.Add("    virtual std::type_index hs_type() const = 0;");
+        source.Add("};");
+        source.Add("");
+        source.Add("template <class T>");
+        source.Add("struct hs_shared_holder final : hs_shared_holder_base");
+        source.Add("{");
+        source.Add("    explicit hs_shared_holder(std::shared_ptr<T> value) : value(std::move(value)) {}");
+        source.Add("    std::shared_ptr<T> value;");
+        source.Add("    std::shared_ptr<const void> hs_share() const override");
+        source.Add("    {");
+        source.Add("        return std::shared_ptr<const void>(value, value.get());");
+        source.Add("    }");
+        source.Add("");
+        source.Add("    std::type_index hs_type() const override { return std::type_index(typeid(T)); }");
+        source.Add("};");
+        source.Add("");
+        source.Add("template <class T>");
+        source.Add("void hs_release_shared_holder(void* holder)");
+        source.Add("{");
+        source.Add("    delete static_cast<hs_shared_holder<T>*>(holder);");
+        source.Add("}");
+        source.Add("");
+        source.Add("template <class T>");
+        source.Add("HosihikariSharedHandle hs_make_shared_handle(std::shared_ptr<T> value)");
+        source.Add("{");
+        source.Add("    if (!value) { return HosihikariSharedHandle{nullptr, nullptr, nullptr}; }");
+        source.Add("    auto* holder = new hs_shared_holder<T>(std::move(value));");
+        source.Add("    return HosihikariSharedHandle{holder, const_cast<void*>(static_cast<void const*>(holder->value.get())), &hs_release_shared_holder<T>};");
+        source.Add("}");
+        source.Add("");
+        source.Add("template <class T>");
+        source.Add("std::shared_ptr<T> hs_shared_from_handle(HosihikariSharedHandle handle)");
+        source.Add("{");
+        source.Add("    if (handle.holder == nullptr) { return {}; }");
+        source.Add("    auto* holder = static_cast<hs_shared_holder_base*>(handle.holder);");
+        source.Add("    if (holder->hs_type() != std::type_index(typeid(T)))");
+        source.Add("    {");
+        source.Add("        throw std::invalid_argument(\"shared handle type mismatch\");");
+        source.Add("    }");
+        source.Add("    using Value = std::remove_const_t<T>;");
+        source.Add("    auto shared = holder->hs_share();");
+        source.Add("    auto* raw = const_cast<Value*>(static_cast<Value const*>(shared.get()));");
+        source.Add("    return std::shared_ptr<T>(std::move(shared), raw);");
+        source.Add("}");
+        source.Add("");
+        source.Add("template <class T>");
+        source.Add("std::weak_ptr<T> hs_weak_from_handle(HosihikariSharedHandle handle)");
+        source.Add("{");
+        source.Add("    return std::weak_ptr<T>(hs_shared_from_handle<T>(handle));");
         source.Add("}");
         source.Add("");
 
@@ -2248,6 +2413,49 @@ internal static class ShimEmitter
         for (var index = 0; index < function.Parameters.Count; index++)
         {
             var parameter = function.Parameters[index];
+            var optionalType = SymbolOptionalType(parameter, layoutsByQualifiedName);
+            if (optionalType is null)
+            {
+                continue;
+            }
+
+            var name = CppParameterName(parameter, index);
+            if (parameter.IsOptionalRecord)
+            {
+                var optionalRecordLayout = OptionalRecordLayout(parameter.OptionalInnerType, layoutsByQualifiedName)!;
+                var size = optionalRecordLayout.Size.ToString(CultureInfo.InvariantCulture);
+                var align = (optionalRecordLayout.Align > 0 ? optionalRecordLayout.Align : 8).ToString(CultureInfo.InvariantCulture);
+                yield return $"    {optionalType} hs_opt{index};";
+                yield return $"    if ({name}_hasValue) {{ hs_blob<{size}, {align}> hs_blob{index}{{}}; std::memcpy(hs_blob{index}.data, {name}, {size}); hs_opt{index} = hs_blob{index}; }}";
+                continue;
+            }
+
+            yield return $"    {optionalType} hs_opt{index};";
+            yield return $"    if ({name}_hasValue) {{ hs_opt{index} = {SymbolOptionalArgument(parameter, index)}; }}";
+        }
+
+        for (var index = 0; index < function.Parameters.Count; index++)
+        {
+            var parameter = function.Parameters[index];
+            if (parameter.Kind != AbiKind.Shared)
+            {
+                continue;
+            }
+
+            var name = CppParameterName(parameter, index);
+            if (parameter.IsWeakPtr)
+            {
+                yield return $"    auto hs_weak{index} = hs_weak_from_handle<void>({name});";
+            }
+            else
+            {
+                yield return $"    auto hs_shared{index} = hs_shared_from_handle<void>({name});";
+            }
+        }
+
+        for (var index = 0; index < function.Parameters.Count; index++)
+        {
+            var parameter = function.Parameters[index];
             if (!parameter.IsVector)
             {
                 continue;
@@ -2265,6 +2473,13 @@ internal static class ShimEmitter
 
             if (parameter.VectorElementKind == AbiKind.Opaque)
             {
+                if (parameter.VectorElementOwnership == ArrayElementOwnership.None)
+                {
+                    // Pointer elements stay pointer-sized and surface as nint[].
+                    yield return $"    auto hs_vec{index} = hs_make_vector<void*>({name}_data, {name}_count);";
+                    continue;
+                }
+
                 if (parameter.VectorElementNativeType is null
                     || !layoutsByQualifiedName.TryGetValue(parameter.VectorElementNativeType, out var elementLayout)
                     || elementLayout.Size <= 0)
@@ -2459,6 +2674,7 @@ internal static class ShimEmitter
         var ownedRecordReturn = function.Kind == AbiFunctionKind.Method
             && function.ReturnKind == AbiKind.Opaque
             && function.ReturnOwned
+            && !function.ReturnOptional
             && !function.NativeReturnType.TrimEnd().EndsWith("*", StringComparison.Ordinal)
             && !function.NativeReturnType.TrimEnd().EndsWith("&", StringComparison.Ordinal);
         LayoutInfo? returnLayout = null;
@@ -2578,6 +2794,19 @@ internal static class ShimEmitter
                 continue;
             }
 
+            var optionalType = SymbolOptionalType(parameter, layoutsByQualifiedName);
+            if (optionalType is not null)
+            {
+                callParameters.Add(optionalType);
+                continue;
+            }
+
+            if (parameter.Kind == AbiKind.Shared)
+            {
+                callParameters.Add(parameter.IsWeakPtr ? "std::weak_ptr<void>" : "std::shared_ptr<void>");
+                continue;
+            }
+
             callParameters.Add(parameter.Kind switch
             {
                 AbiKind.Opaque when parameter.IsByValueRecord =>
@@ -2592,9 +2821,11 @@ internal static class ShimEmitter
         // while a free function uses RCX for the return buffer and RDX for the first
         // argument. Declare a free-function pointer with (this, result*) to match the
         // member ABI for non-trivial returns.
+        var optionalReturnType = SymbolOptionalReturnType(function, layouts);
         var memberStringReturn = function.Kind == AbiFunctionKind.Method
             && !function.Static
             && function.ReturnKind == AbiKind.StringView
+            && !function.ReturnOptional
             && !function.NativeReturnType.TrimEnd().EndsWith("&", StringComparison.Ordinal);
         var memberSretReturn = memberStringReturn || largeRecordReturn;
 
@@ -2620,6 +2851,18 @@ internal static class ShimEmitter
             yield return $"    using HsVector = std::vector<{vectorElementType}>;";
         }
 
+        // A typed non-trivial return through a free-function pointer would place the return
+        // buffer first, which mismatches MSVC member functions. Pass the buffer explicitly and
+        // construct/destroy the optional or smart pointer inside it instead.
+        var sharedReturnType = function.ReturnKind == AbiKind.Shared
+            ? (function.SharedWrapper == SharedWrapperKind.WeakPtr ? "std::weak_ptr<void>" : "std::shared_ptr<void>")
+            : null;
+        var typedReturnType = optionalReturnType ?? sharedReturnType;
+        if (typedReturnType is not null)
+        {
+            callReturn = "void";
+        }
+
         if (memberStringReturn)
         {
             yield return $"    using HsString = {function.NativeReturnType};";
@@ -2634,13 +2877,21 @@ internal static class ShimEmitter
         {
             yield return "    alignas(HsVector) unsigned char hs_vectorStorage[sizeof(HsVector)];";
         }
+        else if (typedReturnType is not null)
+        {
+            yield return $"    using HsTypedResult = {typedReturnType};";
+            yield return "    alignas(HsTypedResult) unsigned char hs_typedStorage[sizeof(HsTypedResult)];";
+        }
 
         // MSVC places the hidden return buffer after `this`; the Itanium ABI places it before
         // every explicit argument, including `this`. Static members use the first slot on both.
         var sretIndex = !function.Static && string.Equals(configuration.Os, "windows", StringComparison.Ordinal)
             ? 1
             : 0;
-        if (memberStringReturn || largeRecordReturn || (arrayReturn && !borrowedVectorReturn))
+        if (memberStringReturn
+            || largeRecordReturn
+            || (arrayReturn && !borrowedVectorReturn)
+            || typedReturnType is not null)
         {
             callParameters.Insert(sretIndex, memberStringReturn ? function.NativeReturnType + "*" : "void*");
         }
@@ -2683,7 +2934,9 @@ internal static class ShimEmitter
                         ? "static_cast<void*>(hs_recordStorage)"
                         : arrayReturn && !borrowedVectorReturn
                             ? "static_cast<void*>(hs_vectorStorage)"
-                            : null;
+                            : typedReturnType is not null
+                                ? "static_cast<void*>(hs_typedStorage)"
+                                : null;
                 if (sretArgument is not null && sretIndex == 0)
                 {
                     callArguments.Add(sretArgument);
@@ -2704,6 +2957,18 @@ internal static class ShimEmitter
             {
                 var parameter = function.Parameters[index];
                 var name = CppParameterName(parameter, index);
+                if (SymbolOptionalType(parameter, layoutsByQualifiedName) is not null)
+                {
+                    callArguments.Add($"hs_opt{index}");
+                    continue;
+                }
+
+                if (parameter.Kind == AbiKind.Shared)
+                {
+                    callArguments.Add(parameter.IsWeakPtr ? $"hs_weak{index}" : $"hs_shared{index}");
+                    continue;
+                }
+
                 if (parameter.IsVector)
                 {
                     callArguments.Add($"static_cast<void*>(&hs_vec{index})");
@@ -2727,6 +2992,52 @@ internal static class ShimEmitter
             else if (function.ReturnKind == AbiKind.Void)
             {
                 yield return $"    {call};";
+            }
+            else if (function.ReturnKind == AbiKind.Shared)
+            {
+                yield return $"    {call};";
+                yield return "    auto& hs_shared = *reinterpret_cast<HsTypedResult*>(hs_typedStorage);";
+                if (function.SharedWrapper == SharedWrapperKind.WeakPtr)
+                {
+                    yield return "    auto hs_locked = hs_shared.lock();";
+                    yield return "    auto hs_result = hs_make_shared_handle<void>(std::move(hs_locked));";
+                }
+                else
+                {
+                    yield return "    auto hs_result = hs_make_shared_handle<void>(std::move(hs_shared));";
+                }
+
+                yield return "    hs_shared.~HsTypedResult();";
+                yield return "    return hs_result;";
+            }
+            else if (optionalReturnType is not null)
+            {
+                yield return $"    {call};";
+                yield return "    auto& hs_result = *reinterpret_cast<HsTypedResult*>(hs_typedStorage);";
+                yield return "    *hs_hasValue = hs_result.has_value();";
+                if (function.ReturnOptionalRecord)
+                {
+                    var optionalRecordLayout = layouts[function.ReturnDeclarationId!];
+                    var size = optionalRecordLayout.Size.ToString(CultureInfo.InvariantCulture);
+                    var align = (optionalRecordLayout.Align > 0 ? optionalRecordLayout.Align : 8).ToString(CultureInfo.InvariantCulture);
+                    yield return "    if (!*hs_hasValue) { hs_result.~HsTypedResult(); return nullptr; }";
+                    yield return $"    auto* const hs_record = static_cast<void*>(::operator new(static_cast<std::size_t>({size}), std::align_val_t({align})));";
+                    yield return $"    std::memcpy(hs_record, hs_result->data, static_cast<std::size_t>({size}));";
+                    yield return "    hs_result.~HsTypedResult();";
+                    yield return "    return hs_record;";
+                }
+                else if (function.ReturnKind == AbiKind.StringView)
+                {
+                    yield return "    g_stringResult.assign(hs_result ? hs_result->data() : \"\", hs_result ? hs_result->size() : 0);";
+                    yield return "    hs_result.~HsTypedResult();";
+                    yield return "    return HosihikariStringView{g_stringResult.data(), g_stringResult.size()};";
+                }
+                else
+                {
+                    yield return $"    auto hs_value = hs_result ? static_cast<{returnType}>(*hs_result) : {returnType}{{}};";
+                    yield return "    hs_result.~HsTypedResult();";
+                    yield return "    return hs_value;";
+                }
             }
             else if (memberStringReturn)
             {

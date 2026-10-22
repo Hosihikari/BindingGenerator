@@ -66,6 +66,9 @@ internal sealed class AbiParameter
     public bool IsConst { get; init; }
     public bool IsOptional { get; init; }
     public string? OptionalInnerType { get; init; }
+
+    /// <summary>True when the optional payload is a trivially copyable record.</summary>
+    public bool IsOptionalRecord { get; init; }
     public bool IsOptionalRef { get; init; }
     public string? OptionalRefInnerType { get; init; }
     public bool IsVector { get; init; }
@@ -159,6 +162,7 @@ internal enum SharedWrapperKind
 {
     None,
     SharedPtr,
+    WeakPtr,
     NotNull,
     Nullable,
 }
@@ -241,6 +245,9 @@ internal sealed class AbiFunction
 
     /// <summary>True when a by-value record return can be read from the register result.</summary>
     public bool ReturnTriviallyCopyable { get; init; }
+
+    /// <summary>True when the return is `std::optional` over a trivially copyable record.</summary>
+    public bool ReturnOptionalRecord { get; init; }
 
     /// <summary>Absolute bit offset for symbol-dispatched field accessors.</summary>
     public long? FieldBitOffset { get; init; }
@@ -458,6 +465,7 @@ internal sealed class AbiPlan
         var symbolByValueReturns = new Dictionary<string, DeclarationRecord>(StringComparer.Ordinal);
         var symbolByValueCopyRequired = new Dictionary<string, bool>(StringComparer.Ordinal);
         var symbolVectorElements = new Dictionary<string, DeclarationRecord>(StringComparer.Ordinal);
+        var symbolOptionalRecords = new Dictionary<string, DeclarationRecord>(StringComparer.Ordinal);
         if (symbolDispatch)
         {
             foreach (var candidate in publicDeclarationsByQualifiedName.Values)
@@ -529,6 +537,22 @@ internal sealed class AbiPlan
                 }
 
                 symbolVectorElements[candidate.QualifiedName] = candidate;
+            }
+
+            // Optional payloads are byte-copied into a layout-compatible blob, so the record
+            // must be trivially copyable for the optional to keep the trivial call ABI.
+            foreach (var candidate in publicDeclarationsByQualifiedName.Values)
+            {
+                if (candidate.Kind is not ("class" or "struct" or "union")
+                    || candidate.Abstract
+                    || !candidate.TriviallyCopyable
+                    || !layoutByDeclarationId.TryGetValue(candidate.Id, out var optionalLayout)
+                    || optionalLayout.Size <= 0)
+                {
+                    continue;
+                }
+
+                symbolOptionalRecords[candidate.QualifiedName] = candidate;
             }
         }
 
@@ -941,7 +965,7 @@ internal sealed class AbiPlan
                     continue;
                 }
 
-                if (symbolDispatch && !IsSymbolDispatchSupported(create, symbolByValueReturns, symbolVectorElements, out reason))
+                if (symbolDispatch && !IsSymbolDispatchSupported(create, symbolByValueReturns, symbolVectorElements, symbolOptionalRecords, out reason))
                 {
                     skipReasons[constructor.Id] = reason ?? "the constructor is not supported by symbol dispatch";
                     continue;
@@ -1161,6 +1185,7 @@ internal sealed class AbiPlan
                         symbolByValueReturns,
                         symbolByValueCopyRequired,
                         symbolVectorElements,
+                        symbolOptionalRecords,
                         variants,
                         callables,
                         out var function,
@@ -1170,7 +1195,7 @@ internal sealed class AbiPlan
                     continue;
                 }
 
-                if (symbolDispatch && !IsSymbolDispatchSupported(function, symbolByValueReturns, symbolVectorElements, out reason))
+                if (symbolDispatch && !IsSymbolDispatchSupported(function, symbolByValueReturns, symbolVectorElements, symbolOptionalRecords, out reason))
                 {
                     skipReasons[method.Id] = reason ?? "the member is not supported by symbol dispatch";
                     continue;
@@ -2030,6 +2055,10 @@ internal sealed class AbiPlan
         return text;
     }
 
+    /// <summary>The symbol demangler writes a space after template commas; the IR ids do not.</summary>
+    internal static string CompactTemplateName(string name) =>
+        System.Text.RegularExpressions.Regex.Replace(name, @",\s+", ",");
+
     private static string StripTopLevelQualifiers(string canonical)
     {
         var text = canonical.Trim();
@@ -2711,6 +2740,7 @@ internal sealed class AbiPlan
         IReadOnlyDictionary<string, DeclarationRecord> symbolByValueReturns,
         IReadOnlyDictionary<string, bool> symbolByValueCopyRequired,
         IReadOnlyDictionary<string, DeclarationRecord> symbolVectorElements,
+        IReadOnlyDictionary<string, DeclarationRecord> symbolOptionalRecords,
         VariantRegistry variants,
         CallableRegistry callables,
         out AbiFunction function,
@@ -2768,6 +2798,7 @@ internal sealed class AbiPlan
         DeclarationRecord? byValueReturn = null;
         var returnRequiresCopy = false;
         var returnTriviallyCopyable = false;
+        var returnOptionalRecord = false;
 
         if (symbolDispatch
             && method.Kind is "method" or "operator"
@@ -2782,6 +2813,25 @@ internal sealed class AbiPlan
             returnOwned = true;
             returnWrapperType = "global::" + declarationNames[byValueDeclaration.Id].NamespaceName + "."
                 + declarationNames[byValueDeclaration.Id].ClassName;
+        }
+        else if (symbolDispatch
+            && TryParseOptional(nativeReturnType, out var optionalReturnInner)
+            && TryResolveSymbolOptionalRecord(
+                optionalReturnInner,
+                symbolOptionalRecords,
+                declarationNames,
+                out var optionalReturnRecord,
+                out var optionalReturnWrapper))
+        {
+            byValueReturn = optionalReturnRecord;
+            returnKind = AbiKind.Opaque;
+            returnOwned = true;
+            returnOptional = true;
+            returnNullable = true;
+            returnTriviallyCopyable = true;
+            returnOptionalRecord = true;
+            returnWrapperType = optionalReturnWrapper;
+            nativeReturnType = optionalReturnInner;
         }
         else if (!TryMapReturnType(
                 declaration.Surface,
@@ -2898,6 +2948,7 @@ internal sealed class AbiPlan
             ReturnDeclarationId = byValueReturn?.Id,
             ReturnRequiresCopy = returnRequiresCopy,
             ReturnTriviallyCopyable = returnTriviallyCopyable,
+            ReturnOptionalRecord = returnOptionalRecord,
             ReturnExpected = returnExpected,
             ExpectedErrorType = expectedErrorType,
             VariantInfo = returnVariant,
@@ -3493,6 +3544,17 @@ internal sealed class AbiPlan
             kind = AbiKind.Shared;
             nativeType = sharedPointee;
             sharedWrapper = SharedWrapperKind.SharedPtr;
+            nullable = true;
+            return true;
+        }
+
+        if (TryParseWeakPtr(nativeType, out var weakPointee))
+        {
+            // A weak result is locked once and surfaced as a strong snapshot; expired
+            // references produce a null handle.
+            kind = AbiKind.Shared;
+            nativeType = weakPointee;
+            sharedWrapper = SharedWrapperKind.WeakPtr;
             nullable = true;
             return true;
         }
@@ -4847,6 +4909,22 @@ internal sealed class AbiPlan
                 return true;
             }
 
+            if (IsPointerType(vectorElement))
+            {
+                // Pointer elements keep their pointer bits and surface as nint[].
+                parameter = new AbiParameter
+                {
+                    Name = name,
+                    Kind = AbiKind.Vector,
+                    NativeType = text,
+                    IsVector = true,
+                    VectorElementKind = AbiKind.Opaque,
+                    VectorElementType = vectorElement,
+                    VectorElementOwnership = ArrayElementOwnership.None,
+                };
+                return true;
+            }
+
             if (variants.TryGet(surface, NormalizeTypeName(vectorElement), out var vectorVariant))
             {
                 var vectorVariantType = NormalizeTypeName(vectorElement);
@@ -5076,7 +5154,13 @@ internal sealed class AbiPlan
             }
 
             if (!declarationsByQualifiedName.TryGetValue(optionalInner, out var optionalDeclaration)
-                || optionalDeclaration.Abstract
+                && !declarationsByQualifiedName.TryGetValue(CompactTemplateName(optionalInner), out optionalDeclaration))
+            {
+                reason = $"optional record parameter '{optionalInner}' is not a known bindable declaration";
+                return false;
+            }
+
+            if (optionalDeclaration.Abstract
                 || !optionalDeclaration.CopyConstructible)
             {
                 reason = $"optional record parameter '{optionalInner}' is abstract or not copy-constructible";
@@ -5091,6 +5175,7 @@ internal sealed class AbiPlan
                 NativePointee = optionalInner,
                 IsOptional = true,
                 OptionalInnerType = optionalInner,
+                IsOptionalRecord = true,
                 WrapperType = LookupWrapperType(optionalInner, declarationsByQualifiedName, declarationNames),
             };
             return true;
@@ -5872,6 +5957,7 @@ internal sealed class AbiPlan
         AbiFunction function,
         IReadOnlyDictionary<string, DeclarationRecord> symbolByValueReturns,
         IReadOnlyDictionary<string, DeclarationRecord> symbolVectorElements,
+        IReadOnlyDictionary<string, DeclarationRecord> symbolOptionalRecords,
         out string? reason)
     {
         reason = null;
@@ -5890,11 +5976,16 @@ internal sealed class AbiPlan
         var optionalRefReturn = function.ReturnOptional
             && function.ReturnKind == AbiKind.Opaque
             && !function.ReturnOwned;
+        var optionalValueReturn = function.ReturnOptional
+            && !optionalRefReturn
+            && (function.ReturnKind == AbiKind.StringView
+                || IsSymbolScalarKind(function.ReturnKind)
+                || function.ReturnOptionalRecord);
         if (function.ReturnExpected
-            || (function.ReturnOptional && !optionalRefReturn)
+            || (function.ReturnOptional && !optionalRefReturn && !optionalValueReturn)
             || function.ReturnUniquePtr
             || (function.ReturnOwned && !ownedRecordReturn)
-            || function.SharedWrapper != SharedWrapperKind.None
+            || function.SharedWrapper is not (SharedWrapperKind.None or SharedWrapperKind.SharedPtr or SharedWrapperKind.WeakPtr)
             || function.TimeConversion != TimeConversion.None
             || function.SpecialValue != SpecialValueKind.None
             || function.MapKeyKind != AbiKind.Void
@@ -5932,6 +6023,7 @@ internal sealed class AbiPlan
             case AbiKind.F64:
             case AbiKind.StringView:
             case AbiKind.ArrayView:
+            case AbiKind.Shared:
                 break;
             case AbiKind.Opaque:
                 if (!ownedRecordReturn
@@ -5951,7 +6043,17 @@ internal sealed class AbiPlan
         foreach (var parameter in function.Parameters)
         {
             var optionalRefParameter = parameter.IsOptionalRef && parameter.Kind == AbiKind.Opaque;
-            if ((parameter.IsOptional && !optionalRefParameter)
+            var optionalRecordParameter = parameter.IsOptional
+                && !optionalRefParameter
+                && parameter.IsOptionalRecord
+                && parameter.OptionalInnerType is { } optionalInner
+                && symbolOptionalRecords.ContainsKey(CompactTemplateName(StripTopLevelQualifiers(optionalInner)));
+            var optionalValueParameter = parameter.IsOptional
+                && !optionalRefParameter
+                && (parameter.Kind == AbiKind.StringView
+                    || IsSymbolScalarKind(parameter.Kind)
+                    || optionalRecordParameter);
+            if ((parameter.IsOptional && !optionalRefParameter && !optionalValueParameter)
                 || (parameter.IsOptionalRef && !optionalRefParameter)
                 || parameter.IsUniquePtrParam
                 || parameter.IsMap
@@ -6008,6 +6110,7 @@ internal sealed class AbiPlan
                 case AbiKind.ISize:
                 case AbiKind.F32:
                 case AbiKind.F64:
+                case AbiKind.Shared:
                     break;
                 case AbiKind.StringView:
                     if (IsRValueReference(parameter.NativeType))
@@ -6030,6 +6133,11 @@ internal sealed class AbiPlan
 
                     break;
                 case AbiKind.Opaque:
+                    if (optionalRecordParameter)
+                    {
+                        break;
+                    }
+
                     if (parameter.IsByValueRecord)
                     {
                         if (parameter.NativePointee is null
@@ -6065,6 +6173,37 @@ internal sealed class AbiPlan
 
         return true;
     }
+
+    private static bool TryResolveSymbolOptionalRecord(
+        string inner,
+        IReadOnlyDictionary<string, DeclarationRecord> symbolOptionalRecords,
+        IReadOnlyDictionary<string, DeclarationName> declarationNames,
+        out DeclarationRecord record,
+        out string wrapperType)
+    {
+        record = null!;
+        wrapperType = "";
+        var name = CompactTemplateName(StripTopLevelQualifiers(inner));
+        if (!symbolOptionalRecords.TryGetValue(name, out var found))
+        {
+            return false;
+        }
+
+        if (!declarationNames.TryGetValue(found.Id, out var declarationName))
+        {
+            return false;
+        }
+
+        record = found;
+        wrapperType = "global::" + declarationName.NamespaceName + "." + declarationName.ClassName;
+        return true;
+    }
+
+    internal static bool IsSymbolScalarKind(AbiKind kind) => kind is
+        AbiKind.Bool or AbiKind.I8 or AbiKind.U8
+        or AbiKind.I16 or AbiKind.U16 or AbiKind.I32 or AbiKind.U32
+        or AbiKind.I64 or AbiKind.U64 or AbiKind.USize or AbiKind.ISize
+        or AbiKind.F32 or AbiKind.F64;
 
     private static bool IsSymbolVectorElementSupported(
         AbiKind elementKind,
