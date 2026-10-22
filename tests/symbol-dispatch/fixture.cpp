@@ -23,6 +23,19 @@ struct FixtureObject
 
 static std::shared_ptr<FixtureObject> g_shared;
 
+namespace gsl
+{
+template <typename T>
+struct span
+{
+    T* data;
+    std::size_t size;
+};
+}
+
+static FixtureObject g_spanValues[2] = {{11}, {22}};
+static FixtureObject* g_spanObjects[2] = {&g_spanValues[0], &g_spanValues[1]};
+
 template <typename T>
 struct OwnerPtr
 {
@@ -119,6 +132,7 @@ public:
     FixtureObject* makeObject(int value) const;
     void releaseObject(FixtureObject* value) const;
     int sumObjectValues(std::vector<FixtureObject*> const& values) const;
+    gsl::span<FixtureObject*> objectSpan() const;
     static FixtureBlock* create(int x, int y);
     static void release(FixtureBlock* block);
 
@@ -289,6 +303,11 @@ FixtureObject* FixtureBlock::makeObject(int value) const
 void FixtureBlock::releaseObject(FixtureObject* value) const
 {
     delete value;
+}
+
+gsl::span<FixtureObject*> FixtureBlock::objectSpan() const
+{
+    return gsl::span<FixtureObject*>{g_spanObjects, 2};
 }
 
 int FixtureBlock::sumObjectValues(std::vector<FixtureObject*> const& values) const

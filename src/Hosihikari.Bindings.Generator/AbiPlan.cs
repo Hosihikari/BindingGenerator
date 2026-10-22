@@ -228,6 +228,7 @@ internal sealed class AbiFunction
     public bool ReturnUniquePtr { get; init; }
     public bool ReturnOptional { get; init; }
     public bool ReturnArray { get; init; }
+    public bool ReturnSpan { get; init; }
     public AbiKind ArrayElementKind { get; init; }
     public string? ArrayElementType { get; init; }
     public SharedWrapperKind ArrayElementSharedWrapper { get; init; }
@@ -1710,6 +1711,7 @@ internal sealed class AbiPlan
                             out _,
                             out _,
                             out _,
+                            out _,
                             out var sharedWrapper,
                             out var timeConversion,
                             out _,
@@ -2795,6 +2797,7 @@ internal sealed class AbiPlan
         var returnUniquePtr = false;
         var returnOptional = false;
         var returnArray = false;
+        var returnSpan = false;
         var arrayElementKind = AbiKind.Void;
         string? arrayElementType = null;
         var arrayElementSharedWrapper = SharedWrapperKind.None;
@@ -2878,6 +2881,7 @@ internal sealed class AbiPlan
                 out returnUniquePtr,
                 out returnOptional,
                 out returnArray,
+                out returnSpan,
                 out arrayElementKind,
                 out arrayElementType,
                 out arrayElementSharedWrapper,
@@ -2954,6 +2958,7 @@ internal sealed class AbiPlan
             ReturnUniquePtr = returnUniquePtr,
             ReturnOptional = returnOptional,
             ReturnArray = returnArray,
+            ReturnSpan = returnSpan,
             ArrayElementKind = arrayElementKind,
             ArrayElementType = arrayElementType,
             ArrayElementSharedWrapper = arrayElementSharedWrapper,
@@ -3006,6 +3011,7 @@ internal sealed class AbiPlan
         out bool uniquePtr,
         out bool optional,
         out bool array,
+        out bool returnSpan,
         out AbiKind arrayElementKind,
         out string? arrayElementType,
         out SharedWrapperKind arrayElementSharedWrapper,
@@ -3037,6 +3043,7 @@ internal sealed class AbiPlan
         uniquePtr = false;
         optional = false;
         array = false;
+        returnSpan = false;
         arrayElementKind = AbiKind.Void;
         arrayElementType = null;
         arrayElementSharedWrapper = SharedWrapperKind.None;
@@ -3109,6 +3116,7 @@ internal sealed class AbiPlan
                     out uniquePtr,
                     out optional,
                     out array,
+                    out returnSpan,
                     out arrayElementKind,
                     out arrayElementType,
                     out arrayElementSharedWrapper,
@@ -3649,6 +3657,26 @@ internal sealed class AbiPlan
             owned = true;
             uniquePtr = true;
             nullable = true;
+            return true;
+        }
+
+        if (symbolDispatch && TryParseSpan(nativeType, out var spanElement))
+        {
+            if (!IsPointerType(spanElement))
+            {
+                reason = $"span element type '{spanElement}' is not supported";
+                return false;
+            }
+
+            // gsl::span<T> is a 16-byte {pointer, size} view. The shim returns it as a borrowed
+            // array view; pointer elements surface as nint[] without ownership.
+            kind = AbiKind.ArrayView;
+            nativeType = canonical.Trim();
+            array = true;
+            returnSpan = true;
+            arrayElementKind = AbiKind.Opaque;
+            arrayElementOwnership = ArrayElementOwnership.None;
+            arrayElementNativeType = spanElement;
             return true;
         }
 
@@ -4734,6 +4762,38 @@ internal sealed class AbiPlan
 
         pointee = StripTopLevelQualifiers(arguments[0].Trim());
         return pointee.Length > 0;
+    }
+
+    private static bool TryParseSpan(string canonical, out string element)
+    {
+        element = "";
+        var text = NormalizeTypeName(canonical);
+        const string prefix = "gsl::span<";
+        if (!text.StartsWith(prefix, StringComparison.Ordinal)
+            || !text.EndsWith(">", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var arguments = SplitTemplateArguments(text[prefix.Length..^1].Trim()).ToList();
+        if (arguments.Count is < 1 or > 2)
+        {
+            return false;
+        }
+
+        if (arguments.Count == 2 && !string.Equals(arguments[1].Trim(), "-1", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        element = arguments[0].Trim();
+        if (element.StartsWith("gsl::not_null<", StringComparison.Ordinal)
+            && element.EndsWith(">", StringComparison.Ordinal))
+        {
+            element = element["gsl::not_null<".Length..^1].Trim();
+        }
+
+        return element.Length > 0;
     }
 
     private static bool TryParseUniquePtr(string canonical, out string pointee)

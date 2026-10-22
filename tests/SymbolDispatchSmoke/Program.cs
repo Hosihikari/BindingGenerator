@@ -156,6 +156,16 @@ if (heavyMethod is not null)
     }
 }
 
+var objectSpanMethod = typeof(FixtureBlock).GetMethod("objectSpan");
+if (objectSpanMethod is not null)
+{
+    var span = (nint[])objectSpanMethod.Invoke(block, [])!;
+    if (span.Length != 2 || span[0] == 0 || span[1] == 0)
+    {
+        throw new InvalidOperationException("The gsl::span pointer result is incorrect.");
+    }
+}
+
 var uniqueHeavyMethod = typeof(FixtureBlock).GetMethod("uniqueHeavy");
 if (uniqueHeavyMethod is not null)
 {

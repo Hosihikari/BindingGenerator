@@ -2802,6 +2802,7 @@ internal static class ShimEmitter
         // A vector return is read as a standard three-pointer vector view. Element bytes stay
         // valid until the caller copies them; queued records are released without destructors.
         var arrayReturn = function.ReturnKind == AbiKind.ArrayView;
+        var spanReturn = function.ReturnSpan;
         var borrowedVectorReturn = arrayReturn
             && (AbiPlan.IsPointerType(function.NativeReturnType)
                 || AbiPlan.IsReferenceType(function.NativeReturnType));
@@ -2909,7 +2910,11 @@ internal static class ShimEmitter
             callReturn = RegisterType(returnLayout!);
         }
 
-        if (arrayReturn)
+        if (spanReturn)
+        {
+            callReturn = "void";
+        }
+        else if (arrayReturn)
         {
             callReturn = borrowedVectorReturn ? "void*" : "void";
             yield return $"    using HsVector = std::vector<{vectorElementType}>;";
@@ -2950,7 +2955,9 @@ internal static class ShimEmitter
         }
         else if (arrayReturn && !borrowedVectorReturn)
         {
-            yield return "    alignas(HsVector) unsigned char hs_vectorStorage[sizeof(HsVector)];";
+            yield return spanReturn
+                ? "    alignas(8) unsigned char hs_spanStorage[sizeof(HosihikariArrayView)];"
+                : "    alignas(HsVector) unsigned char hs_vectorStorage[sizeof(HsVector)];";
         }
         else if (manualTypedSret)
         {
@@ -3007,7 +3014,9 @@ internal static class ShimEmitter
                     ? "reinterpret_cast<HsString*>(hs_stringStorage)"
                     : largeRecordReturn
                         ? "static_cast<void*>(hs_recordStorage)"
-                        : arrayReturn && !borrowedVectorReturn
+                        : spanReturn
+                            ? "static_cast<void*>(hs_spanStorage)"
+                    : arrayReturn && !borrowedVectorReturn
                             ? "static_cast<void*>(hs_vectorStorage)"
                             : manualTypedSret
                                 ? "static_cast<void*>(hs_typedStorage)"
@@ -3167,6 +3176,11 @@ internal static class ShimEmitter
                 yield return $"    auto* const hs_record = static_cast<void*>(hs_allocate(static_cast<std::size_t>({returnLayout.Size.ToString(CultureInfo.InvariantCulture)}), {align.ToString(CultureInfo.InvariantCulture)}));";
                 yield return $"    std::memcpy(hs_record, &hs_value, static_cast<std::size_t>({returnLayout.Size.ToString(CultureInfo.InvariantCulture)}));";
                 yield return "    return hs_record;";
+            }
+            else if (spanReturn)
+            {
+                yield return $"    {call};";
+                yield return "    return *reinterpret_cast<HosihikariArrayView*>(hs_spanStorage);";
             }
             else if (arrayReturn)
             {
