@@ -52,6 +52,8 @@ internal sealed class AbiParameter
     public AbiKind Kind { get; init; }
     public string NativeType { get; init; } = "";
     public string? NativePointee { get; init; }
+    public string? ByValueDeclarationId { get; init; }
+    public bool IsByValueRecord { get; init; }
     public bool IsPointer => AbiPlan.IsPointerType(NativeType);
     public bool IsReference { get; init; }
     public bool IsRValueReference { get; init; }
@@ -229,6 +231,7 @@ internal sealed class AbiFunction
     public string? MapValueNativeType { get; init; }
     public bool ReturnNullable { get; init; }
     public string? ReturnDeclarationId { get; init; }
+    public bool ReturnRequiresCopy { get; init; }
 
     /// <summary>Absolute bit offset for symbol-dispatched field accessors.</summary>
     public long? FieldBitOffset { get; init; }
@@ -444,25 +447,44 @@ internal sealed class AbiPlan
                 StringComparer.Ordinal);
         var syntheticMembers = new Dictionary<string, List<MemberRecord>>(StringComparer.Ordinal);
         var symbolByValueReturns = new Dictionary<string, DeclarationRecord>(StringComparer.Ordinal);
+        var symbolByValueCopyRequired = new Dictionary<string, bool>(StringComparer.Ordinal);
         if (symbolDispatch)
         {
             foreach (var candidate in publicDeclarationsByQualifiedName.Values)
             {
                 if (candidate.Kind is not ("class" or "struct" or "union")
                     || !layoutByDeclarationId.TryGetValue(candidate.Id, out var layout)
-                    || layout.Size <= 8
+                    || layout.Size <= 0
                     || candidate.Abstract)
                 {
                     continue;
                 }
 
                 var candidateMembers = membersByDeclaration.TryGetValue(candidate.Id, out var value) ? value : [];
-                if (candidateMembers.Any(member => member.Kind == "destructor" || member.Virtual))
+                var destructor = candidateMembers.FirstOrDefault(member =>
+                    member.Kind == "destructor" && member.Access == "public");
+                if (destructor is null)
+                {
+                    // The memcpy/register paths are only valid for trivially copyable types.
+                    if (!candidate.TriviallyCopyable
+                        || candidateMembers.Any(member => member.Virtual)
+                        || (layout.Size <= 8 && layout.Size is not (1 or 2 or 4 or 8)))
+                    {
+                        continue;
+                    }
+                }
+                else if (layout.Size <= 8
+                    || !candidateMembers.Any(member =>
+                        member.Kind == "constructor"
+                        && member.Access == "public"
+                        && IsCopyConstructor(member, candidate.QualifiedName)
+                        && HasSymbolAddress(member)))
                 {
                     continue;
                 }
 
                 symbolByValueReturns[candidate.QualifiedName] = candidate;
+                symbolByValueCopyRequired[candidate.QualifiedName] = destructor is not null;
             }
         }
 
@@ -872,7 +894,7 @@ internal sealed class AbiPlan
                     continue;
                 }
 
-                if (symbolDispatch && !IsSymbolDispatchSupported(create, out reason))
+                if (symbolDispatch && !IsSymbolDispatchSupported(create, symbolByValueReturns, out reason))
                 {
                     skipReasons[constructor.Id] = reason ?? "the constructor is not supported by symbol dispatch";
                     continue;
@@ -1090,6 +1112,7 @@ internal sealed class AbiPlan
                         allowOwnedByValue,
                         symbolDispatch,
                         symbolByValueReturns,
+                        symbolByValueCopyRequired,
                         variants,
                         callables,
                         out var function,
@@ -1099,7 +1122,7 @@ internal sealed class AbiPlan
                     continue;
                 }
 
-                if (symbolDispatch && !IsSymbolDispatchSupported(function, out reason))
+                if (symbolDispatch && !IsSymbolDispatchSupported(function, symbolByValueReturns, out reason))
                 {
                     skipReasons[method.Id] = reason ?? "the member is not supported by symbol dispatch";
                     continue;
@@ -2449,7 +2472,7 @@ internal sealed class AbiPlan
                     declarationNames,
                     destroyableDeclarationIds,
                     enumUnderlyingByName,
-                    linkCarrier,
+                    linkCarrier || symbolDispatch,
                     variants,
                     out var abiParameter,
                     out var parameterReason))
@@ -2608,6 +2631,7 @@ internal sealed class AbiPlan
         bool linkCarrier,
         bool symbolDispatch,
         IReadOnlyDictionary<string, DeclarationRecord> symbolByValueReturns,
+        IReadOnlyDictionary<string, bool> symbolByValueCopyRequired,
         VariantRegistry variants,
         CallableRegistry callables,
         out AbiFunction function,
@@ -2663,14 +2687,16 @@ internal sealed class AbiPlan
         VariantAbiInfo? returnVariant = null;
         CallableAbiInfo? returnCallable = null;
         DeclarationRecord? byValueReturn = null;
+        var returnRequiresCopy = false;
 
         if (symbolDispatch
             && method.Kind is "method" or "operator"
-            && !method.Static
             && IsByValueRecordType(nativeReturnType)
             && symbolByValueReturns.TryGetValue(nativeReturnType, out var byValueDeclaration))
         {
             byValueReturn = byValueDeclaration;
+            returnRequiresCopy = symbolByValueCopyRequired.TryGetValue(nativeReturnType, out var requiresCopy)
+                && requiresCopy;
             returnKind = AbiKind.Opaque;
             returnOwned = true;
             returnWrapperType = "global::" + declarationNames[byValueDeclaration.Id].NamespaceName + "."
@@ -2732,7 +2758,7 @@ internal sealed class AbiPlan
                     declarationNames,
                     destroyableDeclarationIds,
                     enumUnderlyingByName,
-                    linkCarrier,
+                    linkCarrier || symbolDispatch,
                     variants,
                     out var abiParameter,
                     out var parameterReason))
@@ -2788,6 +2814,7 @@ internal sealed class AbiPlan
             MapValueNativeType = mapValueNativeType,
             ReturnNullable = returnNullable,
             ReturnDeclarationId = byValueReturn?.Id,
+            ReturnRequiresCopy = returnRequiresCopy,
             ReturnExpected = returnExpected,
             ExpectedErrorType = expectedErrorType,
             VariantInfo = returnVariant,
@@ -5137,6 +5164,8 @@ internal sealed class AbiPlan
                 Kind = AbiKind.Opaque,
                 NativeType = text,
                 NativePointee = byValueName,
+                ByValueDeclarationId = byValueDeclaration.Id,
+                IsByValueRecord = true,
                 IsReference = true,
                 IsConst = true,
                 WrapperType = LookupWrapperType(text, declarationsByQualifiedName, declarationNames),
@@ -5572,6 +5601,28 @@ internal sealed class AbiPlan
         return text;
     }
 
+    private static bool IsCopyConstructor(MemberRecord member, string qualifiedName)
+    {
+        if (member.Signature is null || member.Signature.Parameters.Count != 1)
+        {
+            return false;
+        }
+
+        var type = member.Signature.Parameters[0].Type.Trim();
+        while (type.EndsWith("&", StringComparison.Ordinal))
+        {
+            type = type[..^1].TrimEnd();
+        }
+
+        type = type
+            .Replace("const ", "", StringComparison.Ordinal)
+            .Replace(" const", "", StringComparison.Ordinal)
+            .Replace("volatile ", "", StringComparison.Ordinal)
+            .Replace(" volatile", "", StringComparison.Ordinal)
+            .Trim();
+        return string.Equals(type, qualifiedName, StringComparison.Ordinal);
+    }
+
     private static void CollectInheritedSymbolFields(
         string ownerId,
         long offsetBits,
@@ -5717,7 +5768,10 @@ internal sealed class AbiPlan
     /// declaring header. Only parameters and returns that can be expressed by pointer bits or
     /// fixed-width scalars are safe; records are passed as <c>void*</c>, never by value.
     /// </summary>
-    private static bool IsSymbolDispatchSupported(AbiFunction function, out string? reason)
+    private static bool IsSymbolDispatchSupported(
+        AbiFunction function,
+        IReadOnlyDictionary<string, DeclarationRecord> symbolByValueReturns,
+        out string? reason)
     {
         reason = null;
         if (function.VariantInfo is not null
@@ -5731,7 +5785,6 @@ internal sealed class AbiPlan
 
         var ownedRecordReturn = function.ReturnOwned
             && function.ReturnKind == AbiKind.Opaque
-            && !function.Static
             && !IsSingleLevelPointerOrReference(function.NativeReturnType);
         if (function.ReturnExpected
             || function.ReturnOptional
@@ -5832,6 +5885,18 @@ internal sealed class AbiPlan
 
                     break;
                 case AbiKind.Opaque:
+                    if (parameter.IsByValueRecord)
+                    {
+                        if (parameter.NativePointee is null
+                            || !symbolByValueReturns.ContainsKey(parameter.NativePointee))
+                        {
+                            reason = "the by-value record parameter has no eligible layout";
+                            return false;
+                        }
+
+                        break;
+                    }
+
                     if (!IsSingleLevelPointerOrReference(parameter.NativeType))
                     {
                         reason = "by-value record parameters are not supported by symbol dispatch";

@@ -50,7 +50,7 @@ The script emits `linux-x64-server` IR and validates it with the .NET CLI. On li
 
 ## Symbol prototype (Bedrock 1.21.3)
 
-`hosihikari-symbol-ir-frontend` reads a publics-only PDB and an optional ELF symbol table, demangles a selected set of classes, merges Windows return types into the Linux records, and reconstructs vtable slots. `--output` writes a prototype JSON; `--ir-output` writes formal IR 1.4.1 shards and a manifest with `symbol`, `address`, `rva`, and per-configuration vtable records. Omitting `--elf` emits the Windows configuration alone, which the synthetic fixture uses. See `symbols/README.md`.
+`hosihikari-symbol-ir-frontend` reads a publics-only PDB and an optional ELF symbol table, demangles a selected set of classes, merges Windows return types into the Linux records, and reconstructs vtable slots. `--output` writes a prototype JSON; `--ir-output` writes formal IR 1.5.0 shards and a manifest with `symbol`, `address`, `rva`, and per-configuration vtable records. Omitting `--elf` emits the Windows configuration alone, which the synthetic fixture uses. See `symbols/README.md`.
 
 ```powershell
 ./frontend/run-symbols.ps1 -Pdb <pdb> -Exe <pe> -Elf <debug> -Classes Actor,BlockPos

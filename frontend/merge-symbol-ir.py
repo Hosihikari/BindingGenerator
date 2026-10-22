@@ -98,6 +98,10 @@ def main():
     header_declarations = {
         record["id"]: record for record in header_records if record.get("recordType") == "declaration"
     }
+    header_declarations_by_compact_id = {
+        re.sub(r",\s+", ",", declaration_id): declaration
+        for declaration_id, declaration in header_declarations.items()
+    }
     header_variants = {
         record["declarationId"]: record
         for record in header_records
@@ -201,6 +205,9 @@ def main():
         symbol_declaration["copyConstructible"] = header_declaration.get(
             "copyConstructible", symbol_declaration.get("copyConstructible", False)
         )
+        symbol_declaration["triviallyCopyable"] = header_declaration.get(
+            "triviallyCopyable", symbol_declaration.get("triviallyCopyable", False)
+        )
 
         header_variant = header_variants.get(declaration_id, {})
         layout = header_variant.get("layout")
@@ -291,6 +298,93 @@ def main():
     for base_class_id in base_class_ids:
         if base_class_id:
             ensure_header_class(base_class_id)
+
+    # Enum declarations carry the underlying integer type used by signatures. The symbol
+    # stream has no type information, so copy every enum the header umbrella saw.
+    for enum_id, enum_declaration in header_declarations.items():
+        if enum_declaration.get("kind") != "enum" or enum_id in symbol_declarations:
+            continue
+        symbol_records[configurations[0]].append(copy.deepcopy(enum_declaration))
+        symbol_declarations[enum_id] = enum_declaration
+        added_declarations += 1
+
+    def base_type_name(text):
+        name = (text or "").strip()
+        while name.endswith("&") or name.endswith("*"):
+            name = name[:-1].strip()
+        name = (
+            name.replace("const ", "")
+            .replace(" const", "")
+            .replace("volatile ", "")
+            .replace(" volatile", "")
+            .strip()
+        )
+        return name
+
+    # Record types that appear by value in signatures need a declaration with a layout
+    # and the trivially-copyable fact. Copy those header declarations as dependencies.
+    referenced_types = set()
+    for records in symbol_records.values():
+        for record in records:
+            if record.get("recordType") != "member":
+                continue
+            signature = record.get("signature") or {}
+            referenced_types.add(base_type_name(signature.get("returnType", "")))
+            for parameter in signature.get("parameters", []):
+                referenced_types.add(base_type_name(parameter.get("type", "")))
+
+    for type_name in sorted(referenced_types):
+        if not type_name or type_name.startswith("std::") or "(" in type_name or ")" in type_name:
+            continue
+        declaration_id = "bedrock:" + type_name
+        if declaration_id in symbol_declarations:
+            continue
+        header_declaration = header_declarations.get(
+            declaration_id
+        ) or header_declarations_by_compact_id.get(declaration_id)
+        if header_declaration is None or header_declaration.get("kind") not in ("class", "struct", "union"):
+            continue
+        header_variant = header_variants.get(header_declaration.get("id", declaration_id), {})
+        layout = header_variant.get("layout")
+        if not layout or layout.get("size", 0) <= 0:
+            continue
+
+        copied_declaration = copy.deepcopy(header_declaration)
+        # The demangler omits spaces after template commas; make the dependency id match
+        # the spelling used by the symbol signatures.
+        compact_name = re.sub(r",\s+", ",", copied_declaration.get("qualifiedName", ""))
+        if compact_name != copied_declaration.get("qualifiedName"):
+            copied_declaration["qualifiedName"] = compact_name
+            copied_declaration["id"] = "bedrock:" + compact_name
+            declaration_id = copied_declaration["id"]
+        symbol_records[configurations[0]].append(copied_declaration)
+        symbol_declarations[declaration_id] = copied_declaration
+        added_declarations += 1
+        clean_layout = {
+            "size": layout.get("size", 0),
+            "align": layout.get("align", 0),
+            "fieldOffsets": [],
+            "bases": [],
+        }
+        for configuration in configurations:
+            has_variant = any(
+                record.get("recordType") == "variant"
+                and record.get("declarationId") == declaration_id
+                and record.get("configuration") == configuration
+                for record in symbol_records[configuration]
+            )
+            if has_variant:
+                continue
+            symbol_records[configuration].append(
+                {
+                    "recordType": "variant",
+                    "declarationId": declaration_id,
+                    "configuration": configuration,
+                    "availability": "present",
+                    "layout": copy.deepcopy(clean_layout),
+                }
+            )
+            copied_layouts += 1
 
     os.makedirs(args.output, exist_ok=True)
     shard_paths = {}

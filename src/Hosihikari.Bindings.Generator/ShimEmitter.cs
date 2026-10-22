@@ -2130,6 +2130,41 @@ internal static class ShimEmitter
             yield return $"    {stringType} hs_str{index}({name}_data, {name}_size);";
         }
 
+        for (var index = 0; index < function.Parameters.Count; index++)
+        {
+            var parameter = function.Parameters[index];
+            if (!parameter.IsByValueRecord)
+            {
+                continue;
+            }
+
+            if (parameter.ByValueDeclarationId is null
+                || !layouts.TryGetValue(parameter.ByValueDeclarationId, out var parameterLayout)
+                || parameterLayout.Size <= 0)
+            {
+                yield return $"    setLastError(\"the layout of {EscapeCpp(parameter.NativeType)} is unavailable\");";
+                yield return "    " + DefaultReturn(function.ReturnKind);
+                foreach (var line in SymbolCatchTail(function.ReturnKind))
+                {
+                    yield return line;
+                }
+
+                yield break;
+            }
+
+            if (parameterLayout.Size <= 8)
+            {
+                // Small trivial records are passed in a register; the call argument reads
+                // the handle's bytes directly.
+                continue;
+            }
+
+            var align = parameterLayout.Align > 0 ? parameterLayout.Align : 8;
+            var name = CppParameterName(parameter, index);
+            yield return $"    alignas({align.ToString(CultureInfo.InvariantCulture)}) unsigned char hs_arg{index}Storage[{parameterLayout.Size.ToString(CultureInfo.InvariantCulture)}];";
+            yield return $"    std::memcpy(hs_arg{index}Storage, {name}, static_cast<std::size_t>({parameterLayout.Size.ToString(CultureInfo.InvariantCulture)}));";
+        }
+
         if (function.FieldBitOffset is { } fieldBits
             && function.Kind is AbiFunctionKind.Get or AbiFunctionKind.Set)
         {
@@ -2265,15 +2300,54 @@ internal static class ShimEmitter
         }
 
         var ownedRecordReturn = function.Kind == AbiFunctionKind.Method
-            && !function.Static
             && function.ReturnKind == AbiKind.Opaque
             && function.ReturnOwned
             && !function.NativeReturnType.TrimEnd().EndsWith("*", StringComparison.Ordinal)
             && !function.NativeReturnType.TrimEnd().EndsWith("&", StringComparison.Ordinal);
+        var staticRecordReturn = false;
         LayoutInfo? returnLayout = null;
         if (ownedRecordReturn && function.ReturnDeclarationId is not null)
         {
             layouts.TryGetValue(function.ReturnDeclarationId, out returnLayout);
+        }
+
+        var smallRecordReturn = ownedRecordReturn && returnLayout is { Size: <= 8 };
+        var largeRecordReturn = ownedRecordReturn && !smallRecordReturn;
+        staticRecordReturn = largeRecordReturn && function.Static;
+        var returnNeedsCopy = largeRecordReturn && function.ReturnRequiresCopy;
+        MemberRecord? returnCopyConstructor = null;
+        MemberRecord? returnDestructor = null;
+        if (returnNeedsCopy && function.ReturnDeclarationId is not null)
+        {
+            foreach (var member in members.Values.Where(member =>
+                         string.Equals(member.DeclarationId, function.ReturnDeclarationId, StringComparison.Ordinal)))
+            {
+                if (member.Kind == "destructor"
+                    && member.Access == "public"
+                    && HasDispatchSymbol(member))
+                {
+                    returnDestructor = member;
+                }
+                else if (member.Kind == "constructor"
+                    && member.Access == "public"
+                    && IsCopyConstructorRecord(member, function.NativeReturnType)
+                    && HasDispatchSymbol(member))
+                {
+                    returnCopyConstructor = member;
+                }
+            }
+        }
+
+        if (returnNeedsCopy && (returnCopyConstructor is null || returnDestructor is null))
+        {
+            yield return $"    setLastError(\"the copy or destructor symbol of {EscapeCpp(function.NativeReturnType)} is unavailable\");";
+            yield return "    " + DefaultReturn(function.ReturnKind);
+            foreach (var line in SymbolCatchTail(function.ReturnKind))
+            {
+                yield return line;
+            }
+
+            yield break;
         }
 
         if (ownedRecordReturn && (returnLayout is null || returnLayout.Size <= 0))
@@ -2299,6 +2373,8 @@ internal static class ShimEmitter
             var parameter = function.Parameters[index];
             callParameters.Add(parameter.Kind switch
             {
+                AbiKind.Opaque when parameter.IsByValueRecord =>
+                    ByValueRegisterType(parameter, layouts) ?? "void*",
                 AbiKind.Opaque => "void*",
                 AbiKind.StringView => parameter.NativeType,
                 _ => AbiPlan.CppType(parameter.Kind),
@@ -2313,7 +2389,7 @@ internal static class ShimEmitter
             && !function.Static
             && function.ReturnKind == AbiKind.StringView
             && !function.NativeReturnType.TrimEnd().EndsWith("&", StringComparison.Ordinal);
-        var memberSretReturn = memberStringReturn || ownedRecordReturn;
+        var memberSretReturn = memberStringReturn || largeRecordReturn;
 
         var callReturn = function.ReturnKind switch
         {
@@ -2326,6 +2402,10 @@ internal static class ShimEmitter
         {
             callReturn = "void";
         }
+        else if (smallRecordReturn)
+        {
+            callReturn = RegisterType(returnLayout!);
+        }
 
         if (memberStringReturn)
         {
@@ -2333,9 +2413,9 @@ internal static class ShimEmitter
             yield return $"    using HsString = {function.NativeReturnType};";
             yield return "    alignas(HsString) unsigned char hs_stringStorage[sizeof(HsString)];";
         }
-        else if (ownedRecordReturn)
+        else if (largeRecordReturn)
         {
-            callParameters.Insert(1, "void*");
+            callParameters.Insert(function.Static ? 0 : 1, "void*");
             var align = returnLayout!.Align > 0 ? returnLayout.Align : 8;
             yield return $"    alignas({align.ToString(CultureInfo.InvariantCulture)}) unsigned char hs_recordStorage[{returnLayout.Size.ToString(CultureInfo.InvariantCulture)}];";
         }
@@ -2352,6 +2432,19 @@ internal static class ShimEmitter
         {
             yield return "    auto const hs_fn = reinterpret_cast<HsFn>(hs_target);";
 
+            if (returnNeedsCopy)
+            {
+                var (copyOffset, copySymbol) = SymbolFacts(returnCopyConstructor!, configuration.Os);
+                var (dtorOffset, dtorSymbol) = SymbolFacts(returnDestructor!, configuration.Os);
+                yield return $"    auto const hs_returnCopy = hs_resolve({copyOffset}, {CppLiteral(copySymbol)});";
+                yield return $"    auto const hs_returnDtor = hs_resolve({dtorOffset}, {CppLiteral(dtorSymbol)});";
+                yield return "    if (hs_returnCopy == nullptr || hs_returnDtor == nullptr)";
+                yield return "    {";
+                yield return "        setLastError(\"the returned record copy or destructor symbol was not resolved\");";
+                yield return "        return nullptr;";
+                yield return "    }";
+            }
+
             var callArguments = new List<string>();
             if (function.Kind == AbiFunctionKind.Create)
             {
@@ -2364,17 +2457,26 @@ internal static class ShimEmitter
                 {
                     callArguments.Add("reinterpret_cast<HsString*>(hs_stringStorage)");
                 }
-                else if (ownedRecordReturn)
+                else if (largeRecordReturn)
                 {
                     callArguments.Add("static_cast<void*>(hs_recordStorage)");
                 }
+            }
+            else if (staticRecordReturn)
+            {
+                callArguments.Add("static_cast<void*>(hs_recordStorage)");
             }
 
             for (var index = 0; index < function.Parameters.Count; index++)
             {
                 var parameter = function.Parameters[index];
                 var name = CppParameterName(parameter, index);
-                callArguments.Add(parameter.Kind == AbiKind.StringView ? $"hs_str{index}" : name);
+                callArguments.Add(parameter.Kind switch
+                {
+                    AbiKind.StringView => $"hs_str{index}",
+                    AbiKind.Opaque when parameter.IsByValueRecord => ByValueArgument(parameter, index, layouts),
+                    _ => name,
+                });
             }
 
             var call = $"hs_fn({string.Join(", ", callArguments)})";
@@ -2401,12 +2503,31 @@ internal static class ShimEmitter
                 yield return "    g_stringResult.assign(hs_result.data(), hs_result.size());";
                 yield return "    return HosihikariStringView{g_stringResult.data(), g_stringResult.size()};";
             }
+            else if (smallRecordReturn)
+            {
+                yield return $"    auto hs_value = {call};";
+                var align = returnLayout!.Align > 0 ? returnLayout.Align : 8;
+                yield return $"    auto* const hs_record = static_cast<void*>(::operator new(static_cast<std::size_t>({returnLayout.Size.ToString(CultureInfo.InvariantCulture)}), std::align_val_t({align.ToString(CultureInfo.InvariantCulture)})));";
+                yield return $"    std::memcpy(hs_record, &hs_value, static_cast<std::size_t>({returnLayout.Size.ToString(CultureInfo.InvariantCulture)}));";
+                yield return "    return hs_record;";
+            }
             else if (ownedRecordReturn)
             {
                 yield return $"    {call};";
                 var align = returnLayout!.Align > 0 ? returnLayout.Align : 8;
                 yield return $"    auto* const hs_record = static_cast<void*>(::operator new(static_cast<std::size_t>({returnLayout.Size.ToString(CultureInfo.InvariantCulture)}), std::align_val_t({align.ToString(CultureInfo.InvariantCulture)})));";
-                yield return $"    std::memcpy(hs_record, hs_recordStorage, static_cast<std::size_t>({returnLayout.Size.ToString(CultureInfo.InvariantCulture)}));";
+                if (returnNeedsCopy)
+                {
+                    yield return "    using HsCopy = void (*)(void*, void*);";
+                    yield return "    using HsReturnDtor = void (*)(void*);";
+                    yield return "    reinterpret_cast<HsCopy>(hs_returnCopy)(hs_record, hs_recordStorage);";
+                    yield return "    reinterpret_cast<HsReturnDtor>(hs_returnDtor)(hs_recordStorage);";
+                }
+                else
+                {
+                    yield return $"    std::memcpy(hs_record, hs_recordStorage, static_cast<std::size_t>({returnLayout.Size.ToString(CultureInfo.InvariantCulture)}));";
+                }
+
                 yield return "    return hs_record;";
             }
             else if (function.ReturnKind == AbiKind.Opaque)
@@ -2438,6 +2559,74 @@ internal static class ShimEmitter
         yield return "    setLastError(\"unknown native exception\");";
         yield return "    " + DefaultReturn(returnKind);
         yield return "}";
+    }
+
+    private static string RegisterType(LayoutInfo layout) => layout.Size switch
+    {
+        1 => "std::uint8_t",
+        2 => "std::uint16_t",
+        4 => "std::uint32_t",
+        8 => "std::uint64_t",
+        _ => "void*",
+    };
+
+    private static LayoutInfo? ByValueLayout(
+        AbiParameter parameter,
+        IReadOnlyDictionary<string, LayoutInfo> layouts) =>
+        parameter.ByValueDeclarationId is not null
+        && layouts.TryGetValue(parameter.ByValueDeclarationId, out var layout)
+            ? layout
+            : null;
+
+    private static string? ByValueRegisterType(
+        AbiParameter parameter,
+        IReadOnlyDictionary<string, LayoutInfo> layouts) =>
+        ByValueLayout(parameter, layouts)?.Size switch
+        {
+            1 => "std::uint8_t",
+            2 => "std::uint16_t",
+            4 => "std::uint32_t",
+            8 => "std::uint64_t",
+            _ => null,
+        };
+
+    private static string ByValueArgument(
+        AbiParameter parameter,
+        int index,
+        IReadOnlyDictionary<string, LayoutInfo> layouts)
+    {
+        var layout = ByValueLayout(parameter, layouts);
+        var registerType = ByValueRegisterType(parameter, layouts);
+        return layout is { Size: <= 8 } && registerType is not null
+            ? $"*reinterpret_cast<{registerType} const*>({CppParameterName(parameter, index)})"
+            : $"hs_arg{index}Storage";
+    }
+
+    private static bool HasDispatchSymbol(MemberRecord member) =>
+        !string.IsNullOrWhiteSpace(member.Symbol)
+        || member.Address is not null
+        || member.Rva is not null;
+
+    private static bool IsCopyConstructorRecord(MemberRecord member, string typeName)
+    {
+        if (member.Signature is null || member.Signature.Parameters.Count != 1)
+        {
+            return false;
+        }
+
+        var type = member.Signature.Parameters[0].Type.Trim();
+        while (type.EndsWith("&", StringComparison.Ordinal))
+        {
+            type = type[..^1].TrimEnd();
+        }
+
+        type = type
+            .Replace("const ", "", StringComparison.Ordinal)
+            .Replace(" const", "", StringComparison.Ordinal)
+            .Replace("volatile ", "", StringComparison.Ordinal)
+            .Replace(" volatile", "", StringComparison.Ordinal)
+            .Trim();
+        return string.Equals(type, typeName.Trim(), StringComparison.Ordinal);
     }
 
     private static (string Offset, string Symbol) SymbolFacts(MemberRecord member, string os)
