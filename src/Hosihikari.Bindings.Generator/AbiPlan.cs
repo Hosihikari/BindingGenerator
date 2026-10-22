@@ -2805,13 +2805,16 @@ internal sealed class AbiPlan
         var returnTriviallyCopyable = false;
         var returnOptionalRecord = false;
 
+        var byValueReturnName = IsPointerOrReferenceType(nativeReturnType)
+            ? nativeReturnType
+            : NormalizeTypeName(nativeReturnType);
         if (symbolDispatch
             && method.Kind is "method" or "operator"
-            && IsByValueRecordType(nativeReturnType)
-            && symbolByValueReturns.TryGetValue(nativeReturnType, out var byValueDeclaration))
+            && IsByValueRecordType(byValueReturnName)
+            && symbolByValueReturns.TryGetValue(byValueReturnName, out var byValueDeclaration))
         {
             byValueReturn = byValueDeclaration;
-            returnRequiresCopy = symbolByValueCopyRequired.TryGetValue(nativeReturnType, out var requiresCopy)
+            returnRequiresCopy = symbolByValueCopyRequired.TryGetValue(byValueReturnName, out var requiresCopy)
                 && requiresCopy;
             returnTriviallyCopyable = byValueDeclaration.TriviallyCopyable;
             returnKind = AbiKind.Opaque;
