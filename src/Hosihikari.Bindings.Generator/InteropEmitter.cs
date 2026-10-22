@@ -512,7 +512,9 @@ internal static class InteropEmitter
                 lines.Add("        return __hs_pointer == null ? null : (nint)__hs_pointer;");
                 break;
             default:
-                lines.Add($"        return NativeMethods.TablePtr->{getter.TableField}((void*)_handle);");
+                lines.Add(alternative.ScalarKind == AbiKind.Bool
+                    ? $"        return NativeMethods.TablePtr->{getter.TableField}((void*)_handle) != 0;"
+                    : $"        return NativeMethods.TablePtr->{getter.TableField}((void*)_handle);");
                 break;
         }
 
