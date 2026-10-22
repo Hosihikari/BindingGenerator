@@ -116,6 +116,38 @@ finally
     weak.Dispose();
 }
 
+using (var owner = block.ownerPtr(51))
+{
+    if (owner is null || owner.Target == 0 || block.sharedValue(owner) != 53)
+    {
+        throw new InvalidOperationException("The OwnerPtr result is incorrect.");
+    }
+}
+
+using (var stack = block.stackRef(61))
+{
+    if (stack is null || stack.Target == 0 || block.sharedValue(stack) != 63)
+    {
+        throw new InvalidOperationException("The StackRefResult result is incorrect.");
+    }
+}
+
+using (var weakValue = block.weakRefValue(71))
+{
+    if (weakValue is null || weakValue.Target == 0 || block.sharedValue(weakValue) != 73)
+    {
+        throw new InvalidOperationException("The WeakRef result is incorrect.");
+    }
+}
+
+using (var notNull = block.notNullOwner(81))
+{
+    if (notNull is null || notNull.Target == 0 || block.sharedValue(notNull) != 83)
+    {
+        throw new InvalidOperationException("The gsl::not_null<OwnerPtr> result is incorrect.");
+    }
+}
+
 var objectA = block.makeObject(10);
 var objectB = block.makeObject(20);
 if (block.sumObjectValues([objectA, objectB]) != 32)

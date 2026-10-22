@@ -144,14 +144,30 @@ DWORD WINAPI worker(LPVOID) {
     // getter on it without constructing anything.
     std::uintptr_t platform = 0;
     HMODULE executable = GetModuleHandleW(nullptr);
-    auto service = reinterpret_cast<void* const*>(GetProcAddress(
-        executable,
-        R"(?mService@?$ServiceLocator@VAppPlatform@@@@2V?$NonOwnerPointer@VAppPlatform@@@Bedrock@@A)"));
-    if (service != nullptr) {
-        auto const controlBlock = *service;
-        if (controlBlock != nullptr) {
-            platform = *reinterpret_cast<std::uintptr_t const*>(controlBlock);
+    auto const resolveService = [&](const char* name, std::uintptr_t rva) -> std::uintptr_t {
+        auto service = reinterpret_cast<void* const*>(GetProcAddress(executable, name));
+        if (service == nullptr && rva != 0) {
+            service = reinterpret_cast<void* const*>(
+                reinterpret_cast<std::uintptr_t>(executable) + rva);
         }
+        if (service == nullptr) {
+            return 0;
+        }
+        auto const controlBlock = *service;
+        return controlBlock == nullptr
+            ? 0
+            : *reinterpret_cast<std::uintptr_t const*>(controlBlock);
+    };
+    platform = resolveService(
+        R"(?mService@?$ServiceLocator@VAppPlatform@@@@2V?$NonOwnerPointer@VAppPlatform@@@Bedrock@@A)", 0);
+    // 1.21.3's export table does not expose this service locator; its PDB public places
+    // mService at RVA 0x33DB500.
+    auto const serverInstance = resolveService(
+        R"(?mService@?$ServiceLocator@VServerInstance@@@@0V?$NonOwnerPointer@VServerInstance@@@Bedrock@@A)",
+        0x33DB500);
+    if (serverInstance != 0) {
+        SetEnvironmentVariableW(
+            L"HS_SYMBOL_SERVER_INSTANCE", std::to_wstring(serverInstance).c_str());
     }
 
     std::string error;

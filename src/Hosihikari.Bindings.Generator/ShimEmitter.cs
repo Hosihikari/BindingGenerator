@@ -326,6 +326,15 @@ internal static class ShimEmitter
         source.Add("}");
         source.Add("");
         source.Add("template <class T>");
+        source.Add("HosihikariSharedHandle hs_make_non_owner_handle(std::shared_ptr<T> value)");
+        source.Add("{");
+        source.Add("    if (!value) { return HosihikariSharedHandle{nullptr, nullptr, nullptr}; }");
+        source.Add("    void* target = *reinterpret_cast<void**>(value.get());");
+        source.Add("    auto* holder = new hs_shared_holder<T>(std::move(value));");
+        source.Add("    return HosihikariSharedHandle{holder, target, &hs_release_shared_holder<T>};");
+        source.Add("}");
+        source.Add("");
+        source.Add("template <class T>");
         source.Add("std::shared_ptr<T> hs_shared_from_handle(HosihikariSharedHandle handle)");
         source.Add("{");
         source.Add("    if (handle.holder == nullptr) { return {}; }");
@@ -2158,6 +2167,15 @@ internal static class ShimEmitter
         source.Add("}");
         source.Add("");
         source.Add("template <class T>");
+        source.Add("HosihikariSharedHandle hs_make_non_owner_handle(std::shared_ptr<T> value)");
+        source.Add("{");
+        source.Add("    if (!value) { return HosihikariSharedHandle{nullptr, nullptr, nullptr}; }");
+        source.Add("    void* target = *reinterpret_cast<void**>(value.get());");
+        source.Add("    auto* holder = new hs_shared_holder<T>(std::move(value));");
+        source.Add("    return HosihikariSharedHandle{holder, target, &hs_release_shared_holder<T>};");
+        source.Add("}");
+        source.Add("");
+        source.Add("template <class T>");
         source.Add("std::shared_ptr<T> hs_shared_from_handle(HosihikariSharedHandle handle)");
         source.Add("{");
         source.Add("    if (handle.holder == nullptr) { return {}; }");
@@ -3028,6 +3046,10 @@ internal static class ShimEmitter
                 {
                     yield return "    auto hs_locked = hs_shared.lock();";
                     yield return "    auto hs_result = hs_make_shared_handle<void>(std::move(hs_locked));";
+                }
+                else if (function.SharedWrapper == SharedWrapperKind.NonOwnerPtr)
+                {
+                    yield return "    auto hs_result = hs_make_non_owner_handle<void>(std::move(hs_shared));";
                 }
                 else
                 {

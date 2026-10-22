@@ -165,6 +165,7 @@ internal enum SharedWrapperKind
     WeakPtr,
     NotNull,
     Nullable,
+    NonOwnerPtr,
 }
 
 internal enum SpecialValueKind
@@ -1676,6 +1677,7 @@ internal sealed class AbiPlan
                             destroyableDeclarationIds,
                             enumUnderlyingByName,
                             linkCarrier,
+                            symbolDispatch,
                             null,
                             variants,
                             callables,
@@ -2844,6 +2846,7 @@ internal sealed class AbiPlan
                 destroyableDeclarationIds,
                 enumUnderlyingByName,
                 linkCarrier,
+                symbolDispatch,
                 symbolDispatch ? symbolVectorElements : null,
                 variants,
                 callables,
@@ -2970,6 +2973,7 @@ internal sealed class AbiPlan
         IReadOnlySet<string> destroyableDeclarationIds,
         IReadOnlyDictionary<string, string> enumUnderlyingByName,
         bool linkCarrier,
+        bool symbolDispatch,
         IReadOnlyDictionary<string, DeclarationRecord>? symbolVectorElements,
         VariantRegistry variants,
         CallableRegistry callables,
@@ -3071,6 +3075,7 @@ internal sealed class AbiPlan
                     destroyableDeclarationIds,
                     enumUnderlyingByName,
                     linkCarrier,
+                    symbolDispatch,
                     symbolVectorElements,
                     variants,
                     callables,
@@ -3558,6 +3563,20 @@ internal sealed class AbiPlan
             kind = AbiKind.Shared;
             nativeType = weakPointee;
             sharedWrapper = SharedWrapperKind.WeakPtr;
+            nullable = true;
+            return true;
+        }
+
+        if (symbolDispatch
+            && TryParseReferenceWrapper(nativeType, out var referenceWrapper, out var referencePointee))
+        {
+            // OwnerPtr and StackRefResult hold a shared_ptr, and WeakRef holds a weak_ptr.
+            // Bedrock::NonOwnerPointer holds a shared_ptr to a control block whose first field
+            // points at the live object. The symbol shim uses the shared/weak return ABI and
+            // resolves the non-owner target from that control block.
+            kind = AbiKind.Shared;
+            nativeType = referencePointee;
+            sharedWrapper = referenceWrapper;
             nullable = true;
             return true;
         }
@@ -4532,6 +4551,55 @@ internal sealed class AbiPlan
 
         element = StripTopLevelQualifiers(arguments[0].Trim());
         return element.Length > 0;
+    }
+
+    private static bool TryParseReferenceWrapper(
+        string canonical,
+        out SharedWrapperKind wrapper,
+        out string pointee)
+    {
+        wrapper = SharedWrapperKind.None;
+        pointee = "";
+        var text = NormalizeTypeName(canonical);
+        if (text.StartsWith("gsl::not_null<", StringComparison.Ordinal)
+            && text.EndsWith(">", StringComparison.Ordinal))
+        {
+            return TryParseReferenceWrapper(text["gsl::not_null<".Length..^1].Trim(), out wrapper, out pointee);
+        }
+
+        (string Prefix, SharedWrapperKind Kind)[] prefixes =
+        [
+            ("OwnerPtr<", SharedWrapperKind.SharedPtr),
+            ("StackRefResult<", SharedWrapperKind.SharedPtr),
+            ("WeakRef<", SharedWrapperKind.WeakPtr),
+            ("Bedrock::NonOwnerPointer<", SharedWrapperKind.NonOwnerPtr),
+            ("NonOwnerPointer<", SharedWrapperKind.NonOwnerPtr),
+        ];
+        foreach (var (prefix, kind) in prefixes)
+        {
+            if (!text.StartsWith(prefix, StringComparison.Ordinal)
+                || !text.EndsWith(">", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            var arguments = SplitTemplateArguments(text[prefix.Length..^1].Trim()).ToList();
+            if (arguments.Count != 1)
+            {
+                return false;
+            }
+
+            pointee = StripTopLevelQualifiers(arguments[0].Trim());
+            if (pointee.Length == 0)
+            {
+                return false;
+            }
+
+            wrapper = kind;
+            return true;
+        }
+
+        return false;
     }
 
     private static bool TryParseSharedWrapper(
@@ -6019,7 +6087,8 @@ internal sealed class AbiPlan
             || (function.ReturnOptional && !optionalRefReturn && !optionalValueReturn)
             || function.ReturnUniquePtr
             || (function.ReturnOwned && !ownedRecordReturn)
-            || function.SharedWrapper is not (SharedWrapperKind.None or SharedWrapperKind.SharedPtr or SharedWrapperKind.WeakPtr)
+            || function.SharedWrapper is not (SharedWrapperKind.None or SharedWrapperKind.SharedPtr
+                or SharedWrapperKind.WeakPtr or SharedWrapperKind.NonOwnerPtr)
             || function.TimeConversion != TimeConversion.None
             || function.SpecialValue != SpecialValueKind.None
             || function.MapKeyKind != AbiKind.Void

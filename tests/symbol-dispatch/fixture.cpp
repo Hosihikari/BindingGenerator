@@ -7,6 +7,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 struct FixtureValue
@@ -21,6 +22,40 @@ struct FixtureObject
 };
 
 static std::shared_ptr<FixtureObject> g_shared;
+
+template <typename T>
+struct OwnerPtr
+{
+    std::shared_ptr<T> mHandle;
+    OwnerPtr() = default;
+    explicit OwnerPtr(std::shared_ptr<T> value) : mHandle(std::move(value)) {}
+};
+
+template <typename T>
+struct StackRefResult
+{
+    std::shared_ptr<T> mHandle;
+    StackRefResult() = default;
+    explicit StackRefResult(std::shared_ptr<T> value) : mHandle(std::move(value)) {}
+};
+
+template <typename T>
+struct WeakRef
+{
+    std::weak_ptr<T> mHandle;
+    WeakRef() = default;
+    explicit WeakRef(std::weak_ptr<T> value) : mHandle(std::move(value)) {}
+};
+
+namespace gsl
+{
+template <typename T>
+struct not_null
+{
+    T value;
+    explicit not_null(T inner) : value(std::move(inner)) {}
+};
+}
 
 struct FixturePair
 {
@@ -59,6 +94,10 @@ public:
     std::shared_ptr<FixtureObject> makeShared(int value) const;
     int sharedValue(std::shared_ptr<FixtureObject> value) const;
     std::weak_ptr<FixtureObject> weakRef() const;
+    OwnerPtr<FixtureObject> ownerPtr(int value) const;
+    StackRefResult<FixtureObject> stackRef(int value) const;
+    WeakRef<FixtureObject> weakRefValue(int value) const;
+    gsl::not_null<OwnerPtr<FixtureObject>> notNullOwner(int value) const;
     FixtureObject* makeObject(int value) const;
     void releaseObject(FixtureObject* value) const;
     int sumObjectValues(std::vector<FixtureObject*> const& values) const;
@@ -183,6 +222,30 @@ int FixtureBlock::sharedValue(std::shared_ptr<FixtureObject> value) const
 std::weak_ptr<FixtureObject> FixtureBlock::weakRef() const
 {
     return g_shared;
+}
+
+OwnerPtr<FixtureObject> FixtureBlock::ownerPtr(int value) const
+{
+    g_shared = std::make_shared<FixtureObject>(FixtureObject{value});
+    return OwnerPtr<FixtureObject>(g_shared);
+}
+
+StackRefResult<FixtureObject> FixtureBlock::stackRef(int value) const
+{
+    g_shared = std::make_shared<FixtureObject>(FixtureObject{value});
+    return StackRefResult<FixtureObject>(g_shared);
+}
+
+WeakRef<FixtureObject> FixtureBlock::weakRefValue(int value) const
+{
+    g_shared = std::make_shared<FixtureObject>(FixtureObject{value});
+    return WeakRef<FixtureObject>(std::weak_ptr<FixtureObject>(g_shared));
+}
+
+gsl::not_null<OwnerPtr<FixtureObject>> FixtureBlock::notNullOwner(int value) const
+{
+    g_shared = std::make_shared<FixtureObject>(FixtureObject{value});
+    return gsl::not_null<OwnerPtr<FixtureObject>>(OwnerPtr<FixtureObject>(g_shared));
 }
 
 FixtureObject* FixtureBlock::makeObject(int value) const

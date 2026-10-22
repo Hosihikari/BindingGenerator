@@ -71,6 +71,19 @@ public static class NativeEntryPoint
             var userInput = platform?.getUserInput() ?? [];
             var addressSample = addresses.Length > 0 ? addresses[0] : "";
 
+            // ServerInstance exposes NonOwnerPointer results. The shim keeps the returned
+            // control block alive and surfaces the object stored in it as the handle target.
+            var serverInstanceText = Environment.GetEnvironmentVariable("HS_SYMBOL_SERVER_INSTANCE");
+            var serverInstance = ulong.TryParse(serverInstanceText, out var serverAddress)
+                && serverAddress != 0
+                    ? ServerInstance.Borrow((nint)serverAddress)
+                    : null;
+            using var cdnConfig = serverInstance?.getCDNConfig();
+            using var editorManager = serverInstance?.getEditorManager();
+            using var serverTextSettings = serverInstance?.getServerTextSettings();
+            var serverWrappersOk = serverInstance is null
+                || (serverTextSettings is not null && serverTextSettings.Target != 0);
+
             // Core::PathBuffer<std::string> is a single string member; the shim reads it with
             // the std::string return ABI and releases it with the game's own string destructor.
             var storagePath = platform?.getInternalStoragePath() ?? "";
@@ -98,7 +111,8 @@ public static class NativeEntryPoint
                 && userInput is not null
                 && storagePath.Length > 0
                 && userdataPath.Length > 0
-                && currentStoragePath.Length > 0;
+                && currentStoragePath.Length > 0
+                && serverWrappersOk;
             var result =
                 "load=managed\n"
                 + $"a={textA}\n"
@@ -125,6 +139,10 @@ public static class NativeEntryPoint
                 + $"storagePath={storagePath}\n"
                 + $"userdataPath={userdataPath}\n"
                 + $"currentStoragePath={currentStoragePath}\n"
+                + $"serverInstance=0x{(serverInstance?.Handle ?? 0):X}\n"
+                + $"cdnConfig={cdnConfig is not null}\n"
+                + $"editorManager={editorManager is not null}\n"
+                + $"serverTextSettings={(serverTextSettings is not null ? "0x" + serverTextSettings.Target.ToString("x") : "null")}\n"
                 + $"stable={eduMode == eduModeAgain && maxRequests == maxRequestsAgain && addresses.SequenceEqual(addressesAgain)}\n"
                 + $"result={(ok ? "OK" : "FAIL")}\n";
             if (resultPath is not null)
