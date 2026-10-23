@@ -81,7 +81,24 @@ $Headers = @(
     "mc/entity/components/ProjectileComponent.h",
     "mc/math/Random.h",
     "mc/server/commands/VirtualCommandOrigin.h",
-    "mc/world/item/enchanting/Enchant.h"
+    "mc/world/item/enchanting/Enchant.h",
+    "mc/enums/SignTextSide.h",
+    "mc/world/level/chunk/SubChunkLightIndex.h",
+    "mc/enums/connection/DisconnectFailReason.h",
+    "mc/world/item/alchemy/Potion.h",
+    "mc/common/DBHelpers.h",
+    "mc/world/level/storage/GameRuleId.h",
+    "mc/enums/edu/Role.h",
+    "mc/events/IMinecraftEventing.h",
+    "mc/resources/PackType.h",
+    "mc/scripting/modules/minecraft/ScriptModuleMinecraft.h",
+    "mc/enums/DwellerRole.h",
+    "mc/client/network/realms/RealmsPurchaseIntent.h",
+    "mc/server/sim/LookDuration.h",
+    "mc/enums/FullscreenMode.h",
+    "mc/world/level/chunk/ChunkSource.h",
+    "mc/world/Facing.h",
+    "mc/world/actor/ActorDamageSource.h"
 )
 if (-not [string]::IsNullOrWhiteSpace($HeaderList)) {
     $HeaderListPath = (Resolve-Path $HeaderList).Path
