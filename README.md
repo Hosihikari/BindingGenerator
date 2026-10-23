@@ -72,7 +72,7 @@ Direct members resolve `module base + rva` on Windows or `module base + address`
 
 ## Local LLAPI slice
 
-`frontend/run-local.ps1` parses `ll/api/event/Event.h`, writes IR under `artifacts/llapi-ir`, and validates it. `frontend/run-umbrella.ps1 -Module ll/api` parses the full `src/ll/api` plus `src-server/ll/api` umbrella, reuses the LeviLamina `compile_commands.json`, and currently yields 1,530 declarations / 6,145 members at IR 1.3.0. Public record types referenced by value from filtered signatures are added with their constructors, destructor, and fields even when their headers sit outside the module filter. The IR records each function's and method's `inline`/`defined`/`consteval` facts, member templates, ref qualifiers, enum underlying types, and class traits (`abstract`, `copyConstructible`), which the BindingShim planner uses for eligibility and ownership.
+`frontend/run-local.ps1` parses `ll/api/event/Event.h`, writes IR under `artifacts/llapi-ir`, and validates it. `frontend/run-umbrella.ps1 -Module ll/api` parses the full `src/ll/api` plus `src-server/ll/api` umbrella, reuses the LeviLamina `compile_commands.json`, and currently yields 1,530 declarations / 6,145 members at IR 1.5.1. Public record types referenced by value from filtered signatures are added with their constructors, destructor, and fields even when their headers sit outside the module filter. The IR records each function's and method's `inline`/`defined`/`consteval` facts, member templates, ref qualifiers, enum underlying types, and class traits (`abstract`, `copyConstructible`), which the BindingShim planner uses for eligibility and ownership.
 
 ```shell
 powershell -File frontend/run-umbrella.ps1 -Module ll/api -Output artifacts/llapi-full-ir

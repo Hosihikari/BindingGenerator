@@ -57,7 +57,7 @@ dotnet run --project src/Hosihikari.Bindings.Generator/Hosihikari.Bindings.Gener
 
 ## 本地 LLAPI 切片
 
-`frontend/run-local.ps1` 解析 `ll/api/event/Event.h`，把 IR 写到 `artifacts/llapi-ir` 并校验；`frontend/run-umbrella.ps1 -Module ll/api` 解析完整的 `src/ll/api` + `src-server/ll/api` 伞头，复用 LeviLamina 的 `compile_commands.json`，当前在 IR 1.3.0 产出 1,530 声明 / 6,145 成员。被过滤签名按值引用的公有 record 类型即使头文件位于模块过滤之外，也会连同构造、析构与字段一起写入 IR。IR 为每个函数与方法记录 `inline`/`defined`/`consteval`，并记录成员模板、引用限定符、枚举底层类型与类特性（`abstract`、`copyConstructible`），BindingShim 规划器据此判断资格与所有权。
+`frontend/run-local.ps1` 解析 `ll/api/event/Event.h`，把 IR 写到 `artifacts/llapi-ir` 并校验；`frontend/run-umbrella.ps1 -Module ll/api` 解析完整的 `src/ll/api` + `src-server/ll/api` 伞头，复用 LeviLamina 的 `compile_commands.json`，当前在 IR 1.5.1 产出 1,530 声明 / 6,145 成员。被过滤签名按值引用的公有 record 类型即使头文件位于模块过滤之外，也会连同构造、析构与字段一起写入 IR。IR 为每个函数与方法记录 `inline`/`defined`/`consteval`，并记录成员模板、引用限定符、枚举底层类型与类特性（`abstract`、`copyConstructible`），BindingShim 规划器据此判断资格与所有权。
 
 ```shell
 powershell -File frontend/run-umbrella.ps1 -Module ll/api -Output artifacts/llapi-full-ir
