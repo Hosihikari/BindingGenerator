@@ -2750,7 +2750,11 @@ internal static class ShimEmitter
             var byteOffset = fieldBits / 8;
             if (function.Kind == AbiFunctionKind.Get)
             {
-                if (function.ReturnKind == AbiKind.Opaque)
+                if (function.FieldAddress)
+                {
+                    yield return $"    return const_cast<void*>(static_cast<void const*>(static_cast<unsigned char const*>(hs_self) + {byteOffset.ToString(CultureInfo.InvariantCulture)}));";
+                }
+                else if (function.ReturnKind == AbiKind.Opaque)
                 {
                     yield return $"    return *reinterpret_cast<void* const*>(static_cast<unsigned char const*>(hs_self) + {byteOffset.ToString(CultureInfo.InvariantCulture)});";
                 }

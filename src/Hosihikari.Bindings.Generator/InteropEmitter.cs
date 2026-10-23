@@ -792,7 +792,13 @@ internal static class InteropEmitter
         var propertyType = hasGetter && getter!.ReturnWrapperType is not null
             ? getter.ReturnWrapperType
             : AbiPlan.CSharpPropertyType((getter ?? setter!).ReturnKind);
-        lines.Add($"    public {modifier}{propertyType} {name}");
+        var propertyName = hasGetter && getter!.FieldAddress ? name + "_Address" : name;
+        if (hasGetter && getter!.FieldAddress)
+        {
+            lines.Add("    // The native field type is not projected; this is the address of the field storage.");
+        }
+
+        lines.Add($"    public {modifier}{propertyType} {propertyName}");
         lines.Add("    {");
         if (hasGetter)
         {

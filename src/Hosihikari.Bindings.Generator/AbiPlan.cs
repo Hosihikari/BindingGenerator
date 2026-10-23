@@ -256,6 +256,9 @@ internal sealed class AbiFunction
     /// <summary>Absolute bit offset for symbol-dispatched field accessors.</summary>
     public long? FieldBitOffset { get; init; }
 
+    /// <summary>True when a field getter returns the address of the field storage.</summary>
+    public bool FieldAddress { get; init; }
+
     public bool CreateViaBorrowedHolder { get; init; }
     public bool DestroyViaBorrowedHolder { get; init; }
     public bool ReturnExpected { get; init; }
@@ -6147,6 +6150,7 @@ internal sealed class AbiPlan
             var staticCanonical = NormalizeTypeName(field.Type.Canonical);
             AbiKind staticKind;
             string? staticWrapperType = null;
+            var staticFallback = false;
             if (TryMapEnumUnderlying(staticCanonical, enumUnderlyingByName, out staticKind)
                 || TryMapFundamental(staticCanonical, out staticKind))
             {
@@ -6169,8 +6173,10 @@ internal sealed class AbiPlan
             }
             else
             {
-                reason = "the static field type is not supported by symbol dispatch";
-                return false;
+                // The field offset or symbol is still useful even when the type cannot be
+                // projected. Expose the storage address as a read-only nint.
+                staticKind = AbiKind.Opaque;
+                staticFallback = true;
             }
 
             getter = new AbiFunction
@@ -6187,6 +6193,7 @@ internal sealed class AbiPlan
                 ReturnKind = staticKind,
                 NativeReturnType = staticCanonical,
                 ReturnWrapperType = staticWrapperType,
+                FieldAddress = staticFallback,
                 Static = true,
             };
             return true;
@@ -6205,13 +6212,9 @@ internal sealed class AbiPlan
         }
 
         var canonical = field.Type.Canonical.Trim();
-        if (IsConstType(canonical))
-        {
-            reason = "const fields are not projected by symbol dispatch";
-            return false;
-        }
-
+        var isConst = IsConstType(canonical);
         AbiKind kind;
+        var fallback = false;
         if (TryMapEnumUnderlying(canonical, enumUnderlyingByName, out kind)
             || TryMapFundamental(canonical, out kind))
         {
@@ -6222,8 +6225,10 @@ internal sealed class AbiPlan
         }
         else
         {
-            reason = "the field type is not supported by symbol dispatch";
-            return false;
+            // The offset is known, so expose the field storage as a read-only nint even
+            // when the value type itself cannot be projected.
+            kind = AbiKind.Opaque;
+            fallback = true;
         }
 
         var className = declarationNames[declaration.Id];
@@ -6241,23 +6246,28 @@ internal sealed class AbiPlan
             ReturnKind = kind,
             NativeReturnType = canonical,
             FieldBitOffset = bitOffset,
+            FieldAddress = fallback,
         };
-        setter = new AbiFunction
+        if (!isConst && !fallback)
         {
-            CppName = "hs_set_" + CSharpNaming.ShortHash(memberId + "#" + declaration.Id),
-            Kind = AbiFunctionKind.Set,
-            Surface = declaration.Surface,
-            DeclarationId = declaration.Id,
-            MemberId = memberId,
-            ClassCppName = declaration.QualifiedName,
-            ClassName = className,
-            NativeMemberName = field.Name,
-            CSharpMemberName = TypeNames.Sanitize(field.Name),
-            ReturnKind = AbiKind.Void,
-            NativeReturnType = "void",
-            FieldBitOffset = bitOffset,
-            Parameters = [new AbiParameter { Name = "value", Kind = kind, NativeType = canonical }],
-        };
+            setter = new AbiFunction
+            {
+                CppName = "hs_set_" + CSharpNaming.ShortHash(memberId + "#" + declaration.Id),
+                Kind = AbiFunctionKind.Set,
+                Surface = declaration.Surface,
+                DeclarationId = declaration.Id,
+                MemberId = memberId,
+                ClassCppName = declaration.QualifiedName,
+                ClassName = className,
+                NativeMemberName = field.Name,
+                CSharpMemberName = TypeNames.Sanitize(field.Name),
+                ReturnKind = AbiKind.Void,
+                NativeReturnType = "void",
+                FieldBitOffset = bitOffset,
+                Parameters = [new AbiParameter { Name = "value", Kind = kind, NativeType = canonical }],
+            };
+        }
+
         return true;
     }
 
