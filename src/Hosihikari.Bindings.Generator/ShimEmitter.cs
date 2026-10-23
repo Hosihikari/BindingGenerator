@@ -2900,7 +2900,7 @@ internal static class ShimEmitter
             && function.ReturnTriviallyCopyable
             && returnLayout is { Size: <= 8 };
         var largeRecordReturn = ownedRecordReturn && !smallRecordReturn;
-        var returnNeedsCopy = largeRecordReturn && function.ReturnRequiresCopy;
+        var returnNeedsCopy = false;
         MemberRecord? returnCopyConstructor = null;
         MemberRecord? returnDestructor = null;
         if (returnNeedsCopy && function.ReturnDeclarationId is not null)
@@ -3100,7 +3100,7 @@ internal static class ShimEmitter
         else if (largeRecordReturn)
         {
             var align = returnLayout!.Align > 0 ? returnLayout.Align : 8;
-            yield return $"    alignas({align.ToString(CultureInfo.InvariantCulture)}) unsigned char hs_recordStorage[{returnLayout.Size.ToString(CultureInfo.InvariantCulture)}];";
+            yield return $"    auto* const hs_record = static_cast<void*>(hs_allocate(static_cast<std::size_t>({returnLayout.Size.ToString(CultureInfo.InvariantCulture)}), {align.ToString(CultureInfo.InvariantCulture)}));";
         }
         else if (arrayReturn && !borrowedVectorReturn)
         {
@@ -3162,7 +3162,7 @@ internal static class ShimEmitter
                 var sretArgument = memberStringReturn
                     ? "reinterpret_cast<HsString*>(hs_stringStorage)"
                     : largeRecordReturn
-                        ? "static_cast<void*>(hs_recordStorage)"
+                        ? "static_cast<void*>(hs_record)"
                         : spanReturn
                             ? "static_cast<void*>(hs_spanStorage)"
                     : arrayReturn && !borrowedVectorReturn
@@ -3417,20 +3417,6 @@ internal static class ShimEmitter
             else if (ownedRecordReturn)
             {
                 yield return $"    {call};";
-                var align = returnLayout!.Align > 0 ? returnLayout.Align : 8;
-                yield return $"    auto* const hs_record = static_cast<void*>(hs_allocate(static_cast<std::size_t>({returnLayout.Size.ToString(CultureInfo.InvariantCulture)}), {align.ToString(CultureInfo.InvariantCulture)}));";
-                if (returnNeedsCopy)
-                {
-                    yield return "    using HsCopy = void (*)(void*, void*);";
-                    yield return "    using HsReturnDtor = void (*)(void*);";
-                    yield return "    reinterpret_cast<HsCopy>(hs_returnCopy)(hs_record, hs_recordStorage);";
-                    yield return "    reinterpret_cast<HsReturnDtor>(hs_returnDtor)(hs_recordStorage);";
-                }
-                else
-                {
-                    yield return $"    std::memcpy(hs_record, hs_recordStorage, static_cast<std::size_t>({returnLayout.Size.ToString(CultureInfo.InvariantCulture)}));";
-                }
-
                 yield return "    return hs_record;";
             }
             else if (function.ReturnKind == AbiKind.Opaque)

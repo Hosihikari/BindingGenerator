@@ -515,19 +515,13 @@ internal sealed class AbiPlan
                 }
                 else
                 {
-                    // A non-trivial destructor requires the copy-constructor and destructor
-                    // symbols so the shim can release the returned temporary.
+                    // Direct heap sret constructs the result in the caller-provided buffer,
+                    // so only the destructor symbol is required to release it.
                     var destructor = candidateMembers.FirstOrDefault(member =>
                         member.Kind == "destructor"
                         && member.Access == "public"
                         && HasSymbolAddress(member));
-                    if (destructor is null
-                        || layout.Size <= 8
-                        || !candidateMembers.Any(member =>
-                            member.Kind == "constructor"
-                            && member.Access == "public"
-                            && IsCopyConstructor(member, candidate.QualifiedName)
-                            && HasSymbolAddress(member)))
+                    if (destructor is null)
                     {
                         continue;
                     }
