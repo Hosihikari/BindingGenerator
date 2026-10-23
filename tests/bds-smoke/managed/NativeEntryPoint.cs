@@ -108,6 +108,17 @@ public static class NativeEntryPoint
             var emptyItemPtr = emptyStackView.getItem();
             var itemLiveOk = itemStaticsOk && (emptyItemPtr is null || emptyItemPtr.Handle != 0);
 
+            // A static member that returns std::string by value uses the same hidden return
+            // buffer as a free function. Resolve the hash suffix by shape.
+            var hyphenate = typeof(NetworkIdentifier).GetMethods()
+                .First(method => method.Name.StartsWith("hyphenateId", StringComparison.Ordinal)
+                    && method.IsStatic
+                    && method.GetParameters().Length == 1
+                    && method.GetParameters()[0].ParameterType == typeof(ulong)
+                    && method.ReturnType == typeof(string));
+            var hyphenated = (string)hyphenate.Invoke(null, new object[] { 0x1234567890ABCDEFUL })!;
+            var staticStringOk = hyphenated.Length > 0;
+
             // Core::PathBuffer<std::string> is a single string member; the shim reads it with
             // the std::string return ABI and releases it with the game's own string destructor.
             var storagePath = platform?.getInternalStoragePath() ?? "";
@@ -139,7 +150,8 @@ public static class NativeEntryPoint
                 && serverWrappersOk
                 && secureStorageOk
                 && staticConstantsOk
-                && itemLiveOk;
+                && itemLiveOk
+                && staticStringOk;
             var result =
                 "load=managed\n"
                 + $"a={textA}\n"
@@ -173,6 +185,7 @@ public static class NativeEntryPoint
                 + $"secureStorage={(secureStorage is not null)}\n"
                 + $"staticConstants={staticConstantsOk}\n"
                 + $"itemLive={itemLiveOk}\n"
+                + $"staticString={staticStringOk}\n"
                 + $"stable={eduMode == eduModeAgain && maxRequests == maxRequestsAgain && addresses.SequenceEqual(addressesAgain)}\n"
                 + $"result={(ok ? "OK" : "FAIL")}\n";
             if (resultPath is not null)

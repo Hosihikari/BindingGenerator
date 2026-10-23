@@ -3043,10 +3043,10 @@ internal static class ShimEmitter
         // member ABI for non-trivial returns.
         var optionalReturnType = SymbolOptionalReturnType(function, layouts);
         var memberStringReturn = function.Kind == AbiFunctionKind.Method
-            && !function.Static
             && function.ReturnKind == AbiKind.StringView
             && !function.ReturnOptional
-            && !function.NativeReturnType.TrimEnd().EndsWith("&", StringComparison.Ordinal);
+            && !function.NativeReturnType.TrimEnd().EndsWith("&", StringComparison.Ordinal)
+            && AbiPlan.IsStringType(function.NativeReturnType);
         var memberSretReturn = memberStringReturn || largeRecordReturn;
 
         var callReturn = function.ReturnKind switch
