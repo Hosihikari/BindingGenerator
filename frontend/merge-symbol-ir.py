@@ -89,6 +89,28 @@ def main():
             raise SystemExit(f"symbol manifest has no shard for {configuration}")
         symbol_records[configuration] = load_records(os.path.join(args.symbol, shard["path"]))
 
+    # The Itanium RTTI walk leaves template base names in their encoded form when a
+    # template argument is not a simple length-prefixed component. Those names are not
+    # usable C++ class names, so drop their declarations and base references.
+    mangled_declaration = re.compile(r"^bedrock:(?:N\d|_Z)")
+    for configuration in configurations:
+        records = [
+            record
+            for record in symbol_records[configuration]
+            if not (
+                record.get("recordType") == "declaration"
+                and mangled_declaration.match(record.get("id", ""))
+            )
+        ]
+        for record in records:
+            if record.get("recordType") == "variant" and record.get("bases"):
+                record["bases"] = [
+                    base
+                    for base in record["bases"]
+                    if not mangled_declaration.match(base.get("declarationId", ""))
+                ]
+        symbol_records[configuration] = records
+
     header_configuration = header_manifest.get("configurations", [{}])[0].get("id", "win-x64-server")
     header_shard = find_shard(header_manifest, header_configuration)
     if header_shard is None:
