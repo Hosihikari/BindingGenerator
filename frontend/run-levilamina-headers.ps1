@@ -59,7 +59,29 @@ $Headers = @(
     "mc/deps/core/secure_storage/SecureStorage.h",
     "mc/world/level/LevelStorageManager.h",
     "mc/deps/core/common/bedrock/PlatformRuntimeInfo.h",
-    "mc/world/level/pathfinder/Path.h"
+    "mc/world/level/pathfinder/Path.h",
+    "mc/world/events/EventResult.h",
+    "mc/world/item/ItemInstance.h",
+    "mc/common/wrapper/WeakPtr.h",
+    "mc/common/wrapper/InteractionResult.h",
+    "mc/world/inventory/simulation/ContainerValidationResult.h",
+    "mc/world/item/ResolvedItemIconInfo.h",
+    "mc/deps/core/sem_ver/SemVersion.h",
+    "mc/network/packet/UpdateTradePacket.h",
+    "mc/world/actor/ActorDefinitionIdentifier.h",
+    "mc/world/level/ChunkLocalHeight.h",
+    "mc/enums/TransportLayer.h",
+    "mc/world/level/LevelSettings.h",
+    "mc/world/level/block/BlockDescriptor.h",
+    "mc/util/ExpressionNode.h",
+    "mc/world/item/components/ItemContext.h",
+    "mc/world/level/storage/LevelData.h",
+    "mc/world/item/crafting/MerchantRecipe.h",
+    "mc/world/level/biome/MobSpawnRules.h",
+    "mc/entity/components/ProjectileComponent.h",
+    "mc/math/Random.h",
+    "mc/server/commands/VirtualCommandOrigin.h",
+    "mc/world/item/enchanting/Enchant.h"
 )
 if (-not [string]::IsNullOrWhiteSpace($HeaderList)) {
     $HeaderListPath = (Resolve-Path $HeaderList).Path

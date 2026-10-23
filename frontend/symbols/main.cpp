@@ -1747,6 +1747,14 @@ int main(int argc, char** argv) {
         }
     }
 
+    std::vector<std::string> UniqueClasses;
+    std::set<std::string> SeenClasses;
+    for (const auto& Name : Inputs.Classes) {
+        if (SeenClasses.insert(Name).second) {
+            UniqueClasses.push_back(Name);
+        }
+    }
+    Inputs.Classes = std::move(UniqueClasses);
     for (const auto& Name : Inputs.Classes) {
         Inputs.ClassSet.insert(Name);
     }
