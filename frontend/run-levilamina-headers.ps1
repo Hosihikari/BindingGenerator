@@ -98,7 +98,11 @@ $Headers = @(
     "mc/enums/FullscreenMode.h",
     "mc/world/level/chunk/ChunkSource.h",
     "mc/world/Facing.h",
-    "mc/world/actor/ActorDamageSource.h"
+    "mc/world/actor/ActorDamageSource.h",
+    "mc/enums/PurchasePath.h",
+    "mc/enums/HardcodedSpawnAreaType.h",
+    "mc/client/network/realms/RealmId.h",
+    "mc/events/MinecraftEventing.h"
 )
 if (-not [string]::IsNullOrWhiteSpace($HeaderList)) {
     $HeaderListPath = (Resolve-Path $HeaderList).Path
