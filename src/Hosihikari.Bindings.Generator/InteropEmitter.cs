@@ -648,7 +648,7 @@ internal static class InteropEmitter
             : parameter.IsMap
             ? "map:" + parameter.NativeType
             : parameter.IsVector
-            ? "vector:" + parameter.VectorElementType
+            ? "vector:" + CSharpDeclarationType(parameter)
             : parameter.IsOptionalRef
                 ? "optional_ref:" + parameter.OptionalRefInnerType
                 : parameter.IsOptional
@@ -1133,30 +1133,37 @@ internal static class InteropEmitter
                 continue;
             }
 
-            var type = parameter.Kind == AbiKind.Shared
-                ? "global::Hosihikari.Bindings.Abi.SharedHandle?"
-                : parameter.IsMap
-                ? $"global::System.Collections.Generic.Dictionary<{AbiPlan.CSharpMapKeyType(parameter.MapKeyKind)}, {AbiPlan.CSharpMapValueType(parameter)}>?"
-                : parameter.IsVector
-                    ? parameter.VectorElementWrapperType is not null
-                        ? parameter.VectorElementWrapperType
-                            + (parameter.VectorElementOwnership == ArrayElementOwnership.OptionalRecordCopy ? "?[]" : "[]")
-                        : parameter.VectorElementKind == AbiKind.StringView
-                            ? "string[]"
-                            : AbiPlan.CSharpType(parameter.VectorElementKind) + "[]"
-                    : parameter.IsOptional
-                        ? parameter.Kind switch
-                        {
-                            AbiKind.StringView => "string?",
-                            AbiKind.Opaque => (parameter.WrapperType ?? "nint") + "?",
-                            _ => AbiPlan.CSharpType(parameter.Kind) + "?",
-                        }
-                        : AbiPlan.CSharpParameterType(parameter);
+            var type = CSharpDeclarationType(parameter);
             declarations.Add($"{type} {CSharpParameterName(parameter, index)}");
         }
 
         return string.Join(", ", declarations);
     }
+
+    /// <summary>
+    /// The type written into a C# parameter list. Distinct native types can collapse to the
+    /// same C# type, for example vectors of different pointer element types both use nint[].
+    /// </summary>
+    private static string CSharpDeclarationType(AbiParameter parameter) =>
+        parameter.Kind == AbiKind.Shared
+            ? "global::Hosihikari.Bindings.Abi.SharedHandle?"
+            : parameter.IsMap
+            ? $"global::System.Collections.Generic.Dictionary<{AbiPlan.CSharpMapKeyType(parameter.MapKeyKind)}, {AbiPlan.CSharpMapValueType(parameter)}>?"
+            : parameter.IsVector
+                ? parameter.VectorElementWrapperType is not null
+                    ? parameter.VectorElementWrapperType
+                        + (parameter.VectorElementOwnership == ArrayElementOwnership.OptionalRecordCopy ? "?[]" : "[]")
+                    : parameter.VectorElementKind == AbiKind.StringView
+                        ? "string[]"
+                        : AbiPlan.CSharpType(parameter.VectorElementKind) + "[]"
+                : parameter.IsOptional
+                    ? parameter.Kind switch
+                    {
+                        AbiKind.StringView => "string?",
+                        AbiKind.Opaque => (parameter.WrapperType ?? "nint") + "?",
+                        _ => AbiPlan.CSharpType(parameter.Kind) + "?",
+                    }
+                    : AbiPlan.CSharpParameterType(parameter);
 
     private static (string Invoke, string UserData, string Release) CallbackNames(
         AbiParameter parameter,
