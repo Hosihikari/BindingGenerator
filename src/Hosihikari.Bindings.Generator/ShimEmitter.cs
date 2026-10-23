@@ -3115,14 +3115,14 @@ internal static class ShimEmitter
         yield return $"    using HsFn = {callReturn} (*)({string.Join(", ", callParameters)});";
         if (function.Kind == AbiFunctionKind.Destroy)
         {
-            yield return "    auto const hs_fn = reinterpret_cast<HsFn>(hs_dtor);";
+            yield return "    auto const hs_fn = reinterpret_cast<HsFn>(const_cast<void*>(hs_dtor));";
             yield return "    if (hs_fn != nullptr) { hs_fn(hs_self); }";
             var align = layout?.Align > 0 ? layout!.Align : 8;
             yield return $"    hs_deallocate(hs_self, {align.ToString(CultureInfo.InvariantCulture)});";
         }
         else
         {
-            yield return "    auto const hs_fn = reinterpret_cast<HsFn>(hs_target);";
+            yield return "    auto const hs_fn = reinterpret_cast<HsFn>(const_cast<void*>(hs_target));";
 
             if (returnNeedsCopy)
             {
