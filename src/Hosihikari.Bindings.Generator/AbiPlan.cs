@@ -6127,6 +6127,7 @@ internal sealed class AbiPlan
             {
             }
             else if (IsStringViewType(field.Type.Canonical)
+                || IsStringType(field.Type.Canonical)
                 || string.Equals(staticCanonical, "char[]", StringComparison.Ordinal))
             {
                 staticKind = AbiKind.StringView;

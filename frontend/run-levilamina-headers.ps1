@@ -31,6 +31,7 @@ $Headers = @(
     "mc/world/level/BlockSource.h",
     "mc/world/level/Level.h",
     "mc/world/item/registry/ItemStack.h",
+    "mc/world/item/registry/ItemRegistryRef.h",
     "mc/world/phys/AABB.h",
     "mc/network/packet/ActorLink.h",
     "mc/world/ActorUniqueID.h",

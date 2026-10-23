@@ -101,6 +101,13 @@ public static class NativeEntryPoint
                 && Actor.DAMAGE_NEARBY_MOBS_DURATION >= 0
                 && emptyItem.Handle != 0;
 
+            // The Item class exposes static string constants; the empty stack exercises the
+            // ItemStackBase.getItem pointer-return path without constructing a new stack.
+            var itemStaticsOk = Item.TAG_DAMAGE.Length > 0 && Item.ICON_DESCRIPTION_PREFIX.Length > 0;
+            using var emptyStackView = ItemStackBase.Borrow(emptyItem.Handle);
+            var emptyItemPtr = emptyStackView.getItem();
+            var itemLiveOk = itemStaticsOk && (emptyItemPtr is null || emptyItemPtr.Handle != 0);
+
             // Core::PathBuffer<std::string> is a single string member; the shim reads it with
             // the std::string return ABI and releases it with the game's own string destructor.
             var storagePath = platform?.getInternalStoragePath() ?? "";
@@ -131,7 +138,8 @@ public static class NativeEntryPoint
                 && currentStoragePath.Length > 0
                 && serverWrappersOk
                 && secureStorageOk
-                && staticConstantsOk;
+                && staticConstantsOk
+                && itemLiveOk;
             var result =
                 "load=managed\n"
                 + $"a={textA}\n"
@@ -164,6 +172,7 @@ public static class NativeEntryPoint
                 + $"serverTextSettings={(serverTextSettings is not null ? "0x" + serverTextSettings.Target.ToString("x") : "null")}\n"
                 + $"secureStorage={(secureStorage is not null)}\n"
                 + $"staticConstants={staticConstantsOk}\n"
+                + $"itemLive={itemLiveOk}\n"
                 + $"stable={eduMode == eduModeAgain && maxRequests == maxRequestsAgain && addresses.SequenceEqual(addressesAgain)}\n"
                 + $"result={(ok ? "OK" : "FAIL")}\n";
             if (resultPath is not null)

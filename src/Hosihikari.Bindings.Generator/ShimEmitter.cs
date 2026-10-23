@@ -2495,8 +2495,16 @@ internal static class ShimEmitter
             yield return "    }";
             if (function.ReturnKind == AbiKind.StringView)
             {
-                yield return "    auto const* hs_text = static_cast<char const*>(hs_target);";
-                yield return "    return HosihikariStringView{hs_text, std::strlen(hs_text)};";
+                if (AbiPlan.IsStringType(function.NativeReturnType))
+                {
+                    yield return "    auto const* hs_text = static_cast<std::string const*>(hs_target);";
+                    yield return "    return HosihikariStringView{hs_text->data(), hs_text->size()};";
+                }
+                else
+                {
+                    yield return "    auto const* hs_text = static_cast<char const*>(hs_target);";
+                    yield return "    return HosihikariStringView{hs_text, std::strlen(hs_text)};";
+                }
             }
             else if (function.ReturnKind == AbiKind.Opaque)
             {
