@@ -53,7 +53,7 @@ try {
 
     $ShimSource = Join-Path $Output "shim\win-x64-server\bedrock\binding_table.cpp"
     $ShimDll = Join-Path $Output "symbol-shim.dll"
-    Invoke-Msvc "cl /nologo /std:c++20 /EHsc /MD /O2 /LD `"$ShimSource`" /I `"$(Split-Path $ShimSource -Parent)`" /Fo:`"$Output\\`" /Fd:`"$Output\\shim-cl.pdb`" /Fe:`"$ShimDll`""
+    Invoke-Msvc "cl /nologo /std:c++20 /EHsc /MD /O2 /bigobj /LD `"$ShimSource`" /I `"$(Split-Path $ShimSource -Parent)`" /Fo:`"$Output\\`" /Fd:`"$Output\\shim-cl.pdb`" /Fe:`"$ShimDll`""
 
     dotnet build (Join-Path $PSScriptRoot "managed\Hosihikari.SymbolSmoke.csproj") -c Release --nologo -v:q `
         -p:InteropDirectory=$Output/interop

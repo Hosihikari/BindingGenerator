@@ -644,7 +644,7 @@ internal static class InteropEmitter
         parameter.IsUniquePtrParam
             ? "unique_ptr:" + parameter.NativePointee
             : parameter.Kind == AbiKind.Shared
-            ? "shared:" + parameter.NativeType + (parameter.IsWeakPtr ? ":weak" : "")
+            ? "shared:" + AbiPlan.CSharpParameterType(parameter)
             : parameter.IsMap
             ? "map:" + parameter.NativeType
             : parameter.IsVector

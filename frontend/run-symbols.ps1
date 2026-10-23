@@ -9,6 +9,7 @@ param(
     [switch]$NoPrototype,
     [string]$Version = "1.21.3",
     [string[]]$Classes = @("Actor", "BlockPos"),
+    [string]$ClassesFile = "",
     [string]$LlvmRoot = "$env:LOCALAPPDATA\Temp\hosihikari-llvm\clang+llvm-23.1.3-x86_64-pc-windows-msvc",
     [switch]$SkipBuild
 )
@@ -53,9 +54,13 @@ if (-not (Test-Path $Frontend)) {
 $Arguments = @(
     "--pdb", $Pdb,
     "--exe", $Exe,
-    "--version", $Version,
-    "--classes", ($Classes -join ",")
+    "--version", $Version
 )
+if (-not [string]::IsNullOrWhiteSpace($ClassesFile)) {
+    $Arguments += @("--classes-file", ((Resolve-Path $ClassesFile).Path))
+} else {
+    $Arguments += @("--classes", ($Classes -join ","))
+}
 if (-not [string]::IsNullOrWhiteSpace($Elf)) {
     $Arguments += @("--elf", $Elf)
 }

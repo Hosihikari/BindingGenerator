@@ -50,7 +50,10 @@ struct Inputs {
     std::string Output;
     std::string IrOutput;
     std::string Version = "1.21.3";
+    std::string ListClasses;
     std::vector<std::string> Classes;
+    std::set<std::string> ClassSet;
+    std::map<std::string, uint64_t> DiscoveredClasses;
 };
 
 struct Method {
@@ -538,6 +541,127 @@ bool matchesClass(const std::string& Symbol, const std::string& ClassName) {
         || (Symbol.find("??_R") != std::string::npos && Symbol.find(ClassName) != std::string::npos);
 }
 
+// Extracts the owning class from an MSVC-mangled symbol without demangling.
+// The result is a qualified name; template-mangled names are skipped because
+// their class components are not stable identifiers.
+std::string discoverMsvcClass(const std::string& Mangled) {
+    if (Mangled.size() < 4 || Mangled[0] != '?') {
+        return {};
+    }
+    if (Mangled.rfind("??_R", 0) == 0
+        || Mangled.rfind("??__", 0) == 0) {
+        return {};
+    }
+    size_t At = Mangled.find('@');
+    if (At == std::string::npos) {
+        return {};
+    }
+    std::string Class;
+    if (Mangled.rfind("??0", 0) == 0
+        || Mangled.rfind("??1", 0) == 0) {
+        Class = Mangled.substr(3, At - 3);
+    } else if (Mangled.rfind("??_G", 0) == 0
+        || Mangled.rfind("??_E", 0) == 0
+        || Mangled.rfind("??_D", 0) == 0
+        || Mangled.rfind("??_7", 0) == 0) {
+        Class = Mangled.substr(4, At - 4);
+    } else {
+        size_t DoubleAt = Mangled.find("@@", At);
+        if (DoubleAt == std::string::npos || DoubleAt <= At + 1) {
+            return {};
+        }
+        Class = Mangled.substr(At + 1, DoubleAt - At - 1);
+    }
+    if (Class.empty()
+        || Class.find('?') != std::string::npos
+        || Class.find('$') != std::string::npos) {
+        return {};
+    }
+    std::vector<std::string> Parts;
+    std::string Part;
+    for (char Character : Class) {
+        if (Character == '@') {
+            if (!Part.empty()) {
+                Parts.push_back(Part);
+            }
+            Part.clear();
+        } else {
+            Part += Character;
+        }
+    }
+    if (!Part.empty()) {
+        Parts.push_back(Part);
+    }
+    std::reverse(Parts.begin(), Parts.end());
+
+    std::string Qualified;
+    for (const auto& Component : Parts) {
+        if (!Qualified.empty()) {
+            Qualified += "::";
+        }
+        Qualified += Component;
+    }
+    return Qualified;
+}
+
+// Extracts the owning class from an Itanium-mangled symbol. The trailing
+// component is the member name; vtable and RTTI symbols use every component.
+std::string discoverItaniumClass(const std::string& Mangled) {
+    size_t Position = 0;
+    bool Member = false;
+    if (Mangled.rfind("_ZTV", 0) == 0
+        || Mangled.rfind("_ZTI", 0) == 0
+        || Mangled.rfind("_ZTS", 0) == 0) {
+        Position = 4;
+    } else if (Mangled.rfind("_ZNK", 0) == 0) {
+        Position = 4;
+        Member = true;
+    } else if (Mangled.rfind("_ZN", 0) == 0) {
+        Position = 3;
+        Member = true;
+    } else {
+        return {};
+    }
+    if (Position < Mangled.size() && Mangled[Position] == 'N') {
+        ++Position;
+    }
+
+    std::vector<std::string> Components;
+    while (Position < Mangled.size()
+        && std::isdigit(static_cast<unsigned char>(Mangled[Position]))) {
+        size_t Length = 0;
+        while (Position < Mangled.size()
+            && std::isdigit(static_cast<unsigned char>(Mangled[Position]))) {
+            Length = Length * 10 + static_cast<size_t>(Mangled[Position] - '0');
+            ++Position;
+        }
+        if (Length == 0 || Position + Length > Mangled.size()) {
+            return {};
+        }
+        Components.push_back(Mangled.substr(Position, Length));
+        Position += Length;
+    }
+    if (Components.size() < (Member ? 2u : 1u)) {
+        return {};
+    }
+    if (Member) {
+        Components.pop_back();
+    }
+
+    std::string Qualified;
+    for (const auto& Component : Components) {
+        if (!Qualified.empty()) {
+            Qualified += "::";
+        }
+        Qualified += Component;
+    }
+    if (Qualified.find('$') != std::string::npos
+        || Qualified.find('<') != std::string::npos) {
+        return {};
+    }
+    return Qualified;
+}
+
 uint64_t rvaForPublic(const object::COFFObjectFile& Coff, const codeview::PublicSym32& Public) {
     auto Section = Coff.getSection(Public.Segment);
     if (!Section) {
@@ -609,7 +733,7 @@ void mapVtableAddresses(Configuration& Config, const std::string& ClassName, uin
     }
 }
 
-bool loadPdb(const Inputs& Inputs, const object::COFFObjectFile& Coff, Configuration& Config) {
+bool loadPdb(Inputs& Inputs, const object::COFFObjectFile& Coff, Configuration& Config) {
     errs() << "loading PDB " << Inputs.Pdb << "\n";
     std::unique_ptr<pdb::IPDBSession> Session;
     if (Error LoadError = pdb::NativeSession::createFromPdbPath(Inputs.Pdb, Session)) {
@@ -648,12 +772,15 @@ bool loadPdb(const Inputs& Inputs, const object::COFFObjectFile& Coff, Configura
         }
 
         std::string Mangled = Public->Name.str();
+        std::string Discovered = discoverMsvcClass(Mangled);
+        if (!Inputs.ListClasses.empty() && !Discovered.empty()) {
+            ++Inputs.DiscoveredClasses[Discovered];
+        }
         if (Mangled.size() > 1 && Mangled[0] == '?') {
             std::string StaticKey = parseMsvcStaticData(Mangled);
             if (!StaticKey.empty()) {
                 std::string ClassName = StaticKey.substr(0, StaticKey.rfind("::"));
-                if (std::find(Inputs.Classes.begin(), Inputs.Classes.end(), ClassName)
-                    != Inputs.Classes.end()) {
+                if (Inputs.ClassSet.find(ClassName) != Inputs.ClassSet.end()) {
                     uint64_t Rva = rvaForPublic(Coff, *Public);
                     Config.StaticFields[StaticKey] = SupportSymbol{Mangled, Rva, ImageBase + Rva};
                 }
@@ -674,23 +801,14 @@ bool loadPdb(const Inputs& Inputs, const object::COFFObjectFile& Coff, Configura
             Config.StringDestructorRva = rvaForPublic(Coff, *Public);
         }
 
-        bool Wanted = false;
-        for (const auto& ClassName : Inputs.Classes) {
-            if (matchesClass(Mangled, ClassName)) {
-                Wanted = true;
-                break;
-            }
-        }
+        bool Wanted = !Discovered.empty()
+            && Inputs.ClassSet.find(Discovered) != Inputs.ClassSet.end();
         if (!Wanted) {
             continue;
         }
         if (Mangled.find("??_7") == 0) {
-            for (const auto& ClassName : Inputs.Classes) {
-                if (Mangled == "??_7" + ClassName + "@@6B@") {
-                    Config.VtableSymbols[ClassName] = Mangled;
-                    Config.VtableAddresses[ClassName] = rvaForPublic(Coff, *Public);
-                }
-            }
+            Config.VtableSymbols[Discovered] = Mangled;
+            Config.VtableAddresses[Discovered] = rvaForPublic(Coff, *Public);
             continue;
         }
         if (Mangled.find("??_R") == 0) {
@@ -702,14 +820,10 @@ bool loadPdb(const Inputs& Inputs, const object::COFFObjectFile& Coff, Configura
             continue;
         }
 
-        for (const auto& ClassName : Inputs.Classes) {
-            ParsedMethod Parsed = parseDemangled(Demangled, ClassName, true);
-            if (!Parsed.Valid) {
-                continue;
-            }
+        ParsedMethod Parsed = parseDemangled(Demangled, Discovered, true);
+        if (Parsed.Valid) {
             uint64_t Rva = rvaForPublic(Coff, *Public);
             addMethod(Config, Parsed, Mangled, Rva, ImageBase + Rva);
-            break;
         }
     }
 
@@ -938,6 +1052,7 @@ bool loadElf(const Inputs& Inputs, const object::ObjectFile& Elf, Configuration&
             continue;
         }
         std::string Mangled = Name->str();
+        std::string Discovered = discoverItaniumClass(Mangled);
 
         auto SymbolValueResult = Symbol.getValue();
         if (!SymbolValueResult) {
@@ -945,12 +1060,12 @@ bool loadElf(const Inputs& Inputs, const object::ObjectFile& Elf, Configuration&
             continue;
         }
         uint64_t SymbolValue = *SymbolValueResult;
-        for (const auto& ClassName : Inputs.Classes) {
+        if (!Discovered.empty()
+            && Inputs.ClassSet.find(Discovered) != Inputs.ClassSet.end()) {
             std::string Field;
-            if (parseItaniumStaticData(Mangled, ClassName, Field)) {
-                Config.StaticFields[ClassName + "::" + Field] =
+            if (parseItaniumStaticData(Mangled, Discovered, Field)) {
+                Config.StaticFields[Discovered + "::" + Field] =
                     SupportSymbol{Mangled, 0, SymbolValue};
-                break;
             }
         }
         if (Mangled.rfind("_ZN", 0) == 0
@@ -983,28 +1098,15 @@ bool loadElf(const Inputs& Inputs, const object::ObjectFile& Elf, Configuration&
             Config.TypeInfoByName[Mangled.substr(4)] = SymbolValue;
         }
 
-        bool Wanted = false;
-        for (const auto& ClassName : Inputs.Classes) {
-            std::string Marker = std::to_string(ClassName.size()) + ClassName;
-            if (Mangled.find("_ZN" + Marker) != std::string::npos
-                || Mangled.find("_ZNK" + Marker) != std::string::npos
-                || Mangled.find("_ZTV" + Marker) != std::string::npos) {
-                Wanted = true;
-                break;
-            }
-        }
+        bool Wanted = !Discovered.empty()
+            && Inputs.ClassSet.find(Discovered) != Inputs.ClassSet.end();
         if (!Wanted) {
             continue;
         }
 
         if (Mangled.find("_ZTV") == 0) {
-            for (const auto& ClassName : Inputs.Classes) {
-                std::string Expected = "_ZTV" + std::to_string(ClassName.size()) + ClassName;
-                if (Mangled == Expected) {
-                    Config.VtableSymbols[ClassName] = Mangled;
-                    Config.VtableAddresses[ClassName] = cantFail(Symbol.getValue());
-                }
-            }
+            Config.VtableSymbols[Discovered] = Mangled;
+            Config.VtableAddresses[Discovered] = SymbolValue;
             continue;
         }
 
@@ -1013,14 +1115,10 @@ bool loadElf(const Inputs& Inputs, const object::ObjectFile& Elf, Configuration&
             continue;
         }
 
-        for (const auto& ClassName : Inputs.Classes) {
-            ParsedMethod Parsed = parseDemangled(Demangled, ClassName, false);
-            if (!Parsed.Valid) {
-                continue;
-            }
+        ParsedMethod Parsed = parseDemangled(Demangled, Discovered, false);
+        if (Parsed.Valid) {
             uint64_t Address = SymbolValue;
             addMethod(Config, Parsed, Mangled, Address, Address);
-            break;
         }
     }
 
@@ -1628,16 +1726,37 @@ int main(int argc, char** argv) {
                 }
                 Start = Comma + 1;
             }
+        } else if (Argument == "--classes-file") {
+            std::ifstream ClassFile(next());
+            if (!ClassFile) {
+                errs() << "cannot read classes file\n";
+                return 2;
+            }
+            std::string Line;
+            while (std::getline(ClassFile, Line)) {
+                std::string Name = StringRef(Line).trim().str();
+                if (!Name.empty() && Name[0] != '#') {
+                    Inputs.Classes.push_back(Name);
+                }
+            }
+        } else if (Argument == "--list-classes") {
+            Inputs.ListClasses = next();
         } else {
             errs() << "unknown argument: " << Argument << "\n";
             return 2;
         }
     }
 
+    for (const auto& Name : Inputs.Classes) {
+        Inputs.ClassSet.insert(Name);
+    }
+
     if (Inputs.Pdb.empty() || Inputs.Exe.empty()
-        || (Inputs.Output.empty() && Inputs.IrOutput.empty()) || Inputs.Classes.empty()) {
+        || (Inputs.ListClasses.empty()
+            && ((Inputs.Output.empty() && Inputs.IrOutput.empty()) || Inputs.Classes.empty()))) {
         errs() << "usage: hosihikari-symbol-ir-frontend --pdb <pdb> --exe <pe> [--elf <debug>] "
-                  "[--output <prototype.json>] [--ir-output <dir>] [--version <id>] --classes <A,B>\n";
+                  "[--output <prototype.json>] [--ir-output <dir>] [--version <id>] "
+                  "[--classes <A,B> | --classes-file <path>] [--list-classes <path>]\n";
         return 2;
     }
 
@@ -1655,7 +1774,7 @@ int main(int argc, char** argv) {
 
     std::optional<object::OwningBinary<object::Binary>> ElfBinary;
     const object::ObjectFile* Elf = nullptr;
-    if (!Inputs.Elf.empty()) {
+    if (!Inputs.Elf.empty() && Inputs.ListClasses.empty()) {
         auto LoadedElf = object::createBinary(Inputs.Elf);
         if (!LoadedElf) {
             errs() << "cannot read ELF: " << toString(LoadedElf.takeError()) << "\n";
@@ -1679,6 +1798,28 @@ int main(int argc, char** argv) {
     if (!loadPdb(Inputs, *Coff, Windows)) {
         return 1;
     }
+
+    if (!Inputs.ListClasses.empty()) {
+        std::filesystem::path ListPath(Inputs.ListClasses);
+        if (ListPath.has_parent_path()) {
+            std::filesystem::create_directories(ListPath.parent_path());
+        }
+
+        std::vector<std::pair<std::string, uint64_t>> Rows(
+            Inputs.DiscoveredClasses.begin(), Inputs.DiscoveredClasses.end());
+        std::sort(Rows.begin(), Rows.end(), [](const auto& Left, const auto& Right) {
+            return Left.second != Right.second ? Left.second > Right.second : Left.first < Right.first;
+        });
+
+        std::ofstream Out(Inputs.ListClasses);
+        Out << "class\tsymbols\n";
+        for (const auto& [Name, Count] : Rows) {
+            Out << Name << '\t' << Count << '\n';
+        }
+        errs() << "discovered " << Rows.size() << " classes\n";
+        return 0;
+    }
+
     if (HasLinux) {
         errs() << "reading ELF configuration\n";
         if (!loadElf(Inputs, *Elf, Linux)) {

@@ -2180,11 +2180,12 @@ internal static class ShimEmitter
         if (stringDestructor is not null)
         {
             source.Add("");
-            source.Add("inline void hs_destroy_string(std::basic_string<char>* value)");
+            source.Add("inline void hs_destroy_string(std::basic_string<char> const* value)");
             source.Add("{");
             source.Add("    using HsDestroy = void (*)(std::basic_string<char>*);");
             source.Add($"    static HsDestroy const destroy = reinterpret_cast<HsDestroy>(hs_resolve({stringDestructor.Value.Offset}, {CppLiteral(stringDestructor.Value.Symbol)}));");
-            source.Add("    if (destroy != nullptr) { destroy(value); } else { value->~basic_string(); }");
+            source.Add("    auto* mutableValue = const_cast<std::basic_string<char>*>(value);");
+            source.Add("    if (destroy != nullptr) { destroy(mutableValue); } else { mutableValue->~basic_string(); }");
             source.Add("}");
         }
 
@@ -2794,9 +2795,15 @@ internal static class ShimEmitter
             members.TryGetValue(function.MemberId, out entry);
         }
 
+        // A direct symbol or RVA is preferred: it addresses the implementation the
+        // IR recorded, while a vtable slot can point at an ICF-folded or adjacent
+        // entry when the original layout is ambiguous.
         var virtualCall = function.Kind == AbiFunctionKind.Method
             && !function.Static
-            && entry is { Virtual: true, VTableIndex: not null };
+            && entry is { Virtual: true, VTableIndex: not null }
+            && string.IsNullOrWhiteSpace(entry.Symbol)
+            && entry.Rva is null
+            && entry.Address is null;
         LayoutInfo? layout = null;
         if (function.Kind is AbiFunctionKind.Create or AbiFunctionKind.Destroy)
         {
