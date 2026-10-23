@@ -4894,8 +4894,14 @@ internal sealed class AbiPlan
             Static = field.Static,
         };
 
-        if (kind is AbiKind.StringView || type.Const || IsConstType(text) || IsArrayType(text))
+        if (kind is AbiKind.StringView
+            || type.Const
+            || IsConstType(text)
+            || IsArrayType(text)
+            || type.Kind == "reference"
+            || IsReferenceType(text))
         {
+            // A reference field cannot be assigned through the wrapper.
             return true;
         }
 
@@ -5001,6 +5007,8 @@ internal sealed class AbiPlan
                 Kind = AbiKind.Shared,
                 NativeType = NormalizeTypeName(text),
                 NativePointee = sharedPointee,
+                IsReference = IsReferenceType(text),
+                IsConst = IsConstType(text),
             };
             return true;
         }
@@ -5014,6 +5022,8 @@ internal sealed class AbiPlan
                 NativeType = NormalizeTypeName(text),
                 NativePointee = weakPointee,
                 IsWeakPtr = true,
+                IsReference = IsReferenceType(text),
+                IsConst = IsConstType(text),
             };
             return true;
         }
@@ -5093,6 +5103,8 @@ internal sealed class AbiPlan
                     Name = name,
                     Kind = AbiKind.Vector,
                     NativeType = text,
+                    IsReference = IsReferenceType(text),
+                    IsConst = IsConstType(text),
                     IsVector = true,
                     VectorElementKind = AbiKind.StringView,
                     VectorElementType = vectorElement,
@@ -5108,6 +5120,8 @@ internal sealed class AbiPlan
                     Name = name,
                     Kind = AbiKind.Vector,
                     NativeType = text,
+                    IsReference = IsReferenceType(text),
+                    IsConst = IsConstType(text),
                     IsVector = true,
                     VectorElementKind = vectorKind,
                     VectorElementType = vectorElement,
@@ -5123,6 +5137,8 @@ internal sealed class AbiPlan
                     Name = name,
                     Kind = AbiKind.Vector,
                     NativeType = text,
+                    IsReference = IsReferenceType(text),
+                    IsConst = IsConstType(text),
                     IsVector = true,
                     VectorElementKind = AbiKind.Opaque,
                     VectorElementType = vectorElement,
@@ -5139,6 +5155,8 @@ internal sealed class AbiPlan
                     Name = name,
                     Kind = AbiKind.Vector,
                     NativeType = text,
+                    IsReference = IsReferenceType(text),
+                    IsConst = IsConstType(text),
                     IsVector = true,
                     VectorElementKind = AbiKind.Opaque,
                     VectorElementType = vectorVariantType,
@@ -5162,6 +5180,8 @@ internal sealed class AbiPlan
                     Name = name,
                     Kind = AbiKind.Vector,
                     NativeType = text,
+                    IsReference = IsReferenceType(text),
+                    IsConst = IsConstType(text),
                     IsVector = true,
                     VectorElementKind = AbiKind.Opaque,
                     VectorElementType = optionalVectorRecord,
@@ -5183,6 +5203,8 @@ internal sealed class AbiPlan
                     Name = name,
                     Kind = AbiKind.Vector,
                     NativeType = text,
+                    IsReference = IsReferenceType(text),
+                    IsConst = IsConstType(text),
                     IsVector = true,
                     VectorElementKind = AbiKind.Opaque,
                     VectorElementType = vectorElement,
@@ -5201,6 +5223,8 @@ internal sealed class AbiPlan
                     Name = name,
                     Kind = AbiKind.Vector,
                     NativeType = text,
+                    IsReference = IsReferenceType(text),
+                    IsConst = IsConstType(text),
                     IsVector = true,
                     VectorElementKind = AbiKind.Opaque,
                     VectorElementType = vectorElement,

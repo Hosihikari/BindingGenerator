@@ -58,6 +58,8 @@ The script emits `linux-x64-server` IR and validates it with the .NET CLI. On li
 
 `frontend/run-levilamina-headers.ps1` generates a header supplement from a LeviLamina v0.13.5 checkout targeting BDS 1.21.3.01. It passes `--flatten-anonymous-fields`, which emits fields nested in anonymous unions/structs with absolute bit offsets; the flag is off by default so existing IRs stay unchanged. `frontend/merge-symbol-ir.py` then merges fields, layouts, inheritance, and inline methods from that IR into the symbol IR.
 
+`frontend/headers/mc-26.51.7.txt` maps the same `mc/` slice to the LeviLamina 26.51.7 checkout. `-UseCompileCommands` reuses the checkout's server compile environment, and `-I src-server` precedes the `src` overlay. The probe yields 558 declarations / 7,367 members / 5,325 BindingShim functions at IR 1.5.1. A compile pass against the same headers reports 36 errors, concentrated in `brstd` wrappers, `ll::math` template instances, `PathBuffer`, and callback overloads; the remaining work is type-specific.
+
 The generator's `emit --symbol-dispatch` mode turns that IR into a shim that does not include game headers: direct calls use the module base plus `rva`/`address` (or `GetProcAddress`/`dlsym` on the recorded symbol), and virtual calls use the per-configuration `vtableIndex`. `tests/symbol-dispatch/run.ps1` exercises the Windows PE/PDB path end-to-end with a synthetic fixture; the `cli` CI job runs the Linux fixture and resolver smoke.
 
 ## Current state

@@ -4,6 +4,8 @@ param(
     [string]$Output = "artifacts/levi-1.21.3-header-ir",
     [string]$LlvmRoot = "$env:LOCALAPPDATA\Temp\hosihikari-llvm\clang+llvm-23.1.3-x86_64-pc-windows-msvc",
     [string[]]$AdditionalIncludePath = @(),
+    [string]$HeaderList = "",
+    [switch]$UseCompileCommands,
     [switch]$SkipBuild
 )
 
@@ -54,6 +56,12 @@ $Headers = @(
     "mc/deps/core/common/bedrock/PlatformRuntimeInfo.h",
     "mc/world/level/pathfinder/Path.h"
 )
+if (-not [string]::IsNullOrWhiteSpace($HeaderList)) {
+    $HeaderListPath = (Resolve-Path $HeaderList).Path
+    $Headers = Get-Content $HeaderListPath |
+        ForEach-Object { $_.Trim() } |
+        Where-Object { $_ -ne "" -and -not $_.StartsWith("#") }
+}
 foreach ($header in $Headers) {
     if (-not (Test-Path (Join-Path $SourceRoot $header))) {
         throw "LeviLamina header was not found: $header"
@@ -94,21 +102,65 @@ foreach ($include in $AdditionalIncludePath) {
     $Includes += @("-I", (Resolve-Path $include).Path)
 }
 
-$CompilerArgs = @(
-    "-std=c++20",
-    "-fms-extensions",
-    "-fms-compatibility",
-    "-fms-compatibility-version=19.44",
-    "-D_WIN64",
-    "-D_AMD64_",
-    "-DNOMINMAX",
-    "-DWIN32_LEAN_AND_MEAN"
-) + $Includes + @(
-    "-isystem", (Join-Path $Msvc.FullName "include"),
-    "-isystem", (Join-Path $SdkRoot "$($Sdk.Name)\ucrt"),
-    "-isystem", (Join-Path $SdkRoot "$($Sdk.Name)\shared"),
-    "-isystem", (Join-Path $SdkRoot "$($Sdk.Name)\um")
-)
+if ($UseCompileCommands) {
+    $CompileCommandsPath = Join-Path $LeviLaminaRoot "compile_commands.json"
+    if (-not (Test-Path $CompileCommandsPath)) {
+        throw "compile_commands.json was not found under $LeviLaminaRoot."
+    }
+    $CompileCommands = Get-Content $CompileCommandsPath -Raw | ConvertFrom-Json
+    $Entry = $CompileCommands | Where-Object { $_.file -match 'src[\\/]ll[\\/]api' } | Select-Object -First 1
+    if (-not $Entry) {
+        throw "No ll/api entry found in compile_commands.json."
+    }
+
+    $CompilerArgs = @()
+    $Raw = @($Entry.arguments)
+    for ($i = 0; $i -lt $Raw.Count; $i++) {
+        $arg = [string]$Raw[$i]
+        if ($i -eq 0) { continue }
+        if ($arg -in @("-c", "-MD", "-Zi", "-FS", "-O2", "-Qunused-arguments")) { continue }
+        if ($arg -like "-Fd*" -or $arg -like "-Yu*" -or $arg -like "-FI*" -or $arg -like "-Fo*") { continue }
+        if ($arg -like "/*") { continue }
+        if ($arg -ieq $Entry.file) { continue }
+        if ($arg -ieq "-x") {
+            $i++
+            continue
+        }
+        if ($arg -like "-std:*") {
+            $CompilerArgs += ("-std=" + $arg.Substring(5))
+            continue
+        }
+        $CompilerArgs += $arg
+    }
+
+    $CompilerArgs = @("-I", (Join-Path $LeviLaminaRoot "src-server")) + $CompilerArgs
+    $CompilerArgs += @(
+        "-fms-extensions",
+        "-fms-compatibility",
+        "-fms-compatibility-version=19.44",
+        "-isystem", (Join-Path $Msvc.FullName "include"),
+        "-isystem", (Join-Path $SdkRoot "$($Sdk.Name)\ucrt"),
+        "-isystem", (Join-Path $SdkRoot "$($Sdk.Name)\shared"),
+        "-isystem", (Join-Path $SdkRoot "$($Sdk.Name)\um")
+    )
+}
+else {
+    $CompilerArgs = @(
+        "-std=c++20",
+        "-fms-extensions",
+        "-fms-compatibility",
+        "-fms-compatibility-version=19.44",
+        "-D_WIN64",
+        "-D_AMD64_",
+        "-DNOMINMAX",
+        "-DWIN32_LEAN_AND_MEAN"
+    ) + $Includes + @(
+        "-isystem", (Join-Path $Msvc.FullName "include"),
+        "-isystem", (Join-Path $SdkRoot "$($Sdk.Name)\ucrt"),
+        "-isystem", (Join-Path $SdkRoot "$($Sdk.Name)\shared"),
+        "-isystem", (Join-Path $SdkRoot "$($Sdk.Name)\um")
+    )
+}
 
 & $Frontend `
     --surface bedrock `

@@ -295,11 +295,17 @@ internal static class ShimEmitter
         source.Add("{");
         source.Add("    void operator()(void*) const noexcept {}");
         source.Add("};");
+        source.Add("template <class T>");
+        source.Add("void const* hs_type_tag()");
+        source.Add("{");
+        source.Add("    static const int tag = 0;");
+        source.Add("    return &tag;");
+        source.Add("}");
         source.Add("struct hs_shared_holder_base");
         source.Add("{");
         source.Add("    virtual ~hs_shared_holder_base() = default;");
         source.Add("    virtual std::shared_ptr<const void> hs_share() const = 0;");
-        source.Add("    virtual std::type_index hs_type() const = 0;");
+        source.Add("    virtual void const* hs_type() const = 0;");
         source.Add("};");
         source.Add("");
         source.Add("template <class T>");
@@ -312,7 +318,7 @@ internal static class ShimEmitter
         source.Add("        return std::shared_ptr<const void>(value, value.get());");
         source.Add("    }");
         source.Add("");
-        source.Add("    std::type_index hs_type() const override { return std::type_index(typeid(T)); }");
+        source.Add("    void const* hs_type() const override { return hs_type_tag<T>(); }");
         source.Add("};");
         source.Add("");
         source.Add("template <class T>");
@@ -343,7 +349,7 @@ internal static class ShimEmitter
         source.Add("{");
         source.Add("    if (handle.holder == nullptr) { return {}; }");
         source.Add("    auto* holder = static_cast<hs_shared_holder_base*>(handle.holder);");
-        source.Add("    if (holder->hs_type() != std::type_index(typeid(T))) {");
+        source.Add("    if (holder->hs_type() != hs_type_tag<T>()) {");
         source.Add("        throw std::invalid_argument(\"shared handle type mismatch\");");
         source.Add("    }");
         source.Add("    using Value = std::remove_const_t<T>;");
@@ -560,10 +566,18 @@ internal static class ShimEmitter
             }
         }
 
-        return includes
+        var normalized = includes
             .Select(NormalizeInclude)
             .Distinct(StringComparer.Ordinal)
-            .OrderBy(file => file, StringComparer.Ordinal);
+            .ToList();
+        if (normalized.Any(path => path.StartsWith("mc/deps/game_refs/", StringComparison.Ordinal)))
+        {
+            // The 26.5x OwnerPtr, StackRefResult, and WeakRef headers need the
+            // EntityContext specialization before they can form their base class.
+            normalized.Add("mc/deps/ecs/gamerefs_entity/GameRefsEntity.h");
+        }
+
+        return normalized.OrderBy(file => file, StringComparer.Ordinal);
     }
 
     private static void CollectTemplateDependencyIncludes(
@@ -645,6 +659,20 @@ internal static class ShimEmitter
         if (path.StartsWith("src/", StringComparison.Ordinal))
         {
             return path["src/".Length..];
+        }
+
+        // An umbrella outside the source root can leave declarations with absolute
+        // paths; reduce them to the include form used by the build.
+        var serverIndex = path.LastIndexOf("/src-server/", StringComparison.Ordinal);
+        if (serverIndex >= 0)
+        {
+            return path[(serverIndex + "/src-server/".Length)..];
+        }
+
+        var srcIndex = path.LastIndexOf("/src/", StringComparison.Ordinal);
+        if (srcIndex >= 0)
+        {
+            return path[(srcIndex + "/src/".Length)..];
         }
 
         return path;
@@ -858,6 +886,25 @@ internal static class ShimEmitter
             {
                 yield return "    " + line;
             }
+        }
+
+        for (var index = 0; index < function.Parameters.Count; index++)
+        {
+            var parameter = function.Parameters[index];
+            if (!parameter.IsReference
+                || parameter.IsConst
+                || parameter.IsRValueReference
+                || parameter.IsMap
+                || (!parameter.IsVector
+                    && parameter.Kind != AbiKind.Shared
+                    && parameter.Kind != AbiKind.StringView)
+                || (parameter.IsVector && parameter.VectorElementOwnership == ArrayElementOwnership.PairCopy))
+            {
+                continue;
+            }
+
+            // A non-const reference cannot bind a temporary; keep the converted value alive for the call.
+            yield return $"    auto hs_arg{index} = {NativeArgumentExpression(function, parameter, index)};";
         }
 
         switch (function.Kind)
@@ -1186,10 +1233,18 @@ internal static class ShimEmitter
                 }
                 else if (function.ReturnKind == AbiKind.Shared)
                 {
-                    var sharedExpression = function.SharedWrapper is SharedWrapperKind.NotNull or SharedWrapperKind.Nullable
-                        ? $"({call}).get()"
-                        : call;
-                    yield return $"    return hs_make_shared_handle({sharedExpression});";
+                    if (function.SharedWrapper == SharedWrapperKind.WeakPtr)
+                    {
+                        yield return $"    auto hs_locked = ({call}).lock();";
+                        yield return "    return hs_make_shared_handle(std::move(hs_locked));";
+                    }
+                    else
+                    {
+                        var sharedExpression = function.SharedWrapper is SharedWrapperKind.NotNull or SharedWrapperKind.Nullable
+                            ? $"({call}).get()"
+                            : call;
+                        yield return $"    return hs_make_shared_handle({sharedExpression});";
+                    }
                 }
                 else if (function.SpecialValue is SpecialValueKind.TypeId or SpecialValueKind.StrongOrdering)
                 {
@@ -1670,6 +1725,28 @@ internal static class ShimEmitter
         int index,
         string? nameOverride = null)
     {
+        if (nameOverride is null
+            && parameter.IsReference
+            && !parameter.IsConst
+            && !parameter.IsRValueReference
+            && !parameter.IsMap
+            && (parameter.IsVector
+                || parameter.Kind == AbiKind.Shared
+                || parameter.Kind == AbiKind.StringView)
+            && !(parameter.IsVector && parameter.VectorElementOwnership == ArrayElementOwnership.PairCopy))
+        {
+            return $"hs_arg{index}";
+        }
+
+        return NativeArgumentExpression(function, parameter, index, nameOverride);
+    }
+
+    private static string NativeArgumentExpression(
+        AbiFunction function,
+        AbiParameter parameter,
+        int index,
+        string? nameOverride = null)
+    {
         var name = nameOverride ?? CppParameterName(parameter, index);
         if (parameter.IsMap)
         {
@@ -1681,7 +1758,9 @@ internal static class ShimEmitter
         {
             if (parameter.VectorElementOwnership == ArrayElementOwnership.PairCopy)
             {
-                return $"std::move(hs_vec{index})";
+                return parameter.IsReference && !parameter.IsConst
+                    ? $"hs_vec{index}"
+                    : $"std::move(hs_vec{index})";
             }
 
             if (parameter.VectorElementKind == AbiKind.StringView)
@@ -2154,11 +2233,17 @@ internal static class ShimEmitter
         source.Add("{");
         source.Add("    void operator()(void*) const noexcept {}");
         source.Add("};");
+        source.Add("template <class T>");
+        source.Add("void const* hs_type_tag()");
+        source.Add("{");
+        source.Add("    static const int tag = 0;");
+        source.Add("    return &tag;");
+        source.Add("}");
         source.Add("struct hs_shared_holder_base");
         source.Add("{");
         source.Add("    virtual ~hs_shared_holder_base() = default;");
         source.Add("    virtual std::shared_ptr<const void> hs_share() const = 0;");
-        source.Add("    virtual std::type_index hs_type() const = 0;");
+        source.Add("    virtual void const* hs_type() const = 0;");
         source.Add("};");
         source.Add("");
         source.Add("template <class T>");
@@ -2171,7 +2256,7 @@ internal static class ShimEmitter
         source.Add("        return std::shared_ptr<const void>(value, value.get());");
         source.Add("    }");
         source.Add("");
-        source.Add("    std::type_index hs_type() const override { return std::type_index(typeid(T)); }");
+        source.Add("    void const* hs_type() const override { return hs_type_tag<T>(); }");
         source.Add("};");
         source.Add("");
         source.Add("template <class T>");
@@ -2202,7 +2287,7 @@ internal static class ShimEmitter
         source.Add("{");
         source.Add("    if (handle.holder == nullptr) { return {}; }");
         source.Add("    auto* holder = static_cast<hs_shared_holder_base*>(handle.holder);");
-        source.Add("    if (holder->hs_type() != std::type_index(typeid(T)))");
+        source.Add("    if (holder->hs_type() != hs_type_tag<T>())");
         source.Add("    {");
         source.Add("        throw std::invalid_argument(\"shared handle type mismatch\");");
         source.Add("    }");

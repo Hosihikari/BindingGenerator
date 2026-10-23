@@ -5,9 +5,11 @@ param(
     [string]$OutputDll,
     [string]$LlvmRoot = "$env:LOCALAPPDATA\Temp\hosihikari-llvm\clang+llvm-23.1.3-x86_64-pc-windows-msvc",
     [string]$LeviLaminaRoot = "C:\Users\root\source\repos\hosihikari\LeviLamina",
+    [string[]]$PrependIncludePath = @(),
     [string[]]$AdditionalIncludePath = @(),
     [string[]]$AdditionalLinkLibrary = @(),
     [string[]]$DelayLoadLibrary = @(),
+    [int]$ErrorLimit = 0,
     [switch]$CompileOnly
 )
 
@@ -60,10 +62,18 @@ $CompilerArgs += @(
     "-MD"
 )
 
+if ($ErrorLimit -gt 0) {
+    $CompilerArgs += "-ferror-limit=$ErrorLimit"
+}
+
 if ($CompileOnly) {
     $CompilerArgs += @("/c", "/Fo:$OutputDll")
 } else {
     $CompilerArgs += @("-LD", "-Fe:$OutputDll")
+}
+
+foreach ($include in $PrependIncludePath) {
+    $CompilerArgs = @("-I", (Resolve-Path $include).Path) + $CompilerArgs
 }
 
 foreach ($include in $AdditionalIncludePath) {
