@@ -104,6 +104,11 @@ $Headers = @(
     "mc/client/network/realms/RealmId.h",
     "mc/events/MinecraftEventing.h"
 )
+# The 1.21.3 supplement list lives in headers/mc-1.21.3.txt so layout headers can grow
+# without editing this script.
+if ([string]::IsNullOrWhiteSpace($HeaderList)) {
+    $HeaderList = Join-Path $PSScriptRoot "headers/mc-1.21.3.txt"
+}
 if (-not [string]::IsNullOrWhiteSpace($HeaderList)) {
     $HeaderListPath = (Resolve-Path $HeaderList).Path
     $Headers = Get-Content $HeaderListPath |
