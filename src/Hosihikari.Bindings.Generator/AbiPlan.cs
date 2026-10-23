@@ -82,6 +82,8 @@ internal sealed class AbiParameter
     public string? VectorPairKeyType { get; init; }
     public string? VectorPairValueType { get; init; }
     public bool IsWeakPtr { get; init; }
+    public bool IsBitset { get; init; }
+    public int BitsetBits { get; init; }
     public bool IsUniquePtrParam { get; init; }
     public bool IsMap { get; init; }
     public AbiKind MapKeyKind { get; init; }
@@ -4793,6 +4795,22 @@ internal sealed class AbiPlan
         return element.Length > 0;
     }
 
+    private static bool TryParseBitset(string canonical, out int bits)
+    {
+        bits = 0;
+        var text = canonical.Trim();
+        const string prefix = "std::bitset<";
+        if (!text.StartsWith(prefix, StringComparison.Ordinal)
+            || !text.EndsWith(">", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        return int.TryParse(text[prefix.Length..^1].Trim(), out bits)
+            && bits > 0
+            && bits <= 64;
+    }
+
     private static bool TryParseUniquePtr(string canonical, out string pointee)
     {
         pointee = "";
@@ -5520,6 +5538,19 @@ internal sealed class AbiPlan
                 Kind = AbiKind.StringView,
                 NativeType = text,
                 SpecialValue = SpecialValueKind.Path,
+            };
+            return true;
+        }
+
+        if (TryParseBitset(text, out var bitsetBits))
+        {
+            parameter = new AbiParameter
+            {
+                Name = name,
+                Kind = AbiKind.U64,
+                NativeType = text,
+                IsBitset = true,
+                BitsetBits = bitsetBits,
             };
             return true;
         }

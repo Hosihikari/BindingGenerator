@@ -188,6 +188,7 @@ internal static class ShimEmitter
             "#include \"binding_table.h\"",
             "",
             "#include <bit>",
+            "#include <bitset>",
             "#include <chrono>",
             "#include <cstddef>",
             "#include <cstdint>",
@@ -1748,6 +1749,11 @@ internal static class ShimEmitter
         string? nameOverride = null)
     {
         var name = nameOverride ?? CppParameterName(parameter, index);
+        if (parameter.IsBitset)
+        {
+            return $"std::bitset<{parameter.BitsetBits}>({name})";
+        }
+
         if (parameter.IsMap)
         {
             var mapName = $"hs_map{index}";
