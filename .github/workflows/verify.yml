@@ -31,72 +31,72 @@ jobs:
           dotnet-version: '10.0.x'
 
       - name: Version
-        working-directory: Bindings.Generator
+        working-directory: BindingGenerator
         run: dotnet run --project src/Hosihikari.Bindings.Generator/Hosihikari.Bindings.Generator.csproj -c Release -- version
 
       - name: Validate fixture IR
-        working-directory: Bindings.Generator
+        working-directory: BindingGenerator
         run: dotnet run --project src/Hosihikari.Bindings.Generator/Hosihikari.Bindings.Generator.csproj -c Release -- validate-ir tests/fixtures/basic/ir-manifest.json tests/fixtures/basic
 
       - name: Emit fixture
-        working-directory: Bindings.Generator
+        working-directory: BindingGenerator
         run: dotnet run --project src/Hosihikari.Bindings.Generator/Hosihikari.Bindings.Generator.csproj -c Release -- emit tests/fixtures/basic/ir-manifest.json tests/fixtures/basic artifacts/emitted --abi-header ../BindingAbi/native/hosihikari_abi.h
 
       - name: Validate emitted coverage
-        working-directory: Bindings.Generator
+        working-directory: BindingGenerator
         run: dotnet run --project src/Hosihikari.Bindings.Generator/Hosihikari.Bindings.Generator.csproj -c Release -- validate-coverage artifacts/emitted/coverage/summary.json artifacts/emitted/coverage/manifest.jsonl
 
       - name: Compile shim stub
-        working-directory: Bindings.Generator
+        working-directory: BindingGenerator
         run: g++ -std=c++20 -c artifacts/emitted/shim/win-x64-server/binding_table.cpp -o artifacts/binding_table.o
 
       - name: Validate real-shim fixture IR
-        working-directory: Bindings.Generator
+        working-directory: BindingGenerator
         run: dotnet run --project src/Hosihikari.Bindings.Generator/Hosihikari.Bindings.Generator.csproj -c Release -- validate-ir tests/fixtures/real-shim/ir-manifest.json tests/fixtures/real-shim
 
       - name: Emit real-shim fixture
-        working-directory: Bindings.Generator
+        working-directory: BindingGenerator
         run: dotnet run --project src/Hosihikari.Bindings.Generator/Hosihikari.Bindings.Generator.csproj -c Release -- emit tests/fixtures/real-shim/ir-manifest.json tests/fixtures/real-shim artifacts/emitted-real --abi-header ../BindingAbi/native/hosihikari_abi.h --native-root tests/fixtures/real-shim/native
 
       - name: Compile real BindingShim
-        working-directory: Bindings.Generator
+        working-directory: BindingGenerator
         run: g++ -std=c++20 -I tests/fixtures/real-shim/native -c artifacts/emitted-real/shim/linux-x64-server/levilamina/binding_table.cpp -o artifacts/real-binding_table.o
 
       - name: Compile real-shim Interop
-        working-directory: Bindings.Generator
+        working-directory: BindingGenerator
         run: dotnet build tests/RealShimCheck/RealShimCheck.csproj -c Release -p:InteropDirectory=${{ github.workspace }}/BindingGenerator/artifacts/emitted-real/interop
 
       - name: Emit link-carrier fixture
-        working-directory: Bindings.Generator
+        working-directory: BindingGenerator
         run: dotnet run --project src/Hosihikari.Bindings.Generator/Hosihikari.Bindings.Generator.csproj -c Release -- emit tests/fixtures/real-shim/ir-manifest.json tests/fixtures/real-shim artifacts/emitted-linked --abi-header ../BindingAbi/native/hosihikari_abi.h --native-root tests/fixtures/real-shim/native --link-carrier
 
       - name: Link carrier BindingShim
-        working-directory: Bindings.Generator
+        working-directory: BindingGenerator
         run: |
           g++ -std=c++20 -fPIC -I tests/fixtures/real-shim/native -c artifacts/emitted-linked/shim/linux-x64-server/levilamina/binding_table.cpp -o artifacts/linked-binding_table.o
           g++ -std=c++20 -fPIC -I tests/fixtures/real-shim/native -c tests/fixtures/real-shim/native/carrier.cpp -o artifacts/carrier.o
           g++ -shared -o artifacts/liblinked-shim.so artifacts/linked-binding_table.o artifacts/carrier.o
 
       - name: Run link-carrier smoke
-        working-directory: Bindings.Generator
+        working-directory: BindingGenerator
         run: dotnet run --project tests/RealShimSmoke/RealShimSmoke.csproj -c Release -p:InteropDirectory=${{ github.workspace }}/BindingGenerator/artifacts/emitted-linked/interop -- ${{ github.workspace }}/BindingGenerator/artifacts/liblinked-shim.so
 
       - name: Validate symbol-dispatch fixture IR
-        working-directory: Bindings.Generator
+        working-directory: BindingGenerator
         run: dotnet run --project src/Hosihikari.Bindings.Generator/Hosihikari.Bindings.Generator.csproj -c Release -- validate-ir tests/fixtures/symbol-dispatch/ir-manifest.json tests/fixtures/symbol-dispatch
 
       - name: Emit symbol-dispatch fixture
-        working-directory: Bindings.Generator
+        working-directory: BindingGenerator
         run: dotnet run --project src/Hosihikari.Bindings.Generator/Hosihikari.Bindings.Generator.csproj -c Release -- emit tests/fixtures/symbol-dispatch/ir-manifest.json tests/fixtures/symbol-dispatch artifacts/symbol-dispatch-fixture --abi-header ../BindingAbi/native/hosihikari_abi.h --symbol-dispatch --target-module libsymbol-fixture.so
 
       - name: Build symbol-dispatch fixture
-        working-directory: Bindings.Generator
+        working-directory: BindingGenerator
         run: |
           g++ -std=c++20 -shared -fPIC -O0 -g -o artifacts/libsymbol-fixture.so tests/symbol-dispatch/linux-fixture.cpp
           g++ -std=c++20 -fPIC -shared -I artifacts/symbol-dispatch-fixture/shim/linux-x64-server/bedrock -o artifacts/libsymbol-shim.so artifacts/symbol-dispatch-fixture/shim/linux-x64-server/bedrock/binding_table.cpp
 
       - name: Run symbol-dispatch smoke
-        working-directory: Bindings.Generator
+        working-directory: BindingGenerator
         env:
           LD_LIBRARY_PATH: ${{ github.workspace }}/BindingGenerator/artifacts
         run: dotnet run --project tests/SymbolDispatchSmoke/SymbolDispatchSmoke.csproj -c Release -p:InteropDirectory=${{ github.workspace }}/BindingGenerator/artifacts/symbol-dispatch-fixture/interop -- ${{ github.workspace }}/BindingGenerator/artifacts/libsymbol-fixture.so ${{ github.workspace }}/BindingGenerator/artifacts/libsymbol-shim.so
@@ -175,11 +175,11 @@ jobs:
           rm -rf llvm/share llvm/lib/clang/*/lib
 
       - name: Build frontend
-        working-directory: Bindings.Generator
+        working-directory: BindingGenerator
         run: ./frontend/build.sh --llvm-root "${{ github.workspace }}/llvm"
 
       - name: Generate Linux IR
-        working-directory: Bindings.Generator
+        working-directory: BindingGenerator
         run: |
           ./frontend/run-endstone.sh \
             --endstone-root "${{ github.workspace }}/endstone" \
@@ -197,7 +197,7 @@ jobs:
           retention-days: 3
 
       - name: Emit from Linux IR
-        working-directory: Bindings.Generator
+        working-directory: BindingGenerator
         run: |
           dotnet run --project src/Hosihikari.Bindings.Generator/Hosihikari.Bindings.Generator.csproj -c Release -- \
             emit artifacts/endstone-linux-ir/ir-manifest.json \
@@ -208,11 +208,11 @@ jobs:
             --virtual-dispatch
 
       - name: Compare generated Interop
-        working-directory: Bindings.Generator
+        working-directory: BindingGenerator
         run: diff -ru ../EndstoneBinding/src/Hosihikari.Bindings.Endstone.Interop/Generated artifacts/emitted-linux/interop/endstone
 
       - name: Compile Linux BindingShim
-        working-directory: Bindings.Generator
+        working-directory: BindingGenerator
         run: |
           g++ -std=c++20 -shared -fPIC -O2 -pthread \
             -include ../EndstoneBinding/native/BindingShim/linux-compat.h \
@@ -226,7 +226,7 @@ jobs:
             -ldl
 
       - name: Inspect exported entry points
-        working-directory: Bindings.Generator
+        working-directory: BindingGenerator
         run: |
           nm -D --defined-only artifacts/libendstone-linux-shim.so \
             | grep -E 'hosihikari_(get_binding_table_v1|endstone_get_server)'
