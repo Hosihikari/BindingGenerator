@@ -400,8 +400,6 @@ def main():
         if not type_name or type_name.startswith("std::") or "(" in type_name or ")" in type_name:
             continue
         declaration_id = "bedrock:" + type_name
-        if declaration_id in symbol_declarations:
-            continue
         header_declaration = header_declarations.get(
             declaration_id
         ) or header_declarations_by_compact_id.get(declaration_id)
@@ -412,23 +410,34 @@ def main():
         if not layout or layout.get("size", 0) <= 0:
             continue
 
-        copied_declaration = copy.deepcopy(header_declaration)
-        # The demangler omits spaces after template commas; make the dependency id match
-        # the spelling used by the symbol signatures.
-        compact_name = re.sub(r",\s+", ",", copied_declaration.get("qualifiedName", ""))
-        if compact_name != copied_declaration.get("qualifiedName"):
-            copied_declaration["qualifiedName"] = compact_name
-            copied_declaration["id"] = "bedrock:" + compact_name
-            declaration_id = copied_declaration["id"]
-        symbol_records[configurations[0]].append(copied_declaration)
-        symbol_declarations[declaration_id] = copied_declaration
-        added_declarations += 1
+        if declaration_id in symbol_declarations:
+            # The RTTI walk already emitted a bare declaration for this base class. Keep it
+            # but take the header's abstract fact so ownership paths treat it correctly.
+            symbol_declarations[declaration_id]["abstract"] = header_declaration.get(
+                "abstract", symbol_declarations[declaration_id].get("abstract", False)
+            )
+        else:
+            copied_declaration = copy.deepcopy(header_declaration)
+            # The demangler omits spaces after template commas; make the dependency id match
+            # the spelling used by the symbol signatures.
+            compact_name = re.sub(r",\s+", ",", copied_declaration.get("qualifiedName", ""))
+            if compact_name != copied_declaration.get("qualifiedName"):
+                copied_declaration["qualifiedName"] = compact_name
+                copied_declaration["id"] = "bedrock:" + compact_name
+                declaration_id = copied_declaration["id"]
+            symbol_records[configurations[0]].append(copied_declaration)
+            symbol_declarations[declaration_id] = copied_declaration
+            added_declarations += 1
+
         clean_layout = {
             "size": layout.get("size", 0),
             "align": layout.get("align", 0),
             "fieldOffsets": [],
             "bases": [],
         }
+        header_bases = layout.get("bases", [])
+        if header_bases:
+            clean_layout["bases"] = copy.deepcopy(header_bases)
         for configuration in configurations:
             has_variant = any(
                 record.get("recordType") == "variant"
