@@ -64,11 +64,15 @@ public static class NativeEntryPoint
 
             // These virtual getters return std::vector<std::string> through the hidden sret
             // buffer. The shim copies the elements into a thread-local view that the managed
-            // side decodes immediately.
-            var addresses = platform?.getIPAddresses() ?? [];
-            var addressesAgain = platform?.getIPAddresses() ?? [];
-            var broadcast = platform?.getBroadcastAddresses() ?? [];
-            var userInput = platform?.getUserInput() ?? [];
+            // side decodes immediately. A header stub can share the signature with the symbol
+            // method, so resolve the bound overload by shape.
+            string[] Addresses() => (string[])Bound(platform!, nameof(AppPlatform), "getIPAddresses", "System.String[]");
+            string[] Broadcast() => (string[])Bound(platform!, nameof(AppPlatform), "getBroadcastAddresses", "System.String[]");
+            string[] UserInput() => (string[])Bound(platform!, nameof(AppPlatform), "getUserInput", "System.String[]");
+            var addresses = platform is null ? [] : Addresses();
+            var addressesAgain = platform is null ? [] : Addresses();
+            var broadcast = platform is null ? [] : Broadcast();
+            var userInput = platform is null ? [] : UserInput();
             var addressSample = addresses.Length > 0 ? addresses[0] : "";
 
             // ServerInstance exposes NonOwnerPointer results. The shim keeps the returned
@@ -121,9 +125,9 @@ public static class NativeEntryPoint
 
             // Core::PathBuffer<std::string> is a single string member; the shim reads it with
             // the std::string return ABI and releases it with the game's own string destructor.
-            var storagePath = platform?.getInternalStoragePath() ?? "";
-            var userdataPath = platform?.getUserdataPath() ?? "";
-            var currentStoragePath = platform?.getCurrentStoragePath() ?? "";
+            var storagePath = platform is null ? "" : (string)Bound(platform, nameof(AppPlatform), "getInternalStoragePath", "System.String");
+            var userdataPath = platform is null ? "" : (string)Bound(platform, nameof(AppPlatform), "getUserdataPath", "System.String");
+            var currentStoragePath = platform is null ? "" : (string)Bound(platform, nameof(AppPlatform), "getCurrentStoragePath", "System.String");
 
             var ok = textA.Length > 0
                 && textA == textB
@@ -210,5 +214,19 @@ public static class NativeEntryPoint
 
             return 1;
         }
+    }
+
+    /// <summary>
+    /// Finds the bound overload of a zero-argument method by its declared return type. Name
+    /// suffixes shift whenever the IR gains a stub with the same signature.
+    /// </summary>
+    private static object Bound(object target, string typeName, string methodName, string returnType)
+    {
+        var match = target.GetType().GetMethods().First(candidate =>
+            candidate.Name.StartsWith(methodName, StringComparison.Ordinal)
+            && candidate.GetParameters().Length == 0
+            && candidate.ReturnType.ToString() == returnType
+            && !candidate.GetCustomAttributes(typeof(ObsoleteAttribute), false).Any());
+        return match.Invoke(target, null)!;
     }
 }
