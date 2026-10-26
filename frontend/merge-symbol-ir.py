@@ -92,7 +92,7 @@ def main():
     # The Itanium RTTI walk leaves template base names in their encoded form when a
     # template argument is not a simple length-prefixed component. Those names are not
     # usable C++ class names, so drop their declarations and base references.
-    mangled_declaration = re.compile(r"^bedrock:(?:N\d|_Z)")
+    mangled_declaration = re.compile(r"^bedrock:(?:N\d|NSt|_Z)")
     for configuration in configurations:
         records = [
             record
