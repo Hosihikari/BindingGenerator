@@ -1297,7 +1297,12 @@ int main(int argc, char** argv) {
     }
     std::vector<std::string> Args = Opt.CompilerArgs;
     Args.emplace_back("-I" + Opt.Root);
-    Args.emplace_back("-std=c++20");
+    const bool HasStandard = std::any_of(Args.begin(), Args.end(), [](const std::string& Arg) {
+        return Arg.rfind("-std=", 0) == 0;
+    });
+    if (!HasStandard) {
+        Args.emplace_back("-std=c++20");
+    }
     Args.emplace_back("-fsyntax-only");
 
     std::unique_ptr<ASTUnit> AST = clang::tooling::buildASTFromCodeWithArgs(

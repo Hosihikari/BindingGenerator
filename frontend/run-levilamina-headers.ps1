@@ -199,7 +199,8 @@ if ($UseCompileCommands) {
 }
 else {
     $CompilerArgs = @(
-        "-std=c++20",
+        "-std=c++23",
+        "-Dnsel_CONFIG_SELECT_EXPECTED=nsel_EXPECTED_NONSTD",
         "-fms-extensions",
         "-fms-compatibility",
         "-fms-compatibility-version=19.44",
