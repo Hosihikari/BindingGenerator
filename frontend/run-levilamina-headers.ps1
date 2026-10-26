@@ -135,7 +135,10 @@ if (-not (Test-Path $Frontend)) {
 
 $Umbrella = Join-Path $Output "umbrella.hpp"
 New-Item -ItemType Directory -Force -Path $Output | Out-Null
-$UmbrellaText = ($Headers | ForEach-Object { "#include `"$_`"" }) -join "`n"
+# CommandOutput.h uses fmt::format_string without including fmt itself; the game's build
+# supplies it through its precompiled header, so provide it from the umbrella instead.
+$UmbrellaPrelude = @("#include <fmt/format.h>", "#include <fmt/args.h>")
+$UmbrellaText = ($UmbrellaPrelude + ($Headers | ForEach-Object { "#include `"$_`"" })) -join "`n"
 [System.IO.File]::WriteAllText($Umbrella, "$UmbrellaText`n", (New-Object System.Text.UTF8Encoding($false)))
 
 $VsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
