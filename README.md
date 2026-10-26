@@ -2,12 +2,12 @@
 
 [English](README.md) | [简体中文](README.zh_hans.md)
 
-The generator turns the versioned IR into the C ABI **BindingShim** and the native-style C# **Interop**. It does not produce the hand-written .NET Idiomatic layer.
+The generator turns the versioned IR into the C ABI **binding shim** and the native-style C# **Interop**. It does not produce the hand-written .NET Idiomatic layer.
 
 ## Boundary
 
 - **Input**: IR shards produced by the libTooling frontend, plus the IR library contract.
-- **Output**: generated C++ (BindingShim) and C# (Interop) sources. Both are committed in the binding repositories and verified by a CI diff.
+- **Output**: generated C++ (binding shim) and C# (Interop) sources. Both are committed in the binding repositories and verified by a CI diff.
 - **Not here**: the hand-written Idiomatic wrappers, the HostingShim, or any CLR hosting.
 - The IR library is a sibling checkout (`../Ir`); in CI it is pulled with `actions/checkout` using a pinned `repository`/`path`.
 
@@ -26,20 +26,20 @@ The generator turns the versioned IR into the C ABI **BindingShim** and the nati
 ```shell
 dotnet run --project src/Hosihikari.Bindings.Generator/Hosihikari.Bindings.Generator.csproj -c Release -- version
 dotnet run --project src/Hosihikari.Bindings.Generator/Hosihikari.Bindings.Generator.csproj -c Release -- validate-ir tests/fixtures/basic/ir-manifest.json tests/fixtures/basic
-dotnet run --project src/Hosihikari.Bindings.Generator/Hosihikari.Bindings.Generator.csproj -c Release -- emit tests/fixtures/basic/ir-manifest.json tests/fixtures/basic artifacts/emitted --abi-header ../Bindings.Abi/native/hosihikari_abi.h
+dotnet run --project src/Hosihikari.Bindings.Generator/Hosihikari.Bindings.Generator.csproj -c Release -- emit tests/fixtures/basic/ir-manifest.json tests/fixtures/basic artifacts/emitted --abi-header ../BindingAbi/native/hosihikari_abi.h
 ```
 
 `validate-ir` reads the manifest and every `*.jsonl` under the shard directory, then runs the IR validator. `validate-coverage` does the same for `coverage/summary.json` + `coverage/manifest.jsonl`.
 
-`emit` writes `interop/` (C#), `shim/` (C++ BindingShim), and `coverage/` (manifest + summary). Pass `--native-root <path>` to emit the real BindingShim for the IR's source files:
+`emit` writes `interop/` (C#), `shim/` (C++ binding shim), and `coverage/` (manifest + summary). Pass `--native-root <path>` to emit the real 绑定垫片 for the IR's source files:
 
 ```shell
 dotnet run --project src/Hosihikari.Bindings.Generator/Hosihikari.Bindings.Generator.csproj -c Release -- emit \
   artifacts/llapi-full-ir/ir-manifest.json artifacts/llapi-full-ir artifacts/llapi-real-shim \
-  --native-root C:/path/to/LeviLamina --abi-header ../Bindings.Abi/native/hosihikari_abi.h
+  --native-root C:/path/to/LeviLamina --abi-header ../BindingAbi/native/hosihikari_abi.h
 ```
 
-`--abi-header` points at `Hosihikari/Bindings.Abi`'s `native/hosihikari_abi.h`; the emitter copies it into every shim directory so the shim build stays self-contained. Generated C# references `Hosihikari.Bindings.Abi` for `StringView`, `ArrayView`, `SharedHandle`, and the version-checking `ShimLibrary` loader.
+`--abi-header` points at `Hosihikari/BindingAbi`'s `native/hosihikari_abi.h`; the emitter copies it into every shim directory so the shim build stays self-contained. Generated C# references `Hosihikari.Bindings.Abi` for `StringView`, `ArrayView`, `SharedHandle`, and the version-checking `ShimLibrary` loader.
 
 Without `--native-root`, `emit` writes the contract stubs used by the fixture CI, unless `--symbol-dispatch` is set.
 
@@ -50,7 +50,7 @@ Without `--native-root`, `emit` writes the contract stubs used by the fixture CI
 ```shell
 dotnet run --project src/Hosihikari.Bindings.Generator/Hosihikari.Bindings.Generator.csproj -c Release -- emit \
   artifacts/symbol-ir-1.21.3/merged-levi-final/ir-manifest.json artifacts/symbol-ir-1.21.3/merged-levi-final \
-  artifacts/symbol-dispatch --abi-header ../Bindings.Abi/native/hosihikari_abi.h \
+  artifacts/symbol-dispatch --abi-header ../BindingAbi/native/hosihikari_abi.h \
   --symbol-dispatch --target-module bedrock_server
 ```
 
@@ -58,7 +58,7 @@ Direct members resolve `module base + rva` on Windows or `module base + address`
 
 `tests/symbol-dispatch/run.ps1` builds a synthetic PE/PDB fixture, runs the symbol frontend, emits the dispatch shim, and runs the C# smoke test. `tests/fixtures/symbol-dispatch` plus `tests/symbol-dispatch/linux-fixture.cpp` cover the Linux resolver and vtable offset in the `cli` CI job. `tests/bds-smoke` runs the same shim inside a real 1.21.3 server: a LeviLamina `preload-native` mod hosts the CLR through `nethost`/`hostfxr`, calls the managed `BlockPos`/`ChunkPos`/`Vec3` projection through RVAs, invokes scalar, container, and `Core::PathBuffer<std::string>` getters on the live `AppPlatform` service object, and checks the returned storage, userdata, and current-storage paths.
 
-### Real BindingShim v1
+### Real 绑定垫片 v1
 
 - The C ABI is one versioned `HosihikariBindingTableV1` per carrier surface. Handles are `void*`; owned handles come from constructor factories and are released by the generated disposer. Table fields are named from the stable function identity (for example `hs_method_1a2b3c4d`), not from the slot ordinal; the ordinal remains only the physical array position, so adding a function does not rename existing call sites. Field strings are returned as borrowed `HosihikariStringView` values that the managed side copies immediately; string parameters are `(const char*, size_t)` UTF-8 pairs.
 - Constructors, destructors, public fields, and supported methods are projected. Members that the generator deliberately refuses are emitted as `NotSupportedException` stubs marked with `[Obsolete]` carrying the same reason; calling one produces compiler warning CS0618 and an IDE strikethrough, and projects can escalate it with `<WarningsAsErrors>CS0618</WarningsAsErrors>`. Constructors and methods accept multiple parameters. Constructors may take mutable and rvalue references to public declarations that have generated wrappers; the shim passes those parameters by dereferenced address. A method may return `void`, a fundamental, an enum, an opaque pointer, a string, or an eligible by-value record; a single-level `T*`/`T&` return to a public declaration surfaces as a typed borrowed wrapper (`T?`/`T`) whose `Dispose` only invalidates the wrapper and whose `ReleaseHandle` refuses borrowed handles, leaving ownership with the native side, and `optional_ref<T>` returns use the same wrapper path with the hidden presence flag; the public `(nint handle)` constructor remains the owning path for raw handles; single-level pointer parameters to public declarations are nullable (`T?`) and map null to a null pointer, while rvalue-reference parameters stay non-null wrappers and deeper indirection stays `nint`; accessible public bases, including transitive bases, receive `As<TBase>()` upcasts and polymorphic bases receive `TryAs<TDerived>()` RTTI downcasts for every transitive derived class, both returning borrowed wrappers; string results are copied into a thread-local shim buffer and the managed wrapper copies them immediately. Multiple string parameters are pinned independently per call; UTF-8 encodings of at most 256 bytes use a stack buffer instead of a per-call byte array. Enums use their underlying integer ABI. By-value record arguments are dereferenced from caller handles; by-value record results are copied into shim-owned objects that the managed wrapper can dispose. Record and container fields are exposed through borrowed address views; array fields are getter-only. `std::vector<T>` results use a borrowed `HosihikariArrayView` and surface as `T[]`/`string[]`/`nint[]`, including pointer elements, with empty results returning `Array.Empty<T>()`; vector parameters expand to a hidden `(element pointer, count)` pair and surface as `T[]`/`string[]`/`Variant[]`, including record and variant elements, with multiple vector parameters per call; each vector gets its own pinned element view; `std::initializer_list<T>` parameters stay unsupported because C++ cannot construct a runtime-length initializer list, but the affected classes expose equivalent vector overloads; `std::vector<std::pair<string, uint64>>` parameters surface as `KeyValuePair<string, ulong>[]`, with string keys and values sharing one UTF-8 arena per call; `std::optional<T>` parameters and results use a hidden presence flag; managed values are nullable scalars, `string?`, or owned `T?`; `std::unique_ptr<T>` results release ownership as an owned `T` handle; `unique_ptr` parameters transfer ownership from the wrapper, which releases its handle before the call and throws if reused; abstract interfaces with a public virtual destructor receive a disposer when returned this way. `std::shared_ptr<T>` results return a `SharedHandle` that keeps one shared reference alive and releases it on dispose; `shared_ptr`/`weak_ptr` parameters accept a `SharedHandle`, and the shim recovers the typed reference through a type-checked holder. `optional_ref<T>` parameters and results use the optional presence flag with borrowed references; managed values are `T?`/`nint?`. `nonstd::expected_lite::expected<T, E>` results return `T` and surface failures as `InvalidOperationException` carrying the native error message; `E` may be `ll::Error` or a string. `std::variant<T...>` values with string, scalar/enum, pointer, and copyable-record alternatives receive a generated owned wrapper with per-alternative `Create`/`As`/`Is`, `Index`, and `Dispose`; by-value parameters copy, `const&` parameters borrow, and by-value results copy into an owned handle. A public copyable class whose members are inherited (no recorded fields, constructors, or destructor) is accepted as a record alternative; the generator emits the destroy function needed by its `Dispose`. `endstone::NotNull<T>`/`Nullable<T>` returns use `SharedHandle`; sequence returns distinguish borrowed pointer elements (`nint[]`), owned elements (`T[]`/`T?[]` for records and `unique_ptr`), and shared elements (`SharedHandle[]` for `shared_ptr`/`NotNull`/`Nullable`); `unordered_set<T*>` returns borrowed address arrays. `std::chrono::time_point<std::chrono::system_clock>` maps to Unix milliseconds; other clocks map to their native tick count; `std::chrono::duration` maps to its native count; `optional` time values use `long?`. Returned `std::function<R(Args...)>` values become generated callable wrappers with `Invoke` and `Dispose`. Reference returns of variant, callable, chrono, `typeid_t`, `strong_ordering`, and filesystem-path values are copied through the same projection instead of surfacing as opaque handles; pointers to those types remain borrowed handles. `Bedrock::typeid_t<C>` maps to `ushort`, `std::strong_ordering` to `sbyte` (-1/0/1), and `std::filesystem::path` to a UTF-8 string; optional forms follow the scalar/string rules. `std::unordered_map<K, V>` parameters and results use a managed `Dictionary<K, V>`; keys support string/scalar/pointer and values support string/scalar/pointer, record copies, and variant copies. Map parameters reuse the vector arena strategy: string keys and values share one UTF-8 arena per call, and maps of at most 16 entries use a stackalloc `MapEntry` buffer. Reference and pointer results keep a borrowed handle when the entry types cannot be projected.
@@ -72,7 +72,7 @@ Direct members resolve `module base + rva` on Windows or `module base + address`
 
 ## Local LLAPI slice
 
-`frontend/run-local.ps1` parses `ll/api/event/Event.h`, writes IR under `artifacts/llapi-ir`, and validates it. `frontend/run-umbrella.ps1 -Module ll/api` parses the full `src/ll/api` plus `src-server/ll/api` umbrella, reuses the LeviLamina `compile_commands.json`, and currently yields 1,530 declarations / 6,145 members at IR 1.5.1. Public record types referenced by value from filtered signatures are added with their constructors, destructor, and fields even when their headers sit outside the module filter. The IR records each function's and method's `inline`/`defined`/`consteval` facts, member templates, ref qualifiers, enum underlying types, and class traits (`abstract`, `copyConstructible`), which the BindingShim planner uses for eligibility and ownership.
+`frontend/run-local.ps1` parses `ll/api/event/Event.h`, writes IR under `artifacts/llapi-ir`, and validates it. `frontend/run-umbrella.ps1 -Module ll/api` parses the full `src/ll/api` plus `src-server/ll/api` umbrella, reuses the LeviLamina `compile_commands.json`, and currently yields 1,530 declarations / 6,145 members at IR 1.5.1. Public record types referenced by value from filtered signatures are added with their constructors, destructor, and fields even when their headers sit outside the module filter. The IR records each function's and method's `inline`/`defined`/`consteval` facts, member templates, ref qualifiers, enum underlying types, and class traits (`abstract`, `copyConstructible`), which the 绑定垫片 planner uses for eligibility and ownership.
 
 ```shell
 powershell -File frontend/run-umbrella.ps1 -Module ll/api -Output artifacts/llapi-full-ir
@@ -90,10 +90,10 @@ The complete LLAPI umbrella currently selects 496 link-safe functions, or 3,819 
 
 ## Related repositories
 
-- `Hosihikari/Bindings.Ir`: schema, models, reader/writer, validator.
-- `Hosihikari/Bindings.Abi`: shared ABI value types, loader, and native header.
-- `Hosihikari/Bindings.Endstone`: the Endstone surface.
-- `Hosihikari/Bindings.LeviLamina`: the LeviLamina surface.
+- `Hosihikari/BindingIr`: schema, models, reader/writer, validator.
+- `Hosihikari/BindingAbi`: shared ABI value types, loader, and native header.
+- `Hosihikari/EndstoneBinding`: the Endstone surface.
+- `Hosihikari/LeviLaminaBinding`: the LeviLamina surface.
 
 ## Licence
 

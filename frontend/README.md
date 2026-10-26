@@ -46,7 +46,7 @@ For the Endstone Linux configuration:
   --output artifacts/endstone-linux-ir
 ```
 
-The script emits `linux-x64-server` IR and validates it with the .NET CLI. On libstdc++, `--compat-include` can force-include headers such as the Endstone `std::floorf` compatibility shim from `Hosihikari/Bindings.Endstone`.
+The script emits `linux-x64-server` IR and validates it with the .NET CLI. On libstdc++, `--compat-include` can force-include headers such as the Endstone `std::floorf` compatibility shim from `Hosihikari/EndstoneBinding`.
 
 ## Symbol prototype (Bedrock 1.21.3)
 

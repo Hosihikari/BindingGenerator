@@ -16,7 +16,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="../../../../Bindings.Abi/src/Hosihikari.Bindings.Abi/Hosihikari.Bindings.Abi.csproj" />
+    <ProjectReference Include="../../../../BindingAbi/src/Hosihikari.Bindings.Abi/Hosihikari.Bindings.Abi.csproj" />
   </ItemGroup>
 
 </Project>

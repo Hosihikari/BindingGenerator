@@ -110,7 +110,7 @@ For the 1.21.3 slice, `Actor` gets size 1096, base `ActorStatusProvider`, and it
 ./frontend/run-symbols.ps1 -Pdb <pdb> -Exe <exe> -Elf <debug> -IrOutput artifacts/symbol-ir/ir -NoPrototype
 dotnet run --project ../src/Hosihikari.Bindings.Generator/Hosihikari.Bindings.Generator.csproj -c Release -- `
   emit artifacts/symbol-ir/ir/ir-manifest.json artifacts/symbol-ir/ir artifacts/symbol-dispatch `
-  --abi-header ../../Bindings.Abi/native/hosihikari_abi.h `
+  --abi-header ../../BindingAbi/native/hosihikari_abi.h `
   --symbol-dispatch --target-module bedrock_server
 ```
 
