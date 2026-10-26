@@ -242,54 +242,113 @@ static List<IrRecord> AddRecordSupport(List<IrRecord> records, IrManifest manife
             continue;
         }
 
+        // A header-declared destructor or copy constructor usually has no symbol of its own.
+        // Attach the resolved support symbol to that member instead of emitting a second copy.
+        // Only public members qualify: a private destructor keeps the synthetic public one.
+        var existing = records.OfType<MemberRecord>()
+            .Where(member => member.DeclarationId == declaration.Id)
+            .ToList();
+
         foreach (var (configuration, support) in byConfiguration)
         {
             if (support.Destructor is { } destructor)
             {
-                additions.Add(new MemberRecord
+                var target = existing.FirstOrDefault(member =>
+                    member.Kind == "destructor"
+                    && member.Access == "public"
+                    && member.Configuration == configuration
+                    && !HasSupportSymbol(member));
+                if (target is not null)
                 {
-                    Id = declaration.Id + "@support:destructor",
-                    DeclarationId = declaration.Id,
-                    Configuration = configuration,
-                    Kind = "destructor",
-                    Name = "~" + name,
-                    Access = "public",
-                    Symbol = destructor.Symbol,
-                    Rva = destructor.Rva,
-                    Address = destructor.Address,
-                    Signature = new SignatureInfo
-                    {
-                        Canonical = name + "::~" + name,
-                        ReturnType = "void",
-                    },
-                });
+                    ApplySupport(target, destructor);
+                }
+                else
+                {
+                    additions.Add(SupportMember(declaration, name, configuration, destructor, copy: false));
+                }
             }
 
             if (support.CopyConstructor is { } copy)
             {
-                additions.Add(new MemberRecord
+                var target = existing.FirstOrDefault(member =>
+                    member.Kind == "constructor"
+                    && member.Access == "public"
+                    && member.Configuration == configuration
+                    && !HasSupportSymbol(member)
+                    && IsCopyConstructorOf(member, name));
+                if (target is not null)
                 {
-                    Id = declaration.Id + "@support:copyConstructor",
-                    DeclarationId = declaration.Id,
-                    Configuration = configuration,
-                    Kind = "constructor",
-                    Name = name,
-                    Access = "public",
-                    Symbol = copy.Symbol,
-                    Rva = copy.Rva,
-                    Address = copy.Address,
-                    Signature = new SignatureInfo
-                    {
-                        Canonical = name + "::" + name,
-                        ReturnType = "void",
-                        Parameters = [new ParameterInfo { Type = "const " + name + " &" }],
-                    },
-                });
+                    ApplySupport(target, copy);
+                }
+                else
+                {
+                    additions.Add(SupportMember(declaration, name, configuration, copy, copy: true));
+                }
             }
         }
     }
 
     return additions.Count == 0 ? records : [.. records, .. additions];
+
+    bool HasSupportSymbol(MemberRecord member) =>
+        !string.IsNullOrWhiteSpace(member.Symbol) || member.Rva is not null || member.Address is not null;
+
+    bool IsCopyConstructorOf(MemberRecord member, string name)
+    {
+        var parameters = member.Signature?.Parameters;
+        if (parameters is not { Count: 1 })
+        {
+            return false;
+        }
+
+        var type = parameters[0].Type.Trim();
+        while (type.EndsWith("&", StringComparison.Ordinal))
+        {
+            type = type[..^1].TrimEnd();
+        }
+
+        return type.Replace("const ", "", StringComparison.Ordinal)
+            .Replace(" const", "", StringComparison.Ordinal)
+            .Trim() == name;
+    }
+
+    void ApplySupport(MemberRecord member, IrSupportSymbol support)
+    {
+        member.Symbol = support.Symbol;
+        member.Rva = support.Rva;
+        member.Address = support.Address;
+    }
+
+    MemberRecord SupportMember(
+        DeclarationRecord declaration,
+        string name,
+        string configuration,
+        IrSupportSymbol support,
+        bool copy) =>
+        new()
+        {
+            Id = declaration.Id + (copy ? "@support:copyConstructor" : "@support:destructor"),
+            DeclarationId = declaration.Id,
+            Configuration = configuration,
+            Kind = copy ? "constructor" : "destructor",
+            Name = copy ? name : "~" + name,
+            Access = "public",
+            Symbol = support.Symbol,
+            Rva = support.Rva,
+            Address = support.Address,
+            Signature = copy
+                ? new SignatureInfo
+                {
+                    Canonical = name + "::" + name,
+                    ReturnType = "void",
+                    Parameters = [new ParameterInfo { Type = "const " + name + " &" }],
+                }
+                : new SignatureInfo
+                {
+                    Canonical = name + "::~" + name,
+                    ReturnType = "void",
+                },
+        };
 }
 
 static List<IrRecord> AddStaticFields(List<IrRecord> records, IrManifest manifest)
