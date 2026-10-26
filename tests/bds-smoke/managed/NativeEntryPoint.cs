@@ -129,6 +129,40 @@ public static class NativeEntryPoint
             var userdataPath = platform is null ? "" : (string)Bound(platform, nameof(AppPlatform), "getUserdataPath", "System.String");
             var currentStoragePath = platform is null ? "" : (string)Bound(platform, nameof(AppPlatform), "getCurrentStoragePath", "System.String");
 
+            // A static field whose type is not projected still resolves through its data
+            // symbol and surfaces the storage address. NORMAL is Facing's unit vector table.
+            var facingAddress = Facing.NORMAL_Address;
+            var facingOk = facingAddress != 0;
+
+            // Value-type round trips over the register and sret paths, plus field access.
+            using var unitX = Vec3.UNIT_X;
+            using var zero = Vec3.ZERO;
+            var unitLength = unitX.length();
+            var zeroLength = zero.length();
+            using var sum = BlockPos.Create(1.0f, 2.0f, 3.0f);
+            var summed = sum.x + sum.y + sum.z;
+            var valueTypesOk = MathF.Abs(unitLength - 1.0f) < 0.01f
+                && zeroLength == 0.0f
+                && summed == 6.0f;
+
+            // std::string by-value returns from both a member and a static member.
+            var semVersionOk = false;
+            try
+            {
+                using var version = SemVersion.Create(1, 2, 3, "", "");
+                var rendered = version.asString_d1ecd681();
+                semVersionOk = rendered.Contains("1.2.3", StringComparison.Ordinal);
+            }
+            catch (Exception)
+            {
+                semVersionOk = false;
+            }
+
+            // A static string hashing helper exercises the scalar-in, scalar-out path.
+            var hashOk = HashedString.computeHash("starlight") is var hashA
+                && hashA == HashedString.computeHash("starlight")
+                && hashA != HashedString.computeHash("starlight2");
+
             var ok = textA.Length > 0
                 && textA == textB
                 && textA != textC
@@ -155,7 +189,11 @@ public static class NativeEntryPoint
                 && secureStorageOk
                 && staticConstantsOk
                 && itemLiveOk
-                && staticStringOk;
+                && staticStringOk
+                && facingOk
+                && valueTypesOk
+                && semVersionOk
+                && hashOk;
             var result =
                 "load=managed\n"
                 + $"a={textA}\n"
@@ -190,6 +228,10 @@ public static class NativeEntryPoint
                 + $"staticConstants={staticConstantsOk}\n"
                 + $"itemLive={itemLiveOk}\n"
                 + $"staticString={staticStringOk}\n"
+                + $"facing={facingOk}\n"
+                + $"valueTypes={valueTypesOk}\n"
+                + $"semVersion={semVersionOk}\n"
+                + $"hash={hashOk}\n"
                 + $"stable={eduMode == eduModeAgain && maxRequests == maxRequestsAgain && addresses.SequenceEqual(addressesAgain)}\n"
                 + $"result={(ok ? "OK" : "FAIL")}\n";
             if (resultPath is not null)
