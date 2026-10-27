@@ -70,6 +70,19 @@ python frontend/api-whitelist.py --root <levilamina-26.51-checkout> --output art
 
 For the 26.51.7 checkout it yields 39,319 usable markers (32,817 `MCAPI`, 6,476 `MCFOLD`, 26 `MCTAPI`) against 18,683 `MCNAPI` markers, spread over 6,043 scopes in 5,888 headers. 2,199 scopes carry at least five usable markers and account for 79.9% of them, so `mcapi-scopes.tsv` ranks the scopes worth adding to a header slice. The default `--sources` covers `src/mc` and the `src-server/mc` overlay; `src-client/mc` stays out of the server whitelist. Client-only sections inside `src/mc` are guarded by `LL_PLAT_C`, which the `client_only` column flags; those are 6.5% of the usable markers.
 
+## Class candidates
+
+`frontend/class-candidates.py` ranks what the selected class list still leaves out. Symbol discovery reports RTTI spellings, not declarations — `VBlockDescriptor` carries the kind letter, `ScriptActor::ScriptModuleMinecraft` reverses the namespace — so the script resolves each spelling against the header tree and keeps only types that have both a symbol and a declaration. Library namespaces are dropped.
+
+```powershell
+python frontend/class-candidates.py --root <levilamina-checkout> `
+  --classes artifacts/symbol-classes-1.21.3.tsv `
+  --selected ../Binding.Bedrock/scripts/classes-1.21.3.txt `
+  --output artifacts/class-candidates-1.21.3.tsv
+```
+
+Against the v0.13.5 checkout, 7,108 header types match 5,967 discovered names; 4,608 types remain unselected and carry 32,892 symbol hits. 273 of them reach at least 20 hits, which is the size the next batch is drawn from. The counts rank candidates; discovery spellings overlap, so they are not a coverage figure.
+
 The 26.51 server binaries are the only other candidate source, and they are stripped: `.dynsym` holds 392 entries, there is no `.symtab`, and `.gnu_debuglink` names a file Mojang does not publish. The markers in the generated headers are therefore the availability record for that version.
 
 Spot check: the prelink output of the existing carrier builds carries 74 runtime imports, and every one that maps to a header declaration is usable — 49 rows, none `MCNAPI`. The remainder are a helper template declared without a marker and names the matcher does not resolve.
