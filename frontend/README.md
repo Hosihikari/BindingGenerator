@@ -72,6 +72,8 @@ For the 26.51.7 checkout it yields 39,319 usable markers (32,817 `MCAPI`, 6,476 
 
 The 26.51 server binaries are the only other candidate source, and they are stripped: `.dynsym` holds 392 entries, there is no `.symtab`, and `.gnu_debuglink` names a file Mojang does not publish. The markers in the generated headers are therefore the availability record for that version.
 
+Spot check: the prelink output of the existing carrier builds carries 74 runtime imports, and every one that maps to a header declaration is usable — 49 rows, none `MCNAPI`. The remainder are a helper template declared without a marker and names the matcher does not resolve.
+
 The generator's `emit --symbol-dispatch` mode turns that IR into a shim that does not include game headers: direct calls use the module base plus `rva`/`address` (or `GetProcAddress`/`dlsym` on the recorded symbol), and virtual calls use the per-configuration `vtableIndex`. `tests/symbol-dispatch/run.ps1` exercises the Windows PE/PDB path end-to-end with a synthetic fixture; the `cli` CI job runs the Linux fixture and resolver smoke.
 
 ## Current state
