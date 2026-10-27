@@ -73,9 +73,20 @@ def main():
     parser.add_argument("--header", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--classes", default="Actor,BlockPos")
+    # A comma list stops working past a few thousand names: the Windows command line caps
+    # at 32,767 characters and the class set keeps growing.
+    parser.add_argument("--classes-file", default="")
     args = parser.parse_args()
 
-    classes = [item.strip() for item in args.classes.split(",") if item.strip()]
+    if args.classes_file:
+        with open(args.classes_file, encoding="utf-8") as stream:
+            classes = [
+                line.strip()
+                for line in stream
+                if line.strip() and not line.strip().startswith("#")
+            ]
+    else:
+        classes = [item.strip() for item in args.classes.split(",") if item.strip()]
     with open(os.path.join(args.symbol, "ir-manifest.json"), encoding="utf-8") as stream:
         symbol_manifest = json.load(stream)
     with open(os.path.join(args.header, "ir-manifest.json"), encoding="utf-8") as stream:
