@@ -54,8 +54,8 @@ try {
         --classes FixtureBlock
     if ($LASTEXITCODE -ne 0) { throw "merge-symbol-ir.py exited with $LASTEXITCODE" }
 
-    $AbiHeader = Join-Path $RepoRoot "..\Bindings.Abi\native\hosihikari_abi.h"
-    if (-not (Test-Path $AbiHeader)) { throw "hosihikari_abi.h was not found under ..\Bindings.Abi." }
+    $AbiHeader = Join-Path $RepoRoot "..\Binding.Abi\native\hosihikari_abi.h"
+    if (-not (Test-Path $AbiHeader)) { throw "hosihikari_abi.h was not found under ..\Binding.Abi." }
 
     dotnet run --project (Join-Path $RepoRoot "src\Hosihikari.Bindings.Generator\Hosihikari.Bindings.Generator.csproj") -c Release -- `
         emit (Join-Path $MergedDirectory "ir-manifest.json") $MergedDirectory $DispatchDirectory `

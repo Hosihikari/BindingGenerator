@@ -12,94 +12,94 @@ jobs:
       - name: Generator
         uses: actions/checkout@v4
         with:
-          path: BindingGenerator
+          path: Binding.Generator
 
       - name: IR contract
         uses: actions/checkout@v4
         with:
           repository: Hosihikari/BindingIr
-          path: BindingIr
+          path: Binding.Ir
 
       - name: ABI contract
         uses: actions/checkout@v4
         with:
           repository: Hosihikari/BindingAbi
-          path: BindingAbi
+          path: Binding.Abi
 
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '10.0.x'
 
       - name: Version
-        working-directory: BindingGenerator
+        working-directory: Binding.Generator
         run: dotnet run --project src/Hosihikari.Bindings.Generator/Hosihikari.Bindings.Generator.csproj -c Release -- version
 
       - name: Validate fixture IR
-        working-directory: BindingGenerator
+        working-directory: Binding.Generator
         run: dotnet run --project src/Hosihikari.Bindings.Generator/Hosihikari.Bindings.Generator.csproj -c Release -- validate-ir tests/fixtures/basic/ir-manifest.json tests/fixtures/basic
 
       - name: Emit fixture
-        working-directory: BindingGenerator
-        run: dotnet run --project src/Hosihikari.Bindings.Generator/Hosihikari.Bindings.Generator.csproj -c Release -- emit tests/fixtures/basic/ir-manifest.json tests/fixtures/basic artifacts/emitted --abi-header ../BindingAbi/native/hosihikari_abi.h
+        working-directory: Binding.Generator
+        run: dotnet run --project src/Hosihikari.Bindings.Generator/Hosihikari.Bindings.Generator.csproj -c Release -- emit tests/fixtures/basic/ir-manifest.json tests/fixtures/basic artifacts/emitted --abi-header ../Binding.Abi/native/hosihikari_abi.h
 
       - name: Validate emitted coverage
-        working-directory: BindingGenerator
+        working-directory: Binding.Generator
         run: dotnet run --project src/Hosihikari.Bindings.Generator/Hosihikari.Bindings.Generator.csproj -c Release -- validate-coverage artifacts/emitted/coverage/summary.json artifacts/emitted/coverage/manifest.jsonl
 
       - name: Compile shim stub
-        working-directory: BindingGenerator
+        working-directory: Binding.Generator
         run: g++ -std=c++20 -c artifacts/emitted/shim/win-x64-server/binding_table.cpp -o artifacts/binding_table.o
 
       - name: Validate real-shim fixture IR
-        working-directory: BindingGenerator
+        working-directory: Binding.Generator
         run: dotnet run --project src/Hosihikari.Bindings.Generator/Hosihikari.Bindings.Generator.csproj -c Release -- validate-ir tests/fixtures/real-shim/ir-manifest.json tests/fixtures/real-shim
 
       - name: Emit real-shim fixture
-        working-directory: BindingGenerator
-        run: dotnet run --project src/Hosihikari.Bindings.Generator/Hosihikari.Bindings.Generator.csproj -c Release -- emit tests/fixtures/real-shim/ir-manifest.json tests/fixtures/real-shim artifacts/emitted-real --abi-header ../BindingAbi/native/hosihikari_abi.h --native-root tests/fixtures/real-shim/native
+        working-directory: Binding.Generator
+        run: dotnet run --project src/Hosihikari.Bindings.Generator/Hosihikari.Bindings.Generator.csproj -c Release -- emit tests/fixtures/real-shim/ir-manifest.json tests/fixtures/real-shim artifacts/emitted-real --abi-header ../Binding.Abi/native/hosihikari_abi.h --native-root tests/fixtures/real-shim/native
 
       - name: Compile real BindingShim
-        working-directory: BindingGenerator
+        working-directory: Binding.Generator
         run: g++ -std=c++20 -I tests/fixtures/real-shim/native -c artifacts/emitted-real/shim/linux-x64-server/levilamina/binding_table.cpp -o artifacts/real-binding_table.o
 
       - name: Compile real-shim Interop
-        working-directory: BindingGenerator
-        run: dotnet build tests/RealShimCheck/RealShimCheck.csproj -c Release -p:InteropDirectory=${{ github.workspace }}/BindingGenerator/artifacts/emitted-real/interop
+        working-directory: Binding.Generator
+        run: dotnet build tests/RealShimCheck/RealShimCheck.csproj -c Release -p:InteropDirectory=${{ github.workspace }}/Binding.Generator/artifacts/emitted-real/interop
 
       - name: Emit link-carrier fixture
-        working-directory: BindingGenerator
-        run: dotnet run --project src/Hosihikari.Bindings.Generator/Hosihikari.Bindings.Generator.csproj -c Release -- emit tests/fixtures/real-shim/ir-manifest.json tests/fixtures/real-shim artifacts/emitted-linked --abi-header ../BindingAbi/native/hosihikari_abi.h --native-root tests/fixtures/real-shim/native --link-carrier
+        working-directory: Binding.Generator
+        run: dotnet run --project src/Hosihikari.Bindings.Generator/Hosihikari.Bindings.Generator.csproj -c Release -- emit tests/fixtures/real-shim/ir-manifest.json tests/fixtures/real-shim artifacts/emitted-linked --abi-header ../Binding.Abi/native/hosihikari_abi.h --native-root tests/fixtures/real-shim/native --link-carrier
 
       - name: Link carrier BindingShim
-        working-directory: BindingGenerator
+        working-directory: Binding.Generator
         run: |
           g++ -std=c++20 -fPIC -I tests/fixtures/real-shim/native -c artifacts/emitted-linked/shim/linux-x64-server/levilamina/binding_table.cpp -o artifacts/linked-binding_table.o
           g++ -std=c++20 -fPIC -I tests/fixtures/real-shim/native -c tests/fixtures/real-shim/native/carrier.cpp -o artifacts/carrier.o
           g++ -shared -o artifacts/liblinked-shim.so artifacts/linked-binding_table.o artifacts/carrier.o
 
       - name: Run link-carrier smoke
-        working-directory: BindingGenerator
-        run: dotnet run --project tests/RealShimSmoke/RealShimSmoke.csproj -c Release -p:InteropDirectory=${{ github.workspace }}/BindingGenerator/artifacts/emitted-linked/interop -- ${{ github.workspace }}/BindingGenerator/artifacts/liblinked-shim.so
+        working-directory: Binding.Generator
+        run: dotnet run --project tests/RealShimSmoke/RealShimSmoke.csproj -c Release -p:InteropDirectory=${{ github.workspace }}/Binding.Generator/artifacts/emitted-linked/interop -- ${{ github.workspace }}/Binding.Generator/artifacts/liblinked-shim.so
 
       - name: Validate symbol-dispatch fixture IR
-        working-directory: BindingGenerator
+        working-directory: Binding.Generator
         run: dotnet run --project src/Hosihikari.Bindings.Generator/Hosihikari.Bindings.Generator.csproj -c Release -- validate-ir tests/fixtures/symbol-dispatch/ir-manifest.json tests/fixtures/symbol-dispatch
 
       - name: Emit symbol-dispatch fixture
-        working-directory: BindingGenerator
-        run: dotnet run --project src/Hosihikari.Bindings.Generator/Hosihikari.Bindings.Generator.csproj -c Release -- emit tests/fixtures/symbol-dispatch/ir-manifest.json tests/fixtures/symbol-dispatch artifacts/symbol-dispatch-fixture --abi-header ../BindingAbi/native/hosihikari_abi.h --symbol-dispatch --target-module libsymbol-fixture.so
+        working-directory: Binding.Generator
+        run: dotnet run --project src/Hosihikari.Bindings.Generator/Hosihikari.Bindings.Generator.csproj -c Release -- emit tests/fixtures/symbol-dispatch/ir-manifest.json tests/fixtures/symbol-dispatch artifacts/symbol-dispatch-fixture --abi-header ../Binding.Abi/native/hosihikari_abi.h --symbol-dispatch --target-module libsymbol-fixture.so
 
       - name: Build symbol-dispatch fixture
-        working-directory: BindingGenerator
+        working-directory: Binding.Generator
         run: |
           g++ -std=c++20 -shared -fPIC -O0 -g -o artifacts/libsymbol-fixture.so tests/symbol-dispatch/linux-fixture.cpp
           g++ -std=c++20 -fPIC -shared -I artifacts/symbol-dispatch-fixture/shim/linux-x64-server/bedrock -o artifacts/libsymbol-shim.so artifacts/symbol-dispatch-fixture/shim/linux-x64-server/bedrock/binding_table.cpp
 
       - name: Run symbol-dispatch smoke
-        working-directory: BindingGenerator
+        working-directory: Binding.Generator
         env:
-          LD_LIBRARY_PATH: ${{ github.workspace }}/BindingGenerator/artifacts
-        run: dotnet run --project tests/SymbolDispatchSmoke/SymbolDispatchSmoke.csproj -c Release -p:InteropDirectory=${{ github.workspace }}/BindingGenerator/artifacts/symbol-dispatch-fixture/interop -- ${{ github.workspace }}/BindingGenerator/artifacts/libsymbol-fixture.so ${{ github.workspace }}/BindingGenerator/artifacts/libsymbol-shim.so
+          LD_LIBRARY_PATH: ${{ github.workspace }}/Binding.Generator/artifacts
+        run: dotnet run --project tests/SymbolDispatchSmoke/SymbolDispatchSmoke.csproj -c Release -p:InteropDirectory=${{ github.workspace }}/Binding.Generator/artifacts/symbol-dispatch-fixture/interop -- ${{ github.workspace }}/Binding.Generator/artifacts/libsymbol-fixture.so ${{ github.workspace }}/Binding.Generator/artifacts/libsymbol-shim.so
 
   endstone-linux-ir:
     runs-on: ubuntu-latest
@@ -107,25 +107,25 @@ jobs:
       - name: Generator
         uses: actions/checkout@v4
         with:
-          path: BindingGenerator
+          path: Binding.Generator
 
       - name: IR contract
         uses: actions/checkout@v4
         with:
           repository: Hosihikari/BindingIr
-          path: BindingIr
+          path: Binding.Ir
 
       - name: ABI contract
         uses: actions/checkout@v4
         with:
           repository: Hosihikari/BindingAbi
-          path: BindingAbi
+          path: Binding.Abi
 
       - name: Endstone bindings
         uses: actions/checkout@v4
         with:
           repository: Hosihikari/EndstoneBinding
-          path: EndstoneBinding
+          path: Binding.Endstone
           fetch-depth: 1
 
       - name: Endstone headers
@@ -175,47 +175,47 @@ jobs:
           rm -rf llvm/share llvm/lib/clang/*/lib
 
       - name: Build frontend
-        working-directory: BindingGenerator
+        working-directory: Binding.Generator
         run: ./frontend/build.sh --llvm-root "${{ github.workspace }}/llvm"
 
       - name: Generate Linux IR
-        working-directory: BindingGenerator
+        working-directory: Binding.Generator
         run: |
           ./frontend/run-endstone.sh \
             --endstone-root "${{ github.workspace }}/endstone" \
             --llvm-root "${{ github.workspace }}/llvm" \
             --expected-lite-include "${{ github.workspace }}/expected-lite/include" \
             --nlohmann-include "${{ github.workspace }}/nlohmann-json/include" \
-            --compat-include "${{ github.workspace }}/EndstoneBinding/native/BindingShim/linux-compat.h" \
+            --compat-include "${{ github.workspace }}/Binding.Endstone/native/BindingShim/linux-compat.h" \
             --output artifacts/endstone-linux-ir
 
       - name: Upload Linux IR
         uses: actions/upload-artifact@v4
         with:
           name: endstone-linux-ir
-          path: BindingGenerator/artifacts/endstone-linux-ir
+          path: Binding.Generator/artifacts/endstone-linux-ir
           retention-days: 3
 
       - name: Emit from Linux IR
-        working-directory: BindingGenerator
+        working-directory: Binding.Generator
         run: |
           dotnet run --project src/Hosihikari.Bindings.Generator/Hosihikari.Bindings.Generator.csproj -c Release -- \
             emit artifacts/endstone-linux-ir/ir-manifest.json \
             artifacts/endstone-linux-ir \
             artifacts/emitted-linux \
-            --abi-header ../BindingAbi/native/hosihikari_abi.h \
+            --abi-header ../Binding.Abi/native/hosihikari_abi.h \
             --native-root ../endstone \
             --virtual-dispatch
 
       - name: Compare generated Interop
-        working-directory: BindingGenerator
-        run: diff -ru ../EndstoneBinding/src/Hosihikari.Bindings.Endstone.Interop/Generated artifacts/emitted-linux/interop/endstone
+        working-directory: Binding.Generator
+        run: diff -ru ../Binding.Endstone/src/Hosihikari.Bindings.Endstone.Interop/Generated artifacts/emitted-linux/interop/endstone
 
       - name: Compile Linux BindingShim
-        working-directory: BindingGenerator
+        working-directory: Binding.Generator
         run: |
           g++ -std=c++20 -shared -fPIC -O2 -pthread \
-            -include ../EndstoneBinding/native/BindingShim/linux-compat.h \
+            -include ../Binding.Endstone/native/BindingShim/linux-compat.h \
             -I ../endstone/include \
             -I ../endstone/include/endstone \
             -I artifacts/endstone-generated/include \
@@ -226,7 +226,7 @@ jobs:
             -ldl
 
       - name: Inspect exported entry points
-        working-directory: BindingGenerator
+        working-directory: Binding.Generator
         run: |
           nm -D --defined-only artifacts/libendstone-linux-shim.so \
             | grep -E 'hosihikari_(get_binding_table_v1|endstone_get_server)'

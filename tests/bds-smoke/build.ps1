@@ -23,8 +23,8 @@ if (-not (Test-Path (Join-Path $ServerRoot "bedrock_server_mod.exe"))) {
     throw "bedrock_server_mod.exe was not found under $ServerRoot. Install LeviLamina and run PeEditor first."
 }
 
-$AbiHeader = Join-Path $RepoRoot "..\Bindings.Abi\native\hosihikari_abi.h"
-if (-not (Test-Path $AbiHeader)) { throw "hosihikari_abi.h was not found under ..\Bindings.Abi." }
+$AbiHeader = Join-Path $RepoRoot "..\Binding.Abi\native\hosihikari_abi.h"
+if (-not (Test-Path $AbiHeader)) { throw "hosihikari_abi.h was not found under ..\Binding.Abi." }
 
 $VsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
 $VsRoot = & $VsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
