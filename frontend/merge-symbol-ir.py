@@ -100,6 +100,23 @@ def main():
             raise SystemExit(f"symbol manifest has no shard for {configuration}")
         symbol_records[configuration] = load_records(os.path.join(args.symbol, shard["path"]))
 
+    # Existence checks below run once per class and once per header member. Scanning the
+    # record list each time made the merge quadratic and took tens of minutes once the class
+    # set passed three thousand, so keep the keys in sets and update them on append.
+    variant_ids = {configuration: set() for configuration in configurations}
+    member_ids = {configuration: set() for configuration in configurations}
+    for configuration in configurations:
+        for record in symbol_records[configuration]:
+            if record.get("recordType") == "variant" and record.get("declarationId"):
+                variant_ids[configuration].add(record["declarationId"])
+            elif record.get("recordType") == "member" and record.get("id"):
+                member_ids[configuration].add(record["id"])
+    variant_by_id = {configuration: {} for configuration in configurations}
+    for configuration in configurations:
+        for record in symbol_records[configuration]:
+            if record.get("recordType") == "variant" and record.get("declarationId"):
+                variant_by_id[configuration][record["declarationId"]] = record
+
     # The Itanium RTTI walk leaves template base names in their encoded form when a
     # template argument is not a simple length-prefixed component. Those names are not
     # usable C++ class names, so drop their declarations and base references.
@@ -188,13 +205,7 @@ def main():
                 }
 
             for configuration in configurations:
-                has_variant = any(
-                    record.get("recordType") == "variant"
-                    and record.get("declarationId") == class_id
-                    and record.get("configuration") == configuration
-                    for record in symbol_records[configuration]
-                )
-                if not has_variant:
+                if class_id not in variant_ids[configuration]:
                     variant = {
                         "recordType": "variant",
                         "declarationId": class_id,
@@ -208,20 +219,17 @@ def main():
                         variant["bases"] = copy.deepcopy(header_class_bases)
                         bases.extend(header_class_bases)
                     symbol_records[configuration].append(variant)
+                    variant_ids[configuration].add(class_id)
 
                 for header_member in header_members.get(class_id, []):
                     if header_member.get("kind") not in ("field", "static_field"):
                         continue
-                    if any(
-                        record.get("recordType") == "member"
-                        and record.get("id") == header_member.get("id")
-                        and record.get("configuration") == configuration
-                        for record in symbol_records[configuration]
-                    ):
+                    if header_member.get("id") in member_ids[configuration]:
                         continue
                     member = copy.deepcopy(header_member)
                     member["configuration"] = configuration
                     symbol_records[configuration].append(member)
+                    member_ids[configuration].add(member.get("id"))
                     copied_fields += 1
 
         for base in bases:
@@ -257,31 +265,22 @@ def main():
                 "bases": [],
             }
 
-        if usable_layout is not None:
-            for configuration, records in symbol_records.items():
-                for record in records:
-                    if (
-                        record.get("recordType") == "variant"
-                        and record.get("declarationId") == declaration_id
-                        and record.get("configuration") == configuration
-                    ):
-                        record["layout"] = copy.deepcopy(usable_layout)
-                        copied_layouts += 1
-
-        if header_bases:
-            for configuration, records in symbol_records.items():
-                for record in records:
-                    if (
-                        record.get("recordType") == "variant"
-                        and record.get("declarationId") == declaration_id
-                        and record.get("configuration") == configuration
-                    ):
-                        existing = record.setdefault("bases", [])
-                        known = {base.get("declarationId") for base in existing}
-                        for base in header_bases:
-                            if base.get("declarationId") not in known:
-                                existing.append(copy.deepcopy(base))
-                                known.add(base.get("declarationId"))
+        # Index the variants once instead of rescanning every record for each class: at
+        # three thousand classes the scan dominated the whole merge.
+        for configuration in configurations:
+            record = variant_by_id[configuration].get(declaration_id)
+            if record is None:
+                continue
+            if usable_layout is not None:
+                record["layout"] = copy.deepcopy(usable_layout)
+                copied_layouts += 1
+            if header_bases:
+                existing = record.setdefault("bases", [])
+                known = {base.get("declarationId") for base in existing}
+                for base in header_bases:
+                    if base.get("declarationId") not in known:
+                        existing.append(copy.deepcopy(base))
+                        known.add(base.get("declarationId"))
 
         existing_methods = {
             normalize_signature(record.get("id", ""))
@@ -450,13 +449,7 @@ def main():
         if header_bases:
             clean_layout["bases"] = copy.deepcopy(header_bases)
         for configuration in configurations:
-            has_variant = any(
-                record.get("recordType") == "variant"
-                and record.get("declarationId") == declaration_id
-                and record.get("configuration") == configuration
-                for record in symbol_records[configuration]
-            )
-            if has_variant:
+            if declaration_id in variant_ids[configuration]:
                 continue
             symbol_records[configuration].append(
                 {
@@ -467,7 +460,31 @@ def main():
                     "layout": copy.deepcopy(clean_layout),
                 }
             )
+            variant_ids[configuration].add(declaration_id)
             copied_layouts += 1
+
+    # The validator keys declarations and members by id and variants by declarationId; two
+    # symbols that demangle to the same member (an inner scope collapsing into its outer
+    # class, for instance) would otherwise produce the same key twice and fail the emit.
+    dropped = 0
+    for configuration in configurations:
+        seen = set()
+        unique = []
+        for record in symbol_records[configuration]:
+            key = (
+                record.get("declarationId") if record.get("recordType") == "variant" else record.get("id"),
+                configuration,
+                record.get("recordType"),
+            )
+            if key[0] is None:
+                unique.append(record)
+                continue
+            if key in seen:
+                dropped += 1
+                continue
+            seen.add(key)
+            unique.append(record)
+        symbol_records[configuration] = unique
 
     os.makedirs(args.output, exist_ok=True)
     shard_paths = {}
@@ -510,7 +527,7 @@ def main():
 
     print(
         f"merged: layouts={copied_layouts} fields={copied_fields} methods={copied_methods} "
-        f"declarations+={added_declarations}"
+        f"declarations+={added_declarations} duplicates dropped={dropped}"
     )
 
 

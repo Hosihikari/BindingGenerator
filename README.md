@@ -82,9 +82,9 @@ powershell -File frontend/smoke-shim.ps1 -IrDirectory artifacts/llapi-full-ir -L
 
 The complete LLAPI umbrella currently selects 496 link-safe functions, or 3,819 functions when built with `--link-carrier` against `LeviLamina.lib`. The slice covers `ll::event::EventId`, `ll::event::EventIdView`, `ll::hash_utils::HashedIdBase`, `ll::hash_utils::HashCombiner`, `ll::data::Version`, and the other eligible classes. The smoke test creates a native `EventId` from a managed string, reads its name and hash, compares two `HashedIdBase` views, calls `HashCombiner::hash()`, and round-trips `ll::data::Version` through string construction, `to_string()`, field getters, `valid(string)`, and `isIdenticalTo(Version)`. The remaining members keep their Interop stubs and are recorded in the coverage manifest with the `interop` emitter only.
 
-## Endstone surface
+## Endstone interop surface
 
-`frontend/run-endstone.ps1` parses the Endstone public umbrella (`include/endstone/endstone.hpp`) with expected-lite and nlohmann_json headers. `--virtual-dispatch` emits a link-free shim for the header-only virtual interfaces: inline members and virtual methods are called through the host-provided vtables, while non-virtual out-of-line members remain stubs. `frontend/build-endstone-shim.ps1` compiles the generated table against the Endstone headers. The Endstone 0.11.14 surface currently selects 2,364 functions, including eligible template instances, inline/constexpr static fields, assignment operators on non-template classes, and inheritance casts.
+`frontend/run-endstone.ps1` parses the Endstone public umbrella (`include/endstone/endstone.hpp`) with expected-lite and nlohmann_json headers. `--virtual-dispatch` emits a link-free shim for the header-only virtual interfaces: inline members and virtual methods are called through the host-provided vtables, while non-virtual out-of-line members remain stubs. `frontend/build-endstone-shim.ps1` compiles the generated table against the Endstone headers. The Endstone 0.11.14 interop surface currently selects 2,364 functions, including eligible template instances, inline/constexpr static fields, assignment operators on non-template classes, and inheritance casts.
 
 `frontend/run-endstone.sh` generates the `linux-x64-server` configuration on Linux. The `endstone-linux-ir` CI job builds the frontend against LLVM 23.1.3, generates and validates the IR, emits the Interop and shim, compares the emitted Interop byte-for-byte with the committed Windows-IR output, and compiles the shim. Fixed-width spellings, standard-library iterator types, and `system_clock::time_point` durations are normalized to the Windows form so declaration ids, table field hashes, and coverage stay identical across platforms (ADR 0018).
 
@@ -92,8 +92,8 @@ The complete LLAPI umbrella currently selects 496 link-safe functions, or 3,819 
 
 - `Hosihikari/BindingIr`: schema, models, reader/writer, validator.
 - `Hosihikari/BindingAbi`: shared ABI value types, loader, and native header.
-- `Hosihikari/EndstoneBinding`: the Endstone surface.
-- `Hosihikari/LeviLaminaBinding`: the LeviLamina surface.
+- `Hosihikari/EndstoneBinding`: the Endstone interop surface.
+- `Hosihikari/LeviLaminaBinding`: the LeviLamina interop surface.
 
 ## Licence
 

@@ -40,15 +40,20 @@ re_kind_prefix = re.compile(r"^(?:PE)?(?:AEB)?(?:SH)?([VU])(?=[A-Z])")
 
 
 def header_types(root, sources):
-    """Return {qualified name: relative file} for every declared type."""
+    """Return {qualified name: relative file} for every declared type.
+
+    The file column is relative to the parent of the first source root, which is the form
+    the layout header lists use (`mc/world/actor/Actor.h`, not `src/mc/world/actor/Actor.h`).
+    """
     types = {}
+    base = os.path.join(root, os.path.dirname(sources[0])) if sources else root
     for source in sources:
         for directory, _, files in os.walk(os.path.join(root, source)):
             for name in sorted(files):
                 if not name.endswith(".h"):
                     continue
                 path = os.path.join(directory, name)
-                relative = os.path.relpath(path, root).replace("\\", "/")
+                relative = os.path.relpath(path, base).replace("\\", "/")
                 frames = []
                 pending = None
                 depth = 0

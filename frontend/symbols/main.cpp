@@ -556,21 +556,29 @@ std::string discoverMsvcClass(const std::string& Mangled) {
     if (At == std::string::npos) {
         return {};
     }
-    std::string Class;
+    // Constructors, destructors and vtables have no method name before the class, so the
+    // class starts right after the two-character code. Every branch must run to the closing
+    // "@@" rather than the first '@': stopping early keeps only the innermost component and
+    // drops the namespace, which leaves namespaced classes with no symbols attached at all.
+    size_t Start;
     if (Mangled.rfind("??0", 0) == 0
         || Mangled.rfind("??1", 0) == 0) {
-        Class = Mangled.substr(3, At - 3);
+        Start = 3;
     } else if (Mangled.rfind("??_G", 0) == 0
         || Mangled.rfind("??_E", 0) == 0
         || Mangled.rfind("??_D", 0) == 0
         || Mangled.rfind("??_7", 0) == 0) {
-        Class = Mangled.substr(4, At - 4);
+        Start = 4;
     } else {
-        size_t DoubleAt = Mangled.find("@@", At);
-        if (DoubleAt == std::string::npos || DoubleAt <= At + 1) {
+        Start = At + 1;
+    }
+    std::string Class;
+    {
+        size_t DoubleAt = Mangled.find("@@", Start);
+        if (DoubleAt == std::string::npos || DoubleAt <= Start) {
             return {};
         }
-        Class = Mangled.substr(At + 1, DoubleAt - At - 1);
+        Class = Mangled.substr(Start, DoubleAt - Start);
     }
     if (Class.empty()
         || Class.find('?') != std::string::npos

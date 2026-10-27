@@ -62,7 +62,7 @@ The script emits `linux-x64-server` IR and validates it with the .NET CLI. On li
 
 ## API availability markers
 
-`frontend/api-whitelist.py` classifies a LeviLamina `mc/` header tree by its availability markers. `MCAPI` marks a declaration the runtime exports, `MCFOLD` an exported symbol subject to identical COMDAT folding, and `MCTAPI` an explicit template specialisation. `MCNAPI` is `[[deprecated]] MCAPI`: the declaration is known but the runtime does not expose it. The non-`MCNAPI` set is the usable capability surface of the shipped server and the whitelist a binding can target.
+`frontend/api-whitelist.py` classifies a LeviLamina `mc/` header tree by its availability markers. `MCAPI` marks a declaration the runtime exports, `MCFOLD` an exported symbol subject to identical COMDAT folding, and `MCTAPI` an explicit template specialisation. `MCNAPI` is `[[deprecated]] MCAPI`: the declaration is known but the runtime does not expose it. The non-`MCNAPI` set is the usable interop surface of the shipped server and the whitelist a binding can target.
 
 ```powershell
 python frontend/api-whitelist.py --root <levilamina-26.51-checkout> --output artifacts/mcapi-26.51
