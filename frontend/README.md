@@ -60,6 +60,18 @@ The script emits `linux-x64-server` IR and validates it with the .NET CLI. On li
 
 `frontend/headers/mc-26.51.7.txt` maps the same `mc/` slice to the LeviLamina 26.51.7 checkout. `-UseCompileCommands` reuses the checkout's server compile environment, and `-I src-server` precedes the `src` overlay. The probe yields 558 declarations / 7,367 members / 5,325 BindingShim functions at IR 1.5.1. A compile pass against the same headers reports 36 errors, concentrated in `brstd` wrappers, `ll::math` template instances, `PathBuffer`, and callback overloads; the remaining work is type-specific.
 
+## API availability markers
+
+`frontend/api-whitelist.py` classifies a LeviLamina `mc/` header tree by its availability markers. `MCAPI` marks a declaration the runtime exports, `MCFOLD` an exported symbol subject to identical COMDAT folding, and `MCTAPI` an explicit template specialisation. `MCNAPI` is `[[deprecated]] MCAPI`: the declaration is known but the runtime does not expose it. The non-`MCNAPI` set is the usable capability surface of the shipped server and the whitelist a binding can target.
+
+```powershell
+python frontend/api-whitelist.py --root <levilamina-26.51-checkout> --output artifacts/mcapi-26.51
+```
+
+For the 26.51.7 checkout it yields 39,319 usable markers (32,817 `MCAPI`, 6,476 `MCFOLD`, 26 `MCTAPI`) against 18,683 `MCNAPI` markers, spread over 6,043 scopes in 5,888 headers. 2,199 scopes carry at least five usable markers and account for 79.9% of them, so `mcapi-scopes.tsv` ranks the scopes worth adding to a header slice. The default `--sources` covers `src/mc` and the `src-server/mc` overlay; `src-client/mc` stays out of the server whitelist. Client-only sections inside `src/mc` are guarded by `LL_PLAT_C`, which the `client_only` column flags; those are 6.5% of the usable markers.
+
+The 26.51 server binaries are the only other candidate source, and they are stripped: `.dynsym` holds 392 entries, there is no `.symtab`, and `.gnu_debuglink` names a file Mojang does not publish. The markers in the generated headers are therefore the availability record for that version.
+
 The generator's `emit --symbol-dispatch` mode turns that IR into a shim that does not include game headers: direct calls use the module base plus `rva`/`address` (or `GetProcAddress`/`dlsym` on the recorded symbol), and virtual calls use the per-configuration `vtableIndex`. `tests/symbol-dispatch/run.ps1` exercises the Windows PE/PDB path end-to-end with a synthetic fixture; the `cli` CI job runs the Linux fixture and resolver smoke.
 
 ## Current state
