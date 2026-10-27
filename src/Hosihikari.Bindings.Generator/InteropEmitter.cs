@@ -107,7 +107,7 @@ internal static class InteropEmitter
 
             if (declarationMembers.Count > 0)
             {
-                var memberNames = BuildMemberNames(declarationMembers, plan);
+                var memberNames = BuildMemberNames(declarationMembers, plan, name.ClassName);
                 foreach (var member in declarationMembers)
                 {
                     if (member.Access != "public")
@@ -591,14 +591,23 @@ internal static class InteropEmitter
         return "delegate* unmanaged[Cdecl]<" + string.Join(", ", types) + ">";
     }
 
-    private static Dictionary<string, string> BuildMemberNames(IReadOnlyList<MemberRecord> members, AbiPlan plan)
+    private static Dictionary<string, string> BuildMemberNames(
+        IReadOnlyList<MemberRecord> members, AbiPlan plan, string className)
     {
         var result = new Dictionary<string, string>(StringComparer.Ordinal);
         var candidates = members
-            .Select(member => (
-                Member: member,
-                Name: MemberBaseName(member),
-                Key: MemberKey(member, plan)))
+            .Select(member =>
+            {
+                var baseName = MemberBaseName(member);
+                // C# forbids a member that shares its enclosing type's name. A class literally
+                // named Destroy would otherwise collide with its own disposer.
+                if (string.Equals(baseName, className, StringComparison.Ordinal))
+                {
+                    baseName += "_";
+                }
+
+                return (Member: member, Name: baseName, Key: MemberKey(member, plan));
+            })
             .ToList();
 
         foreach (var group in candidates.GroupBy(candidate => (candidate.Name, candidate.Key)))
