@@ -1,6 +1,6 @@
 param(
     [string]$LlvmRoot = "$env:LOCALAPPDATA\Temp\hosihikari-llvm\clang+llvm-23.1.3-x86_64-pc-windows-msvc",
-    [string]$LeviLaminaRoot = "C:\Users\root\source\repos\hosihikari\LeviLamina",
+    [string]$LeviLaminaRoot = (Join-Path $PSScriptRoot "..\..\Third\LeviLamina"),
     [string]$Output = "artifacts/llapi-full-ir"
 )
 

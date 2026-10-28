@@ -4,7 +4,7 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$OutputDll,
     [string]$LlvmRoot = "$env:LOCALAPPDATA\Temp\hosihikari-llvm\clang+llvm-23.1.3-x86_64-pc-windows-msvc",
-    [string]$EndstoneRoot = "C:\Users\root\source\repos\hosihikari\Endstone",
+    [string]$EndstoneRoot = (Join-Path $PSScriptRoot "..\..\Third\Endstone"),
     [string[]]$AdditionalIncludePath = @()
 )
 
