@@ -259,6 +259,10 @@ internal sealed class AbiFunction
     /// <summary>True when a field getter returns the address of the field storage.</summary>
     public bool FieldAddress { get; init; }
 
+    /// <summary>Bit width when the member is a std::bitset field accessed as an integer.</summary>
+    public bool IsBitset { get; init; }
+    public int BitsetBits { get; init; }
+
     public bool CreateViaBorrowedHolder { get; init; }
     public bool DestroyViaBorrowedHolder { get; init; }
     public bool ReturnExpected { get; init; }
@@ -2509,7 +2513,13 @@ internal sealed class AbiPlan
                 return false;
             }
 
-            if (current is '(' or ')' or '{' or '}' or '[' or ']' or '"' or '\''
+            // A template argument may be a function type: function_traits<void (T)>.
+            if (current is '(' or ')')
+            {
+                continue;
+            }
+
+            if (current is '{' or '}' or '[' or ']' or '"' or '\''
                 or ';' or '=' or '@' or '\\' or '#' or '?' or '!' or '%' or '^'
                 or '|' or '~' or '`')
             {
@@ -4868,9 +4878,19 @@ internal sealed class AbiPlan
         var type = field.Type!;
         var text = type.Canonical.Trim();
         var kind = AbiKind.Void;
+        var bitsetBits = 0;
         if (IsStringViewType(text) || IsStringType(text))
         {
             kind = AbiKind.StringView;
+        }
+        else if (TryParseBitset(StripTopLevelQualifiers(text).TrimEnd().TrimEnd('&', ' '), out bitsetBits))
+        {
+            // std::bitset is bit-packed; the member is aliased as the integer its storage
+            // holds, matching what the shim reads and writes.
+            kind = bitsetBits <= 8 ? AbiKind.U8
+                : bitsetBits <= 16 ? AbiKind.U16
+                : bitsetBits <= 32 ? AbiKind.U32
+                : AbiKind.U64;
         }
         else if (!TryMapEnumUnderlying(text, enumUnderlyingByName, out kind)
             && !TryMapFundamental(text, out kind))
@@ -4907,6 +4927,8 @@ internal sealed class AbiPlan
             ReturnKind = kind,
             NativeReturnType = text,
             Static = field.Static,
+            IsBitset = bitsetBits > 0,
+            BitsetBits = bitsetBits,
         };
 
         if (kind is AbiKind.StringView
@@ -5545,12 +5567,26 @@ internal sealed class AbiPlan
             return true;
         }
 
-        if (TryParseBitset(text, out var bitsetBits))
+        // A bitset travels as the integer its storage holds. A reference maps onto the same
+        // value; a pointer does not and stays opaque. The storage is read, so a mutable
+        // reference would lose the write back.
+        var bitsetText = StripTopLevelQualifiers(text).TrimEnd();
+        if (TryParseBitset(bitsetText.TrimEnd('&', ' '), out var bitsetBits))
         {
+            if (IsNonConstLValueReference(text))
+            {
+                reason = "mutable bitset references are not supported";
+                return false;
+            }
+
+            // Match the field width so a caller passes the same scalar type it reads back.
             parameter = new AbiParameter
             {
                 Name = name,
-                Kind = AbiKind.U64,
+                Kind = bitsetBits <= 8 ? AbiKind.U8
+                    : bitsetBits <= 16 ? AbiKind.U16
+                    : bitsetBits <= 32 ? AbiKind.U32
+                    : AbiKind.U64,
                 NativeType = text,
                 IsBitset = true,
                 BitsetBits = bitsetBits,
@@ -6215,9 +6251,19 @@ internal sealed class AbiPlan
         var isConst = IsConstType(canonical);
         AbiKind kind;
         var fallback = false;
+        var bitsetBits = 0;
         if (TryMapEnumUnderlying(canonical, enumUnderlyingByName, out kind)
             || TryMapFundamental(canonical, out kind))
         {
+        }
+        else if (TryParseBitset(StripTopLevelQualifiers(canonical).TrimEnd().TrimEnd('&', ' '), out bitsetBits))
+        {
+            // std::bitset is bit-packed; a byte-aligned field aliases the storage as an
+            // integer of its size, which is what the shim reads and writes.
+            kind = bitsetBits <= 8 ? AbiKind.U8
+                : bitsetBits <= 16 ? AbiKind.U16
+                : bitsetBits <= 32 ? AbiKind.U32
+                : AbiKind.U64;
         }
         else if (IsPointerType(canonical))
         {
@@ -6247,6 +6293,8 @@ internal sealed class AbiPlan
             NativeReturnType = canonical,
             FieldBitOffset = bitOffset,
             FieldAddress = fallback,
+            IsBitset = bitsetBits > 0,
+            BitsetBits = bitsetBits,
         };
         if (!isConst && !fallback)
         {
@@ -6264,7 +6312,17 @@ internal sealed class AbiPlan
                 ReturnKind = AbiKind.Void,
                 NativeReturnType = "void",
                 FieldBitOffset = bitOffset,
-                Parameters = [new AbiParameter { Name = "value", Kind = kind, NativeType = canonical }],
+                Parameters =
+                [
+                    new AbiParameter
+                    {
+                        Name = "value",
+                        Kind = kind,
+                        NativeType = canonical,
+                        IsBitset = bitsetBits > 0,
+                        BitsetBits = bitsetBits,
+                    },
+                ],
             };
         }
 

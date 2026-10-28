@@ -964,6 +964,15 @@ internal static class ShimEmitter
                         : "&" + target;
                     yield return $"    return const_cast<void*>(static_cast<void const*>({address}));";
                 }
+                else if (function.IsBitset)
+                {
+                    // std::bitset has no conversion operator; read its storage as the integer
+                    // the member is aliased to.
+                    var nativeType = AbiPlan.CppType(function.ReturnKind);
+                    yield return $"    {nativeType} value;";
+                    yield return $"    std::memcpy(&value, &{target}, sizeof(value));";
+                    yield return "    return value;";
+                }
                 else
                 {
                     yield return $"    return static_cast<{returnType}>({target});";
@@ -2758,10 +2767,17 @@ internal static class ShimEmitter
                 {
                     yield return $"    return *reinterpret_cast<void* const*>(static_cast<unsigned char const*>(hs_self) + {byteOffset.ToString(CultureInfo.InvariantCulture)});";
                 }
+                else if (function.IsBitset)
+                {
+                    // std::bitset has no conversion operator; read the storage as the integer
+                    // the field is aliased to.
+                    var nativeType = AbiPlan.CppType(function.ReturnKind);
+                    yield return $"    return static_cast<{returnType}>(*reinterpret_cast<{nativeType} const*>(static_cast<unsigned char const*>(hs_self) + {byteOffset.ToString(CultureInfo.InvariantCulture)}));";
+                }
                 else
                 {
                     var nativeType = AbiPlan.CppType(function.ReturnKind);
-                    yield return $"    return static_cast<{returnType}>(*reinterpret_cast<{nativeType} const*>(static_cast<unsigned char const*>(hs_self) + {byteOffset.ToString(CultureInfo.InvariantCulture)}));";
+                    yield return $"    return static_cast<{returnType}>(static_cast<unsigned char const*>(hs_self)[{byteOffset.ToString(CultureInfo.InvariantCulture)}] * 0 + *reinterpret_cast<{nativeType} const*>(static_cast<unsigned char const*>(hs_self) + {byteOffset.ToString(CultureInfo.InvariantCulture)}));";
                 }
             }
             else
