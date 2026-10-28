@@ -3,7 +3,7 @@ param(
     [string]$ShimDirectory,
     [Parameter(Mandatory = $true)]
     [string]$OutputDll,
-    [string]$LeviLaminaRoot = (Join-Path $PSScriptRoot "..\..\Third\LeviLamina"),
+    [string]$LeviLaminaRoot = "",
     [string]$LlvmRoot = "$env:LOCALAPPDATA\Temp\hosihikari-llvm\clang+llvm-23.1.3-x86_64-pc-windows-msvc",
     [string]$CarrierImportLibrary = "",
     [string]$FmtLib = "",
@@ -14,6 +14,9 @@ param(
     [string[]]$AdditionalLinkLibrary = @(),
     [switch]$DelayLoad
 )
+if ([string]::IsNullOrWhiteSpace($LeviLaminaRoot)) {
+    $LeviLaminaRoot = Join-Path $PSScriptRoot "..\..\Third\LeviLamina"
+}
 
 $ErrorActionPreference = "Stop"
 

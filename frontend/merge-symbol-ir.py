@@ -28,31 +28,45 @@ def record_key(record):
 # complete: clang lays the type out as if the missing members did not exist.
 _THIS_OFFSET = re.compile(r"//\s*this\+0x([0-9A-Fa-f]+)\s*$")
 _SOURCE_LINES = {}
+SOURCE_UNAVAILABLE = object()
 
 
-def _read_source(path):
-    if path not in _SOURCE_LINES:
+def _read_source(path, header_root):
+    if path in _SOURCE_LINES:
+        return _SOURCE_LINES[path]
+    lines = None
+    candidates = [path]
+    if header_root:
+        # The header IR records absolute source paths from the checkout it was built in.
+        # Re-root them so an IR produced elsewhere still finds its annotations.
+        marker = max(path.rfind("\\src\\"), path.rfind("/src/"))
+        if marker >= 0:
+            candidates.append(os.path.join(header_root, "src", path[marker + 5:].replace("/", os.sep)))
+    for candidate in candidates:
         try:
-            with open(path, encoding="utf-8", errors="replace") as stream:
-                _SOURCE_LINES[path] = stream.read().splitlines()
+            with open(candidate, encoding="utf-8", errors="replace") as stream:
+                lines = stream.read().splitlines()
+            break
         except OSError:
-            _SOURCE_LINES[path] = None
-    return _SOURCE_LINES[path]
+            continue
+    _SOURCE_LINES[path] = lines
+    return lines
 
 
-def source_member_offsets(source):
+def source_member_offsets(source, header_root=None):
     """Byte offsets annotated on the data-member lines of a generated header.
 
-    Returns None when the source is unavailable or carries no annotations, which is the
-    case for the hand-written headers: those are complete definitions by construction.
+    Returns None when the file carries no annotations -- the hand-written headers are
+    complete definitions by construction -- and SOURCE_UNAVAILABLE when the file cannot be
+    read at all, which proves nothing and must not be read as "complete".
     """
     path = (source or {}).get("file")
     line = (source or {}).get("line")
     if not path or not isinstance(line, int) or line < 1:
-        return None
-    lines = _read_source(path)
+        return SOURCE_UNAVAILABLE
+    lines = _read_source(path, header_root)
     if not lines or line > len(lines):
-        return None
+        return SOURCE_UNAVAILABLE
 
     depth = 0
     started = False
@@ -133,6 +147,16 @@ def main():
         "--layout-trust",
         default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "layout-trust.txt"),
         help="Layouts to accept without the completeness check, one qualified name per line.",
+    )
+    parser.add_argument(
+        "--class-sizes",
+        default="",
+        help="JSON map of qualified name to sizeof, as written by extract-class-sizes.py.",
+    )
+    parser.add_argument(
+        "--header-root",
+        default="",
+        help="Checkout the header IR was built from, used to re-root recorded source paths.",
     )
     args = parser.parse_args()
 
@@ -253,6 +277,7 @@ def main():
     trusted_layouts = {}
     rejected_incomplete_layouts = 0
     rejected_mismatched_layouts = 0
+    rejected_missing_sources = 0
     unverified_layouts = 0
 
     trusted_names = []
@@ -273,7 +298,8 @@ def main():
         return False
 
     def header_layout_trusted(declaration_id, stack=None):
-        nonlocal rejected_incomplete_layouts, rejected_mismatched_layouts, unverified_layouts
+        nonlocal rejected_incomplete_layouts, rejected_mismatched_layouts, rejected_missing_sources
+        nonlocal unverified_layouts
         if declaration_id in trusted_layouts:
             return trusted_layouts[declaration_id]
         stack = set() if stack is None else stack
@@ -295,7 +321,13 @@ def main():
             rejected_incomplete_layouts += 1
             trusted_layouts[declaration_id] = False
             return False
-        annotated = source_member_offsets(header_declarations.get(declaration_id, {}).get("source"))
+        annotated = source_member_offsets(
+            header_declarations.get(declaration_id, {}).get("source"), args.header_root
+        )
+        if annotated is SOURCE_UNAVAILABLE:
+            rejected_missing_sources += 1
+            trusted_layouts[declaration_id] = False
+            return False
         if annotated is None:
             unverified_layouts += 1
         elif annotated != [offset["bitOffset"] // 8 for offset in layout["fieldOffsets"]]:
@@ -309,6 +341,55 @@ def main():
         stack.discard(declaration_id)
         trusted_layouts[declaration_id] = trusted
         return trusted
+
+    # The carrier's deleting destructors hand the sized operator delete `sizeof(T)`, which
+    # extract-class-sizes.py reads back per class. That size is the compiler's own, so it
+    # is used as the layout size even where the header cannot prove one; the header's field
+    # offsets are kept only when they describe the same, proven layout.
+    class_sizes = {}
+    if args.class_sizes and os.path.exists(args.class_sizes):
+        with open(args.class_sizes, encoding="utf-8") as stream:
+            class_sizes = json.load(stream)
+    applied_class_sizes = 0
+    counted_class_sizes = set()
+
+    def class_size(declaration_id):
+        name = declaration_id[len("bedrock:"):] if declaration_id.startswith("bedrock:") else declaration_id
+        return class_sizes.get(name)
+
+    def layout_for(declaration_id):
+        """Layout to emit for a class, and whether its field offsets are usable."""
+        nonlocal applied_class_sizes
+        variant = header_variants.get(declaration_id)
+        header_layout = variant.get("layout") if variant else None
+        trusted = header_layout is not None and header_layout_trusted(declaration_id)
+        header_size = header_layout.get("size", 0) if trusted else 0
+        exact = class_size(declaration_id)
+        if exact:
+            if declaration_id not in counted_class_sizes:
+                counted_class_sizes.add(declaration_id)
+                applied_class_sizes += 1
+            keep_fields = trusted and header_size == exact
+            return (
+                {
+                    "size": exact,
+                    "align": header_layout.get("align", 0) if keep_fields else 16,
+                    "fieldOffsets": header_layout.get("fieldOffsets", []) if keep_fields else [],
+                    "bases": [],
+                },
+                keep_fields,
+            )
+        if trusted and header_size:
+            return (
+                {
+                    "size": header_size,
+                    "align": header_layout.get("align", 0),
+                    "fieldOffsets": header_layout.get("fieldOffsets", []),
+                    "bases": [],
+                },
+                True,
+            )
+        return None, False
 
     def ensure_header_class(class_id):
         nonlocal added_declarations, copied_fields, copied_layouts
@@ -330,14 +411,7 @@ def main():
             header_variant = header_variants.get(class_id, {})
             layout = header_variant.get("layout")
             header_class_bases = layout.get("bases", []) if layout else []
-            clean_layout = None
-            if layout and header_layout_trusted(class_id):
-                clean_layout = {
-                    "size": layout.get("size", 0),
-                    "align": layout.get("align", 0),
-                    "fieldOffsets": layout.get("fieldOffsets", []),
-                    "bases": [],
-                }
+            clean_layout, keep_fields = layout_for(class_id)
 
             for configuration in configurations:
                 if class_id not in variant_ids[configuration]:
@@ -359,7 +433,7 @@ def main():
                 for header_member in header_members.get(class_id, []):
                     if header_member.get("kind") not in ("field", "static_field"):
                         continue
-                    if not header_layout_trusted(class_id):
+                    if not keep_fields:
                         continue
                     if header_member.get("id") in member_ids[configuration]:
                         continue
@@ -393,14 +467,7 @@ def main():
         header_variant = header_variants.get(declaration_id, {})
         layout = header_variant.get("layout")
         header_bases = layout.get("bases", []) if layout else []
-        usable_layout = None
-        if layout and header_layout_trusted(declaration_id):
-            usable_layout = {
-                "size": layout.get("size", 0),
-                "align": layout.get("align", 0),
-                "fieldOffsets": layout.get("fieldOffsets", []),
-                "bases": [],
-            }
+        usable_layout, keep_fields = layout_for(declaration_id)
 
         # Index the variants once instead of rescanning every record for each class: at
         # three thousand classes the scan dominated the whole merge.
@@ -436,7 +503,7 @@ def main():
             if kind in ("field", "static_field"):
                 # A field offset derived from an incomplete member list points at the
                 # wrong storage, so it is only copied with a trusted layout.
-                if kind == "field" and usable_layout is None:
+                if kind == "field" and not keep_fields:
                     continue
                 for configuration in configurations:
                     member = copy.deepcopy(header_member)
@@ -558,12 +625,10 @@ def main():
             continue
         header_variant = header_variants.get(header_declaration.get("id", declaration_id), {})
         layout = header_variant.get("layout")
-        if not layout or layout.get("size", 0) <= 0:
-            continue
         # The declaration is copied either way so the type stays in the surface with its
-        # symbol and vtable members. Only a proven layout is attached: the shim sizes its
+        # symbol and vtable members. Only a proven size is attached: the shim sizes its
         # allocations and by-value copies from it.
-        trusted_layout = header_layout_trusted(header_declaration.get("id", declaration_id))
+        usable_layout, _ = layout_for(header_declaration.get("id", declaration_id))
 
         if declaration_id in symbol_declarations:
             # The RTTI walk already emitted a bare declaration for this base class. Keep it
@@ -585,14 +650,10 @@ def main():
             added_declarations += 1
 
         clean_layout = None
-        if trusted_layout:
-            clean_layout = {
-                "size": layout.get("size", 0),
-                "align": layout.get("align", 0),
-                "fieldOffsets": [],
-                "bases": [],
-            }
-            header_bases = layout.get("bases", [])
+        if usable_layout is not None:
+            clean_layout = copy.deepcopy(usable_layout)
+            clean_layout["fieldOffsets"] = []
+            header_bases = layout.get("bases", []) if layout else []
             if header_bases:
                 clean_layout["bases"] = copy.deepcopy(header_bases)
         for configuration in configurations:
@@ -679,8 +740,10 @@ def main():
     print(
         f"layouts rejected: the header declares no data members={rejected_incomplete_layouts} "
         f"annotated offsets disagree={rejected_mismatched_layouts} "
+        f"header source unavailable={rejected_missing_sources} "
         f"no annotated header to check={unverified_layouts}"
     )
+    print(f"class sizes applied: {applied_class_sizes}")
 
 
 if __name__ == "__main__":

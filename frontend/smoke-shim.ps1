@@ -3,13 +3,16 @@ param(
     [string]$IrDirectory,
     [string]$Output = "artifacts/llapi-real-shim",
     [string]$LlvmRoot = "$env:LOCALAPPDATA\Temp\hosihikari-llvm\clang+llvm-23.1.3-x86_64-pc-windows-msvc",
-    [string]$LeviLaminaRoot = (Join-Path $PSScriptRoot "..\..\Third\LeviLamina"),
+    [string]$LeviLaminaRoot = "",
     [switch]$LinkCarrier,
     [string]$CarrierImportLibrary = "",
     [string]$AbiRoot = "",
     [string[]]$AdditionalLinkLibrary = @(),
     [switch]$SkipRun
 )
+if ([string]::IsNullOrWhiteSpace($LeviLaminaRoot)) {
+    $LeviLaminaRoot = Join-Path $PSScriptRoot "..\..\Third\LeviLamina"
+}
 
 $ErrorActionPreference = "Stop"
 

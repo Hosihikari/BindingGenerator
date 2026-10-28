@@ -4,7 +4,7 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$OutputDll,
     [string]$LlvmRoot = "$env:LOCALAPPDATA\Temp\hosihikari-llvm\clang+llvm-23.1.3-x86_64-pc-windows-msvc",
-    [string]$LeviLaminaRoot = (Join-Path $PSScriptRoot "..\..\Third\LeviLamina"),
+    [string]$LeviLaminaRoot = "",
     [string[]]$PrependIncludePath = @(),
     [string[]]$AdditionalIncludePath = @(),
     [string[]]$AdditionalLinkLibrary = @(),
@@ -12,6 +12,9 @@ param(
     [int]$ErrorLimit = 0,
     [switch]$CompileOnly
 )
+if ([string]::IsNullOrWhiteSpace($LeviLaminaRoot)) {
+    $LeviLaminaRoot = Join-Path $PSScriptRoot "..\..\Third\LeviLamina"
+}
 
 $ErrorActionPreference = "Stop"
 

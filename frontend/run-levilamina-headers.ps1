@@ -1,5 +1,5 @@
 param(
-    [string]$LeviLaminaRoot = (Join-Path $PSScriptRoot "..\..\Third\LiteLoaderBDS"),
+    [string]$LeviLaminaRoot = "",
     [string]$EnttRoot = "C:\Users\root\AppData\Local\Temp\entt-41aab92\src",
     [string]$Output = "artifacts/levi-1.21.3-header-ir",
     [string]$LlvmRoot = "$env:LOCALAPPDATA\Temp\hosihikari-llvm\clang+llvm-23.1.3-x86_64-pc-windows-msvc",
@@ -8,6 +8,9 @@ param(
     [switch]$UseCompileCommands,
     [switch]$SkipBuild
 )
+if ([string]::IsNullOrWhiteSpace($LeviLaminaRoot)) {
+    $LeviLaminaRoot = Join-Path $PSScriptRoot "..\..\Third\LiteLoaderBDS"
+}
 
 $ErrorActionPreference = "Stop"
 

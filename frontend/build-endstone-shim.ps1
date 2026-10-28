@@ -4,9 +4,12 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$OutputDll,
     [string]$LlvmRoot = "$env:LOCALAPPDATA\Temp\hosihikari-llvm\clang+llvm-23.1.3-x86_64-pc-windows-msvc",
-    [string]$EndstoneRoot = (Join-Path $PSScriptRoot "..\..\Third\Endstone"),
+    [string]$EndstoneRoot = "",
     [string[]]$AdditionalIncludePath = @()
 )
+if ([string]::IsNullOrWhiteSpace($EndstoneRoot)) {
+    $EndstoneRoot = Join-Path $PSScriptRoot "..\..\Third\Endstone"
+}
 
 $ErrorActionPreference = "Stop"
 
