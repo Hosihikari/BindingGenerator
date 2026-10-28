@@ -22,6 +22,59 @@ def record_key(record):
     return record.get("id") or record.get("declarationId") or ""
 
 
+# LeviLamina's header generator annotates every data member it recovered with the offset
+# it read from the carrier's symbols (`// this+0x128`). A member list that lost entries
+# still parses, so these annotations are the only record of whether the header is
+# complete: clang lays the type out as if the missing members did not exist.
+_THIS_OFFSET = re.compile(r"//\s*this\+0x([0-9A-Fa-f]+)\s*$")
+_SOURCE_LINES = {}
+
+
+def _read_source(path):
+    if path not in _SOURCE_LINES:
+        try:
+            with open(path, encoding="utf-8", errors="replace") as stream:
+                _SOURCE_LINES[path] = stream.read().splitlines()
+        except OSError:
+            _SOURCE_LINES[path] = None
+    return _SOURCE_LINES[path]
+
+
+def source_member_offsets(source):
+    """Byte offsets annotated on the data-member lines of a generated header.
+
+    Returns None when the source is unavailable or carries no annotations, which is the
+    case for the hand-written headers: those are complete definitions by construction.
+    """
+    path = (source or {}).get("file")
+    line = (source or {}).get("line")
+    if not path or not isinstance(line, int) or line < 1:
+        return None
+    lines = _read_source(path)
+    if not lines or line > len(lines):
+        return None
+
+    depth = 0
+    started = False
+    offsets = []
+    for text in lines[line - 1:]:
+        code = text.split("//")[0]
+        opens = code.count("{")
+        depth += opens - code.count("}")
+        if opens:
+            started = True
+        if not started:
+            continue
+        # Only the class's own scope: nested types carry their own declarations.
+        if depth == 1:
+            match = _THIS_OFFSET.search(text)
+            if match:
+                offsets.append(int(match.group(1), 16))
+        if depth <= 0:
+            break
+    return offsets or None
+
+
 def serialize(records):
     ordered = sorted(records, key=lambda record: (record_key(record), record.get("recordType", "")))
     return "".join(
@@ -76,6 +129,11 @@ def main():
     # A comma list stops working past a few thousand names: the Windows command line caps
     # at 32,767 characters and the class set keeps growing.
     parser.add_argument("--classes-file", default="")
+    parser.add_argument(
+        "--layout-trust",
+        default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "layout-trust.txt"),
+        help="Layouts to accept without the completeness check, one qualified name per line.",
+    )
     args = parser.parse_args()
 
     if args.classes_file:
@@ -175,6 +233,83 @@ def main():
     copied_layouts = 0
     processed_base_classes = set()
 
+    # The generated headers declare only the members the generator recovered, so a class
+    # it knew nothing about still parses -- as an empty class or as one carrying nothing
+    # but its vtable and bases. `EatBlockGoal` is one of the latter: the header gives it
+    # the 8-byte size of its base, while the real object holds a mob reference and timers.
+    # Emitting that size would make the shim under-allocate every object it creates, so a
+    # layout is used only when it is provably the real one:
+    #
+    #   - the class declares its own data members, and
+    #   - those members' offsets match the ones the header generator annotated with, and
+    #   - every base class it inherits from is trustworthy by the same rule.
+    #
+    # Types whose data lives entirely in a base class pass no test of their own; the few
+    # families that are known to be complete are listed in layout-trust.txt.
+    #
+    # Fields inherit this judgement: an offset clang computed from an incomplete member
+    # list reads and writes the wrong storage, so a class without a trusted layout also
+    # gives up its field accessors.
+    trusted_layouts = {}
+    rejected_incomplete_layouts = 0
+    rejected_mismatched_layouts = 0
+    unverified_layouts = 0
+
+    trusted_names = []
+    if args.layout_trust and os.path.exists(args.layout_trust):
+        with open(args.layout_trust, encoding="utf-8") as stream:
+            trusted_names = [
+                line.strip() for line in stream if line.strip() and not line.strip().startswith("#")
+            ]
+
+    def allow_listed(declaration_id):
+        name = declaration_id[len("bedrock:"):] if declaration_id.startswith("bedrock:") else declaration_id
+        for entry in trusted_names:
+            if entry.endswith("*"):
+                if name.startswith(entry[:-1]):
+                    return True
+            elif name == entry:
+                return True
+        return False
+
+    def header_layout_trusted(declaration_id, stack=None):
+        nonlocal rejected_incomplete_layouts, rejected_mismatched_layouts, unverified_layouts
+        if declaration_id in trusted_layouts:
+            return trusted_layouts[declaration_id]
+        stack = set() if stack is None else stack
+        if declaration_id in stack:
+            trusted_layouts[declaration_id] = False
+            return False
+        variant = header_variants.get(declaration_id)
+        if variant is None:
+            # The supplement covers the mc/ tree; a base from anywhere else (LeviLamina's
+            # ll/ headers, the standard library) was laid out from its own complete
+            # definition by the frontend.
+            trusted_layouts[declaration_id] = True
+            return True
+        layout = variant.get("layout")
+        if allow_listed(declaration_id):
+            trusted_layouts[declaration_id] = True
+            return True
+        if not layout or not layout.get("fieldOffsets"):
+            rejected_incomplete_layouts += 1
+            trusted_layouts[declaration_id] = False
+            return False
+        annotated = source_member_offsets(header_declarations.get(declaration_id, {}).get("source"))
+        if annotated is None:
+            unverified_layouts += 1
+        elif annotated != [offset["bitOffset"] // 8 for offset in layout["fieldOffsets"]]:
+            rejected_mismatched_layouts += 1
+            trusted_layouts[declaration_id] = False
+            return False
+        stack.add(declaration_id)
+        trusted = all(
+            header_layout_trusted(base.get("declarationId"), stack) for base in layout.get("bases", [])
+        )
+        stack.discard(declaration_id)
+        trusted_layouts[declaration_id] = trusted
+        return trusted
+
     def ensure_header_class(class_id):
         nonlocal added_declarations, copied_fields, copied_layouts
         if class_id in processed_base_classes:
@@ -196,7 +331,7 @@ def main():
             layout = header_variant.get("layout")
             header_class_bases = layout.get("bases", []) if layout else []
             clean_layout = None
-            if layout and (layout.get("fieldOffsets") or header_class_bases):
+            if layout and header_layout_trusted(class_id):
                 clean_layout = {
                     "size": layout.get("size", 0),
                     "align": layout.get("align", 0),
@@ -223,6 +358,8 @@ def main():
 
                 for header_member in header_members.get(class_id, []):
                     if header_member.get("kind") not in ("field", "static_field"):
+                        continue
+                    if not header_layout_trusted(class_id):
                         continue
                     if header_member.get("id") in member_ids[configuration]:
                         continue
@@ -257,7 +394,7 @@ def main():
         layout = header_variant.get("layout")
         header_bases = layout.get("bases", []) if layout else []
         usable_layout = None
-        if layout and (layout.get("fieldOffsets") or header_bases):
+        if layout and header_layout_trusted(declaration_id):
             usable_layout = {
                 "size": layout.get("size", 0),
                 "align": layout.get("align", 0),
@@ -297,6 +434,10 @@ def main():
         for header_member in header_members.get(declaration_id, []):
             kind = header_member.get("kind")
             if kind in ("field", "static_field"):
+                # A field offset derived from an incomplete member list points at the
+                # wrong storage, so it is only copied with a trusted layout.
+                if kind == "field" and usable_layout is None:
+                    continue
                 for configuration in configurations:
                     member = copy.deepcopy(header_member)
                     member["configuration"] = configuration
@@ -419,6 +560,10 @@ def main():
         layout = header_variant.get("layout")
         if not layout or layout.get("size", 0) <= 0:
             continue
+        # The declaration is copied either way so the type stays in the surface with its
+        # symbol and vtable members. Only a proven layout is attached: the shim sizes its
+        # allocations and by-value copies from it.
+        trusted_layout = header_layout_trusted(header_declaration.get("id", declaration_id))
 
         if declaration_id in symbol_declarations:
             # The RTTI walk already emitted a bare declaration for this base class. Keep it
@@ -439,29 +584,31 @@ def main():
             symbol_declarations[declaration_id] = copied_declaration
             added_declarations += 1
 
-        clean_layout = {
-            "size": layout.get("size", 0),
-            "align": layout.get("align", 0),
-            "fieldOffsets": [],
-            "bases": [],
-        }
-        header_bases = layout.get("bases", [])
-        if header_bases:
-            clean_layout["bases"] = copy.deepcopy(header_bases)
+        clean_layout = None
+        if trusted_layout:
+            clean_layout = {
+                "size": layout.get("size", 0),
+                "align": layout.get("align", 0),
+                "fieldOffsets": [],
+                "bases": [],
+            }
+            header_bases = layout.get("bases", [])
+            if header_bases:
+                clean_layout["bases"] = copy.deepcopy(header_bases)
         for configuration in configurations:
             if declaration_id in variant_ids[configuration]:
                 continue
-            symbol_records[configuration].append(
-                {
-                    "recordType": "variant",
-                    "declarationId": declaration_id,
-                    "configuration": configuration,
-                    "availability": "present",
-                    "layout": copy.deepcopy(clean_layout),
-                }
-            )
+            variant = {
+                "recordType": "variant",
+                "declarationId": declaration_id,
+                "configuration": configuration,
+                "availability": "present",
+            }
+            if clean_layout is not None:
+                variant["layout"] = copy.deepcopy(clean_layout)
+                copied_layouts += 1
+            symbol_records[configuration].append(variant)
             variant_ids[configuration].add(declaration_id)
-            copied_layouts += 1
 
     # The validator keys declarations and members by id and variants by declarationId; two
     # symbols that demangle to the same member (an inner scope collapsing into its outer
@@ -528,6 +675,11 @@ def main():
     print(
         f"merged: layouts={copied_layouts} fields={copied_fields} methods={copied_methods} "
         f"declarations+={added_declarations} duplicates dropped={dropped}"
+    )
+    print(
+        f"layouts rejected: the header declares no data members={rejected_incomplete_layouts} "
+        f"annotated offsets disagree={rejected_mismatched_layouts} "
+        f"no annotated header to check={unverified_layouts}"
     )
 
 

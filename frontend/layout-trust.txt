@@ -1,0 +1,21 @@
+# Layouts that the header supplement cannot prove, but that are known to be complete.
+#
+# merge-symbol-ir.py trusts a header layout only when the class declares its own data
+# members: the generated mc/ headers drop the members their generator did not recover,
+# and clang then lays the class out as if they did not exist. A handful of types carry
+# their data in a base class instead, so they declare nothing and would be rejected even
+# though their layout is exactly right.
+#
+# One qualified name per line. A trailing '*' matches the rest of the name, which covers
+# the template instantiations of the ll::math value types.
+#
+# ll::math are LeviLamina's own headers: the game ABI depends on their size matching the
+# carrier's, so clang's layout of them is the real one.
+ll::math::*
+
+# The game's arithmetic value types derive from the ll::math bases above and add no data
+# members of their own. Their sizes are pinned by the ll::math definitions.
+Vec2
+Vec3
+BlockPos
+ChunkPos

@@ -88,9 +88,10 @@ public static class NativeEntryPoint
             var serverWrappersOk = serverInstance is null
                 || (serverTextSettings is not null && serverTextSettings.Target != 0);
 
-            // getSecureStorage transfers a unique_ptr<SecureStorage>; disposing it must run the
-            // game's virtual destructor and release the game-allocated object.
-            using var secureStorage = platform?.getSecureStorage();
+            // getSecureStorage transfers a unique_ptr<SecureStorage>. SecureStorage is a pure
+            // interface, so the header supplement proves no layout for it and the projection
+            // does not hand out ownership of an object it cannot size.
+            var secureStorage = platform?.getSecureStorage();
             var secureStorageOk = secureStorage is null || secureStorage.Handle != 0;
 
             // Static constants are read from the game module's data symbols.
