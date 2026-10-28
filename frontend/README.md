@@ -1,6 +1,6 @@
 # libTooling frontend
 
-The native frontend parses the three header sets and emits the versioned IR defined in `Hosihikari/Design` (`docs/ir-and-coverage.md`). It is a separate CMake target because libTooling has no stable C++ API and cannot be hosted in-process by .NET 10.
+The native frontend parses the three header sets and emits the versioned IR defined in `HosihikariProjection/Design` (`docs/ir-and-coverage.md`). It is a separate CMake target because libTooling has no stable C++ API and cannot be hosted in-process by .NET 10.
 
 ## Toolchain
 
@@ -46,7 +46,7 @@ For the Endstone Linux configuration:
   --output artifacts/endstone-linux-ir
 ```
 
-The script emits `linux-x64-server` IR and validates it with the .NET CLI. On libstdc++, `--compat-include` can force-include headers such as the Endstone `std::floorf` compatibility shim from `Hosihikari/EndstoneBinding`.
+The script emits `linux-x64-server` IR and validates it with the .NET CLI. On libstdc++, `--compat-include` can force-include headers such as the Endstone `std::floorf` compatibility shim from `HosihikariProjection/EndstoneBinding`.
 
 ## Symbol prototype (Bedrock 1.21.3)
 

@@ -39,7 +39,7 @@ dotnet run --project src/Hosihikari.Bindings.Generator/Hosihikari.Bindings.Gener
   --native-root C:/path/to/LeviLamina --abi-header ../Binding.Abi/native/hosihikari_abi.h
 ```
 
-`--abi-header` points at `Hosihikari/BindingAbi`'s `native/hosihikari_abi.h`; the emitter copies it into every shim directory so the shim build stays self-contained. Generated C# references `Hosihikari.Bindings.Abi` for `StringView`, `ArrayView`, `SharedHandle`, and the version-checking `ShimLibrary` loader.
+`--abi-header` points at `HosihikariProjection/BindingAbi`'s `native/hosihikari_abi.h`; the emitter copies it into every shim directory so the shim build stays self-contained. Generated C# references `Hosihikari.Bindings.Abi` for `StringView`, `ArrayView`, `SharedHandle`, and the version-checking `ShimLibrary` loader.
 
 Without `--native-root`, `emit` writes the contract stubs used by the fixture CI, unless `--symbol-dispatch` is set.
 
@@ -90,10 +90,10 @@ The complete LLAPI umbrella currently selects 496 link-safe functions, or 3,819 
 
 ## Related repositories
 
-- `Hosihikari/BindingIr`: schema, models, reader/writer, validator.
-- `Hosihikari/BindingAbi`: shared ABI value types, loader, and native header.
-- `Hosihikari/EndstoneBinding`: the Endstone interop surface.
-- `Hosihikari/LeviLaminaBinding`: the LeviLamina interop surface.
+- `HosihikariProjection/BindingIr`: schema, models, reader/writer, validator.
+- `HosihikariProjection/BindingAbi`: shared ABI value types, loader, and native header.
+- `HosihikariProjection/EndstoneBinding`: the Endstone interop surface.
+- `HosihikariProjection/LeviLaminaBinding`: the LeviLamina interop surface.
 
 ## Licence
 

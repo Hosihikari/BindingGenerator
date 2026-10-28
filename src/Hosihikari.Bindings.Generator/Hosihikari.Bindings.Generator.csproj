@@ -14,7 +14,7 @@
     <Authors>Hosihikari</Authors>
     <Description>Generates C ABI BindingShim and native-style .NET Interop from versioned IR.</Description>
     <PackageLicenseExpression>GPL-3.0-or-later</PackageLicenseExpression>
-    <RepositoryUrl>https://github.com/Hosihikari/BindingGenerator</RepositoryUrl>
+    <RepositoryUrl>https://github.com/HosihikariProjection/BindingGenerator</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
     <PackageTags>minecraft;bedrock;bds;binding;interop;hosihikari</PackageTags>
   </PropertyGroup>

@@ -39,7 +39,7 @@ dotnet run --project src/Hosihikari.Bindings.Generator/Hosihikari.Bindings.Gener
   --native-root C:/path/to/LeviLamina --abi-header ../Binding.Abi/native/hosihikari_abi.h --link-carrier --ll-allocator
 ```
 
-`--abi-header` 指向 `Hosihikari/BindingAbi` 的 `native/hosihikari_abi.h`；发射器把它复制到每个 shim 目录，使 shim 构建保持自包含。生成的 C# 引用 `Hosihikari.Bindings.Abi` 提供的 `StringView`、`ArrayView`、`SharedHandle` 与负责版本校验的 `ShimLibrary` 加载器。
+`--abi-header` 指向 `HosihikariProjection/BindingAbi` 的 `native/hosihikari_abi.h`；发射器把它复制到每个 shim 目录，使 shim 构建保持自包含。生成的 C# 引用 `Hosihikari.Bindings.Abi` 提供的 `StringView`、`ArrayView`、`SharedHandle` 与负责版本校验的 `ShimLibrary` 加载器。
 
 不传 `--native-root` 时写出 fixture CI 使用的契约 stub。
 
@@ -75,10 +75,10 @@ powershell -File frontend/smoke-shim.ps1 -IrDirectory artifacts/llapi-full-ir -L
 
 ## 相关仓库
 
-- `Hosihikari/BindingIr`：schema、模型、读写器与校验器。
-- `Hosihikari/BindingAbi`：共享 ABI 值类型、加载器与原生头文件。
-- `Hosihikari/EndstoneBinding`：Endstone 互操作面。
-- `Hosihikari/LeviLaminaBinding`：LeviLamina 互操作面。
+- `HosihikariProjection/BindingIr`：schema、模型、读写器与校验器。
+- `HosihikariProjection/BindingAbi`：共享 ABI 值类型、加载器与原生头文件。
+- `HosihikariProjection/EndstoneBinding`：Endstone 互操作面。
+- `HosihikariProjection/LeviLaminaBinding`：LeviLamina 互操作面。
 
 ## 许可证
 
