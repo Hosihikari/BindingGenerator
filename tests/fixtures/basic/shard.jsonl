@@ -1,3 +1,6 @@
 {"recordType":"declaration","id":"bedrock:c:@S@Player","surface":"bedrock","kind":"class","qualifiedName":"mc::Player","access":"public","linkage":"external"}
 {"recordType":"variant","declarationId":"bedrock:c:@S@Player","configuration":"win-x64-server","availability":"present"}
 {"recordType":"member","id":"bedrock:c:@S@Player@F@health","declarationId":"bedrock:c:@S@Player","configuration":"win-x64-server","kind":"field","name":"health","access":"protected","type":{"kind":"fundamental","canonical":"int"}}
+{"recordType":"declaration","id":"bedrock:mc::content::TestMode","surface":"bedrock","kind":"enum","qualifiedName":"mc::content::TestMode","access":"public","linkage":"external","underlyingType":"unsigned char"}
+{"recordType":"member","id":"bedrock:mc::content::TestMode@TestMode::Off","declarationId":"bedrock:mc::content::TestMode","configuration":"win-x64-server","kind":"enum_value","name":"Off","access":"public","static":true,"type":{"kind":"enum","canonical":"mc::content::TestMode"},"value":"0"}
+{"recordType":"member","id":"bedrock:mc::content::TestMode@TestMode::On","declarationId":"bedrock:mc::content::TestMode","configuration":"win-x64-server","kind":"enum_value","name":"On","access":"public","static":true,"type":{"kind":"enum","canonical":"mc::content::TestMode"},"value":"1"}

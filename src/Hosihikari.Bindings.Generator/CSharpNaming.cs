@@ -6,11 +6,17 @@ internal readonly record struct DeclarationName(string NamespaceName, string Nam
 
 internal static class CSharpNaming
 {
-    public static Dictionary<string, DeclarationName> BuildDeclarationNames(IReadOnlyList<DeclarationRecord> declarations)
+    public static Dictionary<string, DeclarationName> BuildDeclarationNames(
+        IReadOnlyList<DeclarationRecord> declarations,
+        IReadOnlyCollection<string>? extraClassNames = null)
     {
         var classNames = declarations
             .Select(declaration => declaration.QualifiedName)
             .ToHashSet(StringComparer.Ordinal);
+        if (extraClassNames is not null)
+        {
+            classNames.UnionWith(extraClassNames);
+        }
 
         var result = new Dictionary<string, DeclarationName>(StringComparer.Ordinal);
         var candidates = declarations

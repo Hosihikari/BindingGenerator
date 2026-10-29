@@ -7,6 +7,7 @@
 #include "clang/Basic/SourceManager.h"
 #include "clang/Frontend/ASTUnit.h"
 #include "clang/Tooling/Tooling.h"
+#include "llvm/ADT/APSInt.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/StringExtras.h"
@@ -488,8 +489,39 @@ public:
         }
 
         Records.emplace_back(makeDeclaration(Decl, DeclId, "enum"));
+        emitEnumValues(Decl, DeclId);
         ++Declarations;
         return true;
+    }
+
+    // Enumerators carry their evaluated value: the source may spell them with expressions
+    // or leave them implicit, so the AST value is the only stable form.
+    void emitEnumValues(EnumDecl* Owner, const std::string& DeclId) {
+        for (auto* Enumerator : Owner->enumerators()) {
+            std::string MemberId = idFor(Enumerator, DeclId);
+            if (!Emitted.insert(MemberId).second) {
+                continue;
+            }
+
+            const llvm::APSInt& Init = Enumerator->getInitVal();
+            llvm::SmallString<32> ValueText;
+            Init.toString(ValueText, 10);
+
+            llvm::json::Object Object;
+            Object["recordType"] = "member";
+            Object["id"] = MemberId;
+            Object["declarationId"] = DeclId;
+            Object["configuration"] = Opt.Configuration;
+            Object["kind"] = "enum_value";
+            Object["name"] = normalizePlatformTypeText(Enumerator->getNameAsString());
+            Object["access"] = "public";
+            Object["static"] = true;
+            Object["type"] = makeType(Owner->getIntegerType());
+            Object["value"] = llvm::StringRef(ValueText.data(), ValueText.size()).str();
+
+            Records.emplace_back(std::move(Object));
+            ++Members;
+        }
     }
 
     // Enums are often declared in headers outside the module filter while still
@@ -530,6 +562,7 @@ public:
             }
 
             Records.emplace_back(makeDeclaration(Decl, Id, "enum"));
+            emitEnumValues(Decl, Id);
             ++Declarations;
         }
     }
@@ -1345,7 +1378,7 @@ int main(int argc, char** argv) {
 
     llvm::json::Object Manifest;
     Manifest["schema"] = "hosihikari.bindings.ir/1";
-    Manifest["irVersion"] = "1.5.1";
+    Manifest["irVersion"] = "1.6.0";
 
     llvm::json::Object Frontend;
     Frontend["name"] = "libtooling";

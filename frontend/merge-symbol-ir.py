@@ -273,6 +273,7 @@ def main():
     copied_fields = 0
     copied_methods = 0
     copied_layouts = 0
+    copied_enum_values = 0
     processed_base_classes = set()
 
     # The generated headers declare only the members the generator recovered, so a class
@@ -570,11 +571,27 @@ def main():
     # Enum declarations carry the underlying integer type used by signatures. The symbol
     # stream has no type information, so copy every enum the header umbrella saw.
     for enum_id, enum_declaration in header_declarations.items():
-        if enum_declaration.get("kind") != "enum" or enum_id in symbol_declarations:
+        if enum_declaration.get("kind") != "enum":
             continue
-        symbol_records[configurations[0]].append(copy.deepcopy(enum_declaration))
-        symbol_declarations[enum_id] = enum_declaration
-        added_declarations += 1
+        if enum_id not in symbol_declarations:
+            symbol_records[configurations[0]].append(copy.deepcopy(enum_declaration))
+            symbol_declarations[enum_id] = enum_declaration
+            added_declarations += 1
+
+        # Enumerators are platform independent and the coverage manifest needs a row in
+        # every configuration, so each value record is copied into all of them.
+        for header_member in header_members.get(enum_id, []):
+            if header_member.get("kind") != "enum_value":
+                continue
+            for configuration in configurations:
+                member = copy.deepcopy(header_member)
+                member["configuration"] = configuration
+                key = (member.get("id"), configuration)
+                if key in existing_keys:
+                    continue
+                symbol_records[configuration].append(member)
+                existing_keys.add(key)
+                copied_enum_values += 1
 
     def base_type_name(text):
         name = (text or "").strip()
@@ -754,13 +771,20 @@ def main():
         "variants": variants,
         "members": members,
     }
+    # The merged IR carries header facts the symbol stream does not have (enum values,
+    # layouts), so its schema version is at least the header manifest's.
+    def version_key(text):
+        return tuple(int(part) for part in (text or "0").split(".") if part.isdigit())
+
+    if version_key(header_manifest.get("irVersion")) > version_key(symbol_manifest.get("irVersion")):
+        symbol_manifest["irVersion"] = header_manifest.get("irVersion")
     with open(os.path.join(args.output, "ir-manifest.json"), "w", encoding="utf-8", newline="\n") as stream:
         json.dump(symbol_manifest, stream, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
         stream.write("\n")
 
     print(
         f"merged: layouts={copied_layouts} fields={copied_fields} methods={copied_methods} "
-        f"declarations+={added_declarations} duplicates dropped={dropped}"
+        f"enum values={copied_enum_values} declarations+={added_declarations} duplicates dropped={dropped}"
     )
     print(
         f"layouts rejected: the header declares no data members={rejected_incomplete_layouts} "

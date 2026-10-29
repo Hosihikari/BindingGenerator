@@ -1508,7 +1508,7 @@ bool emitIr(const Inputs& Inputs, const Configuration& Windows, const Configurat
 
     json::Object Manifest;
     Manifest["schema"] = "hosihikari.bindings.ir/1";
-    Manifest["irVersion"] = "1.5.1";
+    Manifest["irVersion"] = "1.6.0";
     json::Object Frontend;
     Frontend["name"] = "symbols";
     Frontend["version"] = "0.1.0";
