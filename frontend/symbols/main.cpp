@@ -529,7 +529,12 @@ std::string makeKey(const ParsedMethod& Method) {
 
 void addMethod(Configuration& Config, const ParsedMethod& Parsed, const std::string& Symbol, uint64_t Rva, uint64_t Va) {
     Method Method;
-    Method.ClassName = Parsed.QualifiedName.substr(0, Parsed.QualifiedName.find("::"));
+    // The owner is the scope the member name sits in, so a nested class keeps its own
+    // members instead of having them attributed to the outermost class.
+    auto OwnerSeparator = Parsed.QualifiedName.rfind("::");
+    Method.ClassName = OwnerSeparator == std::string::npos
+        ? Parsed.QualifiedName
+        : Parsed.QualifiedName.substr(0, OwnerSeparator);
     Method.Name = Parsed.Name;
     Method.Key = makeKey(Parsed);
     Method.ReturnType = Parsed.ReturnType;
