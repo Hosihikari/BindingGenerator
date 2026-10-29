@@ -335,8 +335,15 @@ ParsedMethod parseDemangled(const std::string& Demangled, const std::string& Cla
 
     Result.Name = Name;
     Result.QualifiedName = Marker + Name;
-    Result.Ctor = Name == ClassName;
-    Result.Dtor = Name == "~" + ClassName;
+    // The class name arrives qualified (`BedrockLog::CategoryLogFile`) while the demangled
+    // member name is only the last component, so a constructor of a namespaced class never
+    // matched and was recorded as a plain method with an unknown return type.
+    std::string LastName = ClassName;
+    if (size_t Separator = LastName.rfind("::"); Separator != std::string::npos) {
+        LastName = LastName.substr(Separator + 2);
+    }
+    Result.Ctor = Name == LastName;
+    Result.Dtor = Name == "~" + LastName;
 
     std::string Before = trim(StringRef(Text).slice(0, MarkerPosition));
     for (const char* Convention : {"__cdecl", "__fastcall", "__stdcall", "__thiscall", "__vectorcall"}) {
