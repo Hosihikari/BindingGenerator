@@ -56,14 +56,18 @@ internal static class CoverageEmitter
                 foreach (var member in declarationMembers)
                 {
                     var isPrivate = member.Access == "private";
-                    var excluded = isTemplate || isPrivate;
+                    // Synthetic support members feed by-value copy/destroy planning; they are
+                    // not part of the public surface.
+                    var isSynthetic = member.Id.Contains("@support:", StringComparison.Ordinal);
+                    var excluded = isTemplate || isPrivate || isSynthetic;
                     var memberHasShim = !excluded
                         && (plan.HasMemberFunction(member.Id)
                             || (member.Kind == "destructor"
                                 && plan.DestroyByDeclaration.ContainsKey(declaration.Id)));
                     CoverageReason? reason = isTemplate
                         ? CoverageReason.TemplateDeclaration
-                        : isPrivate ? CoverageReason.Private : null;
+                        : isPrivate ? CoverageReason.Private
+                        : isSynthetic ? CoverageReason.NotPublic : null;
                     entries.Add(new CoverageEntry
                     {
                         Id = member.Id,

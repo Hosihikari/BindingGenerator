@@ -1023,6 +1023,13 @@ internal sealed class AbiPlan
                          (member.Kind == "field" || member.Kind == "static_field")
                          && member.Access == "public"))
             {
+                if (field.Kind == "static_field"
+                    && ConstantFields.TryCSharpConstant(field, out _, out _))
+                {
+                    // The projection is the constant itself; no shim entry is needed.
+                    continue;
+                }
+
                 if (symbolDispatch)
                 {
                     if (!TryPlanSymbolField(

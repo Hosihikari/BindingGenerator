@@ -1,3 +1,4 @@
+#include "clang/AST/APValue.h"
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/DeclCXX.h"
 #include "clang/AST/DeclTemplate.h"
@@ -1316,6 +1317,14 @@ private:
             Object["type"] = makeType(Variable->getType());
             Object["inline"] = Variable->isInline() || Variable->isConstexpr();
             Object["defined"] = Variable->isThisDeclarationADefinition() == VarDecl::Definition;
+            // A constant static field carries its value, so the projection is a C# constant
+            // and needs no carrier symbol. Floats, strings and records stay with the shim.
+            if (const APValue* Evaluated = Variable->getEvaluatedValue();
+                Evaluated != nullptr && Evaluated->isInt()) {
+                llvm::SmallString<32> ValueText;
+                Evaluated->getInt().toString(ValueText, 10);
+                Object["value"] = llvm::StringRef(ValueText.data(), ValueText.size()).str();
+            }
         } else if (auto* Method = dyn_cast<CXXMethodDecl>(Member)) {
             Object["virtual"] = Method->isVirtual();
             Object["pure"] = Method->isPureVirtual();

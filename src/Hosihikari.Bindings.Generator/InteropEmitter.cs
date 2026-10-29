@@ -136,7 +136,10 @@ internal static class InteropEmitter
                 var memberNames = BuildMemberNames(declarationMembers, plan, name.ClassName);
                 foreach (var member in declarationMembers)
                 {
-                    if (member.Access != "public")
+                    // Synthetic support members feed by-value copy/destroy planning; they are
+                    // not part of the public surface.
+                    if (member.Access != "public"
+                        || member.Id.Contains("@support:", StringComparison.Ordinal))
                     {
                         continue;
                     }
@@ -318,7 +321,7 @@ internal static class InteropEmitter
         var start = Math.Max(0, Array.IndexOf(ladder, candidate));
         for (var index = start; index < ladder.Length; index++)
         {
-            if (Fits(ladder[index], min) && Fits(ladder[index], max))
+            if (ConstantFields.Fits(ladder[index], min) && ConstantFields.Fits(ladder[index], max))
             {
                 return ladder[index];
             }
@@ -326,19 +329,6 @@ internal static class InteropEmitter
 
         return max.Sign >= 0 ? "ulong" : "long";
     }
-
-    private static bool Fits(string type, BigInteger value) => type switch
-    {
-        "sbyte" => value >= sbyte.MinValue && value <= sbyte.MaxValue,
-        "byte" => value >= byte.MinValue && value <= byte.MaxValue,
-        "short" => value >= short.MinValue && value <= short.MaxValue,
-        "ushort" => value >= ushort.MinValue && value <= ushort.MaxValue,
-        "int" => value >= int.MinValue && value <= int.MaxValue,
-        "uint" => value >= uint.MinValue && value <= uint.MaxValue,
-        "long" => value >= long.MinValue && value <= long.MaxValue,
-        "ulong" => value >= ulong.MinValue && value <= ulong.MaxValue,
-        _ => false,
-    };
 
     private static void EmitFreeFunctionClasses(string outputDirectory, AbiPlan plan)
     {
@@ -921,7 +911,17 @@ internal static class InteropEmitter
         {
             case "field":
             case "static_field":
-                EmitField(lines, member, name, plan, stubMessage);
+                if (member.Kind == "static_field"
+                    && member.Value is not null
+                    && ConstantFields.TryCSharpConstant(member, out var constantType, out var constantLiteral))
+                {
+                    lines.Add($"    public const {constantType} {name} = {constantLiteral};");
+                }
+                else
+                {
+                    EmitField(lines, member, name, plan, stubMessage);
+                }
+
                 break;
 
             case "constructor":
