@@ -119,6 +119,10 @@ def normalize_signature(identifier):
     signature = signature.replace("unsignedlong", "unsignedlonglong")
     signature = signature.replace("std::basic_string<char,std::char_traits<char>,std::allocator<char>>", "std::string")
     signature = signature.replace("std::basic_string<unsignedshort,std::char_traits<unsignedshort>,std::allocator<unsignedshort>>", "std::u16string")
+    # The header side spells the default template arguments away; the demangler keeps them.
+    signature = signature.replace("std::basic_string<char>", "std::string")
+    signature = signature.replace("std::basic_string_view<char>", "std::string_view")
+    signature = signature.replace("std::basic_string_view<unsignedshort>", "std::u16string_view")
     # The demangler prints default allocator/delete arguments; clang canonical types omit them.
     while True:
         simplified = re.sub(r",std::allocator<[^<>]*>>", ">", signature)
