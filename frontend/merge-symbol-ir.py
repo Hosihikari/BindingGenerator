@@ -61,9 +61,13 @@ def source_member_offsets(source, header_root=None):
     read at all, which proves nothing and must not be read as "complete".
     """
     path = (source or {}).get("file")
+    if not path:
+        # A declaration without a recorded source comes from a hand-authored IR (the test
+        # fixtures); there is nothing to check and nothing that could have moved.
+        return None
     line = (source or {}).get("line")
-    if not path or not isinstance(line, int) or line < 1:
-        return SOURCE_UNAVAILABLE
+    if not isinstance(line, int) or line < 1:
+        return None
     lines = _read_source(path, header_root)
     if not lines or line > len(lines):
         return SOURCE_UNAVAILABLE
@@ -250,6 +254,20 @@ def main():
         for record in records
         if record.get("recordType") == "declaration"
     }
+    # Kept up to date as records are appended. Rebuilding it per class made the merge
+    # quadratic, which at six thousand classes dominated the run.
+    existing_keys = {
+        (record.get("id"), configuration)
+        for configuration, records in symbol_records.items()
+        for record in records
+    }
+    existing_methods_by_declaration = {}
+    for configuration, records in symbol_records.items():
+        for record in records:
+            if record.get("recordType") == "member":
+                existing_methods_by_declaration.setdefault(record.get("declarationId"), set()).add(
+                    normalize_signature(record.get("id", ""))
+                )
 
     added_declarations = 0
     copied_fields = 0
@@ -441,6 +459,7 @@ def main():
                     member["configuration"] = configuration
                     symbol_records[configuration].append(member)
                     member_ids[configuration].add(member.get("id"))
+                    existing_keys.add((member.get("id"), configuration))
                     copied_fields += 1
 
         for base in bases:
@@ -449,9 +468,11 @@ def main():
     for class_name in classes:
         declaration_id = "bedrock:" + class_name
         symbol_declaration = symbol_declarations.get(declaration_id)
-        header_declaration = header_declarations.get(declaration_id)
-        if symbol_declaration is None or header_declaration is None:
+        if symbol_declaration is None:
             continue
+        # A class the header tree does not describe still has a size when its deleting
+        # destructor does, so the header facts are optional here.
+        header_declaration = header_declarations.get(declaration_id, {})
 
         symbol_declaration["abstract"] = header_declaration.get("abstract", symbol_declaration.get("abstract", False))
         symbol_declaration["copyConstructible"] = header_declaration.get(
@@ -474,7 +495,19 @@ def main():
         for configuration in configurations:
             record = variant_by_id[configuration].get(declaration_id)
             if record is None:
-                continue
+                # The RTTI walk did not reach this class, but its size is known: keep a
+                # variant so the layout still reaches the emitter.
+                if usable_layout is None:
+                    continue
+                record = {
+                    "recordType": "variant",
+                    "declarationId": declaration_id,
+                    "configuration": configuration,
+                    "availability": "present",
+                }
+                symbol_records[configuration].append(record)
+                variant_by_id[configuration][declaration_id] = record
+                variant_ids[configuration].add(declaration_id)
             if usable_layout is not None:
                 record["layout"] = copy.deepcopy(usable_layout)
                 copied_layouts += 1
@@ -486,18 +519,7 @@ def main():
                         existing.append(copy.deepcopy(base))
                         known.add(base.get("declarationId"))
 
-        existing_methods = {
-            normalize_signature(record.get("id", ""))
-            for records in symbol_records.values()
-            for record in records
-            if record.get("recordType") == "member" and record.get("declarationId") == declaration_id
-        }
-        existing_keys = {
-            (record.get("id"), configuration)
-            for configuration, records in symbol_records.items()
-            for record in records
-        }
-
+        existing_methods = existing_methods_by_declaration.get(declaration_id, ())
         for header_member in header_members.get(declaration_id, []):
             kind = header_member.get("kind")
             if kind in ("field", "static_field"):
@@ -529,6 +551,9 @@ def main():
                 if key not in existing_keys:
                     symbol_records[configuration].append(member)
                     existing_keys.add(key)
+                    existing_methods_by_declaration.setdefault(declaration_id, set()).add(
+                        normalize_signature(identifier)
+                    )
                     copied_methods += 1
 
     base_class_ids = [

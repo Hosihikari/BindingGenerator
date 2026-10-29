@@ -70,6 +70,9 @@ if (-not [string]::IsNullOrWhiteSpace($Output)) {
 if (-not [string]::IsNullOrWhiteSpace($IrOutput)) {
     $Arguments += @("--ir-output", $IrOutput)
 }
+if ($VerbosePreference -ne 'SilentlyContinue') {
+    $Arguments += @("--verbose")
+}
 
 & $Frontend @Arguments
 

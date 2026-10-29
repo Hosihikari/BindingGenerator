@@ -54,6 +54,7 @@ struct Inputs {
     std::vector<std::string> Classes;
     std::set<std::string> ClassSet;
     std::map<std::string, uint64_t> DiscoveredClasses;
+    bool Verbose = false;
 };
 
 struct Method {
@@ -91,6 +92,12 @@ struct RttiBase {
 struct Configuration {
     std::string Id;
     std::map<std::string, Method> Methods;
+    // Method keys grouped by class. Scanning Methods per class is quadratic: at six
+    // thousand classes and a few hundred thousand methods it dominated the whole run.
+    std::map<std::string, std::set<std::string>> MethodKeysByClass;
+    // Methods grouped by class and address, for the vtable slot walk. It used to rescan
+    // every method for every slot of every vtable.
+    std::map<std::string, std::map<uint64_t, std::vector<Method*>>> MethodsByClassAddress;
     std::map<std::string, std::string> VtableSymbols;
     std::map<std::string, uint64_t> VtableAddresses;
     std::string StringDestructorSymbol;
@@ -689,37 +696,25 @@ bool readCoffBytes(const object::COFFObjectFile& Coff, uint64_t ImageBase, uint6
 }
 
 void mapVtableAddresses(Configuration& Config, const std::string& ClassName, uint64_t VtableAddress, bool Windows, uint64_t ImageBase, const object::COFFObjectFile* Coff, const object::ObjectFile* Elf) {
+    const auto ClassMethods = Config.MethodsByClassAddress.find(ClassName);
+    if (ClassMethods == Config.MethodsByClassAddress.end()) {
+        return;
+    }
+    const auto& ByAddress = ClassMethods->second;
+
     if (!Windows) {
-        auto* ElfObject = dyn_cast<object::ELFObjectFileBase>(Elf);
-        if (ElfObject == nullptr) {
-            return;
-        }
-        for (auto Section : ElfObject->dynamic_relocation_sections()) {
-            for (auto Relocation : Section.relocations()) {
-                object::ELFRelocationRef ElfRelocation(Relocation);
-                if (ElfRelocation.getType() != ELF::R_X86_64_RELATIVE) {
-                    continue;
-                }
-                uint64_t Offset = ElfRelocation.getOffset();
-                if (Offset < VtableAddress || Offset >= VtableAddress + 512 * 8) {
-                    continue;
-                }
-                auto Addend = ElfRelocation.getAddend();
-                if (!Addend) {
-                    consumeError(Addend.takeError());
-                    continue;
-                }
-                size_t Slot = static_cast<size_t>((Offset - VtableAddress) / 8);
-                if (Slot < 2) {
-                    continue;
-                }
-                uint64_t Target = static_cast<uint64_t>(*Addend);
-                for (auto& [Key, Method] : Config.Methods) {
-                    if (Method.ClassName == ClassName && Method.Va == Target) {
-                        Method.VtableIndex = static_cast<int>(Slot - 2);
-                        Method.Virtual = true;
-                    }
-                }
+        for (size_t Slot = 2; Slot < 512; ++Slot) {
+            auto Relocation = Config.ElfRelocations.find(VtableAddress + Slot * 8);
+            if (Relocation == Config.ElfRelocations.end()) {
+                continue;
+            }
+            auto Found = ByAddress.find(Relocation->second);
+            if (Found == ByAddress.end()) {
+                continue;
+            }
+            for (auto* Method : Found->second) {
+                Method->VtableIndex = static_cast<int>(Slot - 2);
+                Method->Virtual = true;
             }
         }
         return;
@@ -730,13 +725,13 @@ void mapVtableAddresses(Configuration& Config, const std::string& ClassName, uin
         if (!readCoffBytes(*Coff, ImageBase, VtableAddress + Slot * 8, &Target, sizeof(Target)) || Target == 0) {
             break;
         }
-        uint64_t TargetAddress = Target - ImageBase;
-        for (auto& [Key, Method] : Config.Methods) {
-            if (Method.ClassName == ClassName
-                && (Method.Rva == TargetAddress || Method.Va == TargetAddress)) {
-                Method.VtableIndex = static_cast<int>(Slot);
-                Method.Virtual = true;
-            }
+        auto Found = ByAddress.find(Target - ImageBase);
+        if (Found == ByAddress.end()) {
+            continue;
+        }
+        for (auto* Method : Found->second) {
+            Method->VtableIndex = static_cast<int>(Slot);
+            Method->Virtual = true;
         }
     }
 }
@@ -1235,15 +1230,11 @@ struct MergedMethod {
 
 std::vector<MergedMethod> mergeMethods(const Configuration& Windows, const Configuration& Linux, const std::string& ClassName) {
     std::set<std::string> Keys;
-    for (const auto& [Key, Method] : Windows.Methods) {
-        if (Method.ClassName == ClassName) {
-            Keys.insert(Key);
-        }
+    if (const auto Found = Windows.MethodKeysByClass.find(ClassName); Found != Windows.MethodKeysByClass.end()) {
+        Keys.insert(Found->second.begin(), Found->second.end());
     }
-    for (const auto& [Key, Method] : Linux.Methods) {
-        if (Method.ClassName == ClassName) {
-            Keys.insert(Key);
-        }
+    if (const auto Found = Linux.MethodKeysByClass.find(ClassName); Found != Linux.MethodKeysByClass.end()) {
+        Keys.insert(Found->second.begin(), Found->second.end());
     }
 
     std::vector<MergedMethod> Result;
@@ -1395,6 +1386,9 @@ bool writeFile(const std::filesystem::path& Path, StringRef Text) {
 bool emitIr(const Inputs& Inputs, const Configuration& Windows, const Configuration& Linux, uint64_t ImageBase, bool HasLinux) {
     std::filesystem::create_directories(Inputs.IrOutput);
     const auto OutputDirectory = std::filesystem::path(Inputs.IrOutput);
+    if (Inputs.Verbose) {
+        errs() << "emitting " << Inputs.Classes.size() << " classes\n";
+    }
 
     std::vector<json::Object> WinRecords;
     std::vector<json::Object> LinuxRecords;
@@ -1430,7 +1424,12 @@ bool emitIr(const Inputs& Inputs, const Configuration& Windows, const Configurat
         }
     }
 
+    size_t ClassIndex = 0;
     for (const auto& ClassName : Inputs.Classes) {
+        ++ClassIndex;
+        if (Inputs.Verbose && (ClassIndex % 100 == 0 || ClassIndex == Inputs.Classes.size())) {
+            errs() << "  " << ClassIndex << "/" << Inputs.Classes.size() << " " << ClassName << "\n";
+        }
         const std::string DeclarationId = "bedrock:" + ClassName;
         json::Object Declaration;
         Declaration["recordType"] = "declaration";
@@ -1749,6 +1748,8 @@ int main(int argc, char** argv) {
             }
         } else if (Argument == "--list-classes") {
             Inputs.ListClasses = next();
+        } else if (Argument == "--verbose") {
+            Inputs.Verbose = true;
         } else {
             errs() << "unknown argument: " << Argument << "\n";
             return 2;
@@ -1852,6 +1853,18 @@ int main(int argc, char** argv) {
         }
     }
 
+    for (Configuration* Config : {&Windows, &Linux}) {
+        for (auto& [Key, Method] : Config->Methods) {
+            Config->MethodKeysByClass[Method.ClassName].insert(Key);
+            if (Method.Rva != 0) {
+                Config->MethodsByClassAddress[Method.ClassName][Method.Rva].push_back(&Method);
+            }
+            if (Method.Va != 0 && Method.Va != Method.Rva) {
+                Config->MethodsByClassAddress[Method.ClassName][Method.Va].push_back(&Method);
+            }
+        }
+    }
+
     if (!Inputs.IrOutput.empty() && !emitIr(Inputs, Windows, Linux, Coff->getImageBase(), HasLinux)) {
         return 1;
     }
@@ -1891,15 +1904,11 @@ int main(int argc, char** argv) {
         }
 
         std::set<std::string> Keys;
-        for (const auto& [Key, Method] : Windows.Methods) {
-            if (Method.ClassName == ClassName) {
-                Keys.insert(Key);
-            }
+        if (const auto Found = Windows.MethodKeysByClass.find(ClassName); Found != Windows.MethodKeysByClass.end()) {
+            Keys.insert(Found->second.begin(), Found->second.end());
         }
-        for (const auto& [Key, Method] : Linux.Methods) {
-            if (Method.ClassName == ClassName) {
-                Keys.insert(Key);
-            }
+        if (const auto Found = Linux.MethodKeysByClass.find(ClassName); Found != Linux.MethodKeysByClass.end()) {
+            Keys.insert(Found->second.begin(), Found->second.end());
         }
 
         json::Array Methods;
