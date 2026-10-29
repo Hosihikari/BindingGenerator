@@ -270,6 +270,12 @@ internal sealed class AbiFunction
     public bool NeedsPresenceFlag => ReturnOptional || ReturnExpected;
     public List<AbiParameter> Parameters { get; init; } = [];
     public bool Static { get; init; }
+
+    /// <summary>
+    /// The member is declared with an <c>&amp;&amp;</c> qualifier, so the shim has to call it on
+    /// an rvalue even though the wrapper keeps calling the same object.
+    /// </summary>
+    public bool RvalueQualified { get; init; }
     public VariantAbiInfo? VariantInfo { get; init; }
     public VariantOp VariantOp { get; init; }
     public VariantAlternative? VariantAlternative { get; init; }
@@ -1179,14 +1185,13 @@ internal sealed class AbiPlan
                 {
                     reason = "member function templates are not projected";
                 }
-                else if (method.RefQualifier == "rvalue")
-                {
-                    reason = "rvalue-qualified members are not projected";
-                }
                 else if (string.Equals(method.Name, "operator=", StringComparison.Ordinal)
-                    && declaration.Template is not null)
+                    && declaration.Template is not null
+                    && !method.Defined)
                 {
-                    reason = "assignment operators on template specializations are not projected";
+                    // A template specialization whose assignment operator has no visible
+                    // definition cannot be compiled by the shim; a defined one can.
+                    reason = "the template assignment operator has no visible definition";
                 }
 
                 if (reason is not null)
@@ -2999,6 +3004,7 @@ internal sealed class AbiPlan
             CallableInfo = returnCallable,
             Parameters = parameters,
             Static = method.Static,
+            RvalueQualified = method.RefQualifier == "rvalue",
         };
         return true;
     }

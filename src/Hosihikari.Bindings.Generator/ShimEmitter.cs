@@ -1079,7 +1079,11 @@ internal static class ShimEmitter
 
                 var target = function.Static
                     ? $"{function.ClassCppName}::{memberName}"
-                    : $"static_cast<{function.ClassCppName}*>({SelfParameter})->{memberName}";
+                    : function.RvalueQualified
+                        // An &&-qualified member may only be called on an rvalue; the
+                        // wrapper keeps the same object and re-borrows it for the call.
+                        ? $"std::move(*static_cast<{function.ClassCppName}*>({SelfParameter})).{memberName}"
+                        : $"static_cast<{function.ClassCppName}*>({SelfParameter})->{memberName}";
                 var call = $"{target}({string.Join(", ", BuildNativeArguments(function))})";
                 var expectedVoid = function.ReturnExpected && function.ReturnKind == AbiKind.Void;
                 if (function.ReturnExpected)
@@ -1311,10 +1315,21 @@ internal static class ShimEmitter
                     }
                     else
                     {
-                        var address = function.NativeReturnType.TrimEnd().EndsWith("&", StringComparison.Ordinal)
-                            ? "&" + call
-                            : call;
-                        yield return $"    return const_cast<void*>(static_cast<void const*>({address}));";
+                        var nativeReturn = function.NativeReturnType.TrimEnd();
+                        if (nativeReturn.EndsWith("&&", StringComparison.Ordinal))
+                        {
+                            // An rvalue reference has no addressable object of its own; bind it
+                            // to a reference first and hand out the address of what it names.
+                            yield return $"    auto&& hs_reference = {call};";
+                            yield return "    return const_cast<void*>(static_cast<void const*>(&hs_reference));";
+                        }
+                        else
+                        {
+                            var address = nativeReturn.EndsWith("&", StringComparison.Ordinal)
+                                ? "&" + call
+                                : call;
+                            yield return $"    return const_cast<void*>(static_cast<void const*>({address}));";
+                        }
                     }
                 }
                 else if (function.ReturnOptional)
