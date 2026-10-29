@@ -2134,6 +2134,24 @@ internal sealed class AbiPlan
                 text = text[..^" volatile".Length].TrimEnd();
                 changed = true;
             }
+
+            // A qualifier on a pointer itself is spelled without a space (`T*const`); drop
+            // it so the caller still sees the pointer.
+            if (text.EndsWith("const", StringComparison.Ordinal)
+                && text.Length > "const".Length
+                && text[^("const".Length + 1)] is '*' or '&')
+            {
+                text = text[..^"const".Length];
+                changed = true;
+            }
+
+            if (text.EndsWith("volatile", StringComparison.Ordinal)
+                && text.Length > "volatile".Length
+                && text[^("volatile".Length + 1)] is '*' or '&')
+            {
+                text = text[..^"volatile".Length];
+                changed = true;
+            }
         }
 
         return text;
@@ -5071,6 +5089,19 @@ internal sealed class AbiPlan
                 VariantInfo = variantInfo,
             };
             return true;
+        }
+
+        // gsl::not_null<T*> is a single-pointer struct with a defaulted copy constructor, so
+        // it crosses the ABI exactly like T*. Only the pointer form unwraps; not_null of an
+        // owning wrapper keeps that wrapper's ABI, which no plain pointer can stand in for.
+        if (text.StartsWith("gsl::not_null<", StringComparison.Ordinal)
+            && text.EndsWith(">", StringComparison.Ordinal))
+        {
+            var notNullInner = text["gsl::not_null<".Length..^1].Trim();
+            if (IsPointerType(notNullInner))
+            {
+                text = notNullInner;
+            }
         }
 
         if (!IsPointerType(text) && TryParseSharedPtr(text, out var sharedPointee))
