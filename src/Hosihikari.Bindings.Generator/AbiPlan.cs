@@ -1624,7 +1624,10 @@ internal sealed class AbiPlan
                          .Where(declaration => declaration.Kind == "function")
                          .OrderBy(declaration => declaration.Id, StringComparer.Ordinal))
             {
-                var callableInline = function.Inline && function.Defined;
+                // In virtual-dispatch mode the shim compiles the umbrella that declares the
+                // function; a body recorded as not visible is still in that translation unit
+                // when the declaration is inline.
+                var callableInline = function.Inline && (function.Defined || virtualDispatch);
                 var callableImported = linkCarrier
                     && (HasExportAttribute(function.Attributes) || HasExportMacro(function.Macros));
                 // A mapped comparison operator has an identifier name in C#, so validate the

@@ -469,10 +469,20 @@ public:
         collectDependencyRecords(Decl);
 
         std::string DeclId = idFor(Decl, "");
+        if (auto Existing = FunctionRecordIndex.find(DeclId); Existing != FunctionRecordIndex.end()) {
+            if (Decl->isThisDeclarationADefinition()) {
+                auto& Record = Records[Existing->second];
+                Record["defined"] = true;
+                Record["inline"] = Decl->isInlined();
+            }
+            return true;
+        }
+
         if (!Emitted.insert(DeclId).second) {
             return true;
         }
 
+        FunctionRecordIndex[DeclId] = Records.size();
         Records.emplace_back(makeDeclaration(Decl, DeclId, "function"));
         ++Declarations;
         return true;
@@ -684,6 +694,9 @@ private:
     ASTContext& Ctx;
     const Options& Opt;
     std::set<std::string> Emitted;
+    // Function records can be revisited through a redeclaration; the index lets a later
+    // definition upgrade an earlier prototype instead of being dropped.
+    std::map<std::string, size_t> FunctionRecordIndex;
     std::map<std::string, EnumDecl*> DependencyEnums;
     std::map<std::string, CXXRecordDecl*> DependencyRecords;
 
