@@ -2188,6 +2188,22 @@ internal static class ShimEmitter
         AppendSymbolResolution(source, configuration.Os, targetModule);
 
         source.Add("");
+        // A std::initializer_list and a buffer_span are both {begin, end}; the shim builds
+        // one over the caller's buffer and passes it by value. A gsl::span stores its size
+        // before the pointer (storage_type derives from the extent), so it needs its own
+        // struct rather than the array view.
+        source.Add("struct HosihikariSpanView");
+        source.Add("{");
+        source.Add("    std::size_t size;");
+        source.Add("    void const* data;");
+        source.Add("};");
+        source.Add("");
+        source.Add("struct HosihikariInitListView");
+        source.Add("{");
+        source.Add("    void const* begin;");
+        source.Add("    void const* end;");
+        source.Add("};");
+        source.Add("");
         source.Add("inline void* hs_allocate(std::size_t size, std::size_t align)");
         source.Add("{");
         source.Add("    return align > 16");
@@ -2688,6 +2704,18 @@ internal static class ShimEmitter
             }
 
             var name = CppParameterName(parameter, index);
+            if (parameter.VectorKind == VectorParameterKind.Span
+                || parameter.VectorKind == VectorParameterKind.InitializerList)
+            {
+                // The callee receives the view itself: gsl::span stores {size, pointer} and
+                // an initializer_list / buffer_span stores {begin, end}, both over the
+                // caller's buffer.
+                yield return parameter.VectorKind == VectorParameterKind.Span
+                    ? $"    HosihikariSpanView hs_vec{index}{{ {name}_count, {name}_data }};"
+                    : $"    HosihikariInitListView hs_vec{index}{{ {name}_data, {name}_data + {name}_count }};";
+                continue;
+            }
+
             if (parameter.VectorElementKind == AbiKind.StringView)
             {
                 var helper = AbiPlan.IsStringViewType(parameter.VectorElementType ?? "")
@@ -3040,7 +3068,12 @@ internal static class ShimEmitter
             var parameter = function.Parameters[index];
             if (parameter.IsVector)
             {
-                callParameters.Add("void*");
+                callParameters.Add(parameter.VectorKind switch
+                {
+                    VectorParameterKind.Span => "HosihikariSpanView",
+                    VectorParameterKind.InitializerList => "HosihikariInitListView",
+                    _ => "void*",
+                });
                 continue;
             }
 
@@ -3240,7 +3273,9 @@ internal static class ShimEmitter
 
                 if (parameter.IsVector)
                 {
-                    callArguments.Add($"static_cast<void*>(&hs_vec{index})");
+                    callArguments.Add(parameter.VectorKind == VectorParameterKind.Vector
+                        ? $"static_cast<void*>(&hs_vec{index})"
+                        : $"hs_vec{index}");
                     continue;
                 }
 

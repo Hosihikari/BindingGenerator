@@ -72,6 +72,13 @@ internal sealed class AbiParameter
     public bool IsOptionalRef { get; init; }
     public string? OptionalRefInnerType { get; init; }
     public bool IsVector { get; init; }
+
+    /// <summary>
+    /// Which array-like parameter this is. `vector` builds a std::vector from the element
+    /// buffer; `span` and `initializer` pass the buffer straight through as the two-word
+    /// object the native parameter expects.
+    /// </summary>
+    public VectorParameterKind VectorKind { get; init; } = VectorParameterKind.Vector;
     public AbiKind VectorElementKind { get; init; }
     public string? VectorElementType { get; init; }
     public string? VectorElementWrapperType { get; init; }
@@ -194,6 +201,13 @@ internal enum ArrayElementOwnership
     OptionalRecordCopy,
     VariantCopy,
     PairCopy,
+}
+
+internal enum VectorParameterKind
+{
+    Vector,
+    Span,
+    InitializerList,
 }
 
 internal sealed class AbiFunction
@@ -1456,6 +1470,7 @@ internal sealed class AbiPlan
                         destroyableDeclarationIds,
                         enumUnderlyingByName,
                         linkCarrier,
+                        symbolDispatch,
                         variants,
                         out var mapped,
                         out _)
@@ -1528,6 +1543,7 @@ internal sealed class AbiPlan
                             destroyableDeclarationIds,
                             enumUnderlyingByName,
                             linkCarrier,
+                            symbolDispatch,
                             variants,
                             out var mapped,
                             out _)
@@ -1773,6 +1789,7 @@ internal sealed class AbiPlan
                                 destroyableDeclarationIds,
                                 enumUnderlyingByName,
                                 linkCarrier,
+                                symbolDispatch,
                                 variants,
                                 out var mapped,
                                 out _)
@@ -2669,6 +2686,7 @@ internal sealed class AbiPlan
                     destroyableDeclarationIds,
                     enumUnderlyingByName,
                     linkCarrier || symbolDispatch,
+                    symbolDispatch,
                     variants,
                     out var abiParameter,
                     out var parameterReason))
@@ -2988,6 +3006,7 @@ internal sealed class AbiPlan
                     destroyableDeclarationIds,
                     enumUnderlyingByName,
                     linkCarrier || symbolDispatch,
+                    symbolDispatch,
                     variants,
                     out var abiParameter,
                     out var parameterReason))
@@ -5006,6 +5025,7 @@ internal sealed class AbiPlan
                 destroyableDeclarationIds,
                 enumUnderlyingByName,
                 linkCarrier,
+                symbolDispatch: false,
                 variants,
                 out var valueParameter,
                 out _))
@@ -5052,6 +5072,62 @@ internal sealed class AbiPlan
         return true;
     }
 
+    private static bool TryParseSpanLike(string canonical, out string element, out VectorParameterKind kind)
+    {
+        element = "";
+        kind = VectorParameterKind.Span;
+        var text = canonical.Trim();
+        string? prefix = null;
+        foreach (var candidate in new[] { "gsl::span<", "buffer_span_mut<", "buffer_span<" })
+        {
+            if (text.StartsWith(candidate, StringComparison.Ordinal))
+            {
+                prefix = candidate;
+                // A buffer_span stores {begin, end}, not {size, data}.
+                kind = candidate == "gsl::span<"
+                    ? VectorParameterKind.Span
+                    : VectorParameterKind.InitializerList;
+                break;
+            }
+        }
+
+        if (prefix is null)
+        {
+            if (!text.StartsWith("std::initializer_list<", StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            prefix = "std::initializer_list<";
+            kind = VectorParameterKind.InitializerList;
+        }
+
+        if (!text.EndsWith(">", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var arguments = SplitTemplateArguments(text[prefix.Length..^1]).ToList();
+        if (arguments.Count == 0)
+        {
+            return false;
+        }
+
+        // A static-extent gsl::span stores only the pointer, so it does not match the
+        // dynamic two-word layout the shim builds. Leave those members as stubs.
+        if (prefix == "gsl::span<" && arguments.Count > 1)
+        {
+            var extent = arguments[1].Trim();
+            if (extent is not ("-1" or "std::dynamic_extent"))
+            {
+                return false;
+            }
+        }
+
+        element = arguments[0];
+        return !string.IsNullOrWhiteSpace(element);
+    }
+
     private static bool TryMapParameter(
         string surface,
         string name,
@@ -5061,6 +5137,7 @@ internal sealed class AbiPlan
         IReadOnlySet<string> destroyableDeclarationIds,
         IReadOnlyDictionary<string, string> enumUnderlyingByName,
         bool linkCarrier,
+        bool symbolDispatch,
         VariantRegistry variants,
         out AbiParameter parameter,
         out string? reason)
@@ -5197,6 +5274,73 @@ internal sealed class AbiPlan
                 VariantInfo = mapVariant,
             };
             return true;
+        }
+
+        // A span or initializer_list parameter is a two-word view over a caller-owned buffer.
+        // Symbol dispatch can hand the buffer through unchanged, so the projection takes an
+        // array instead of a generated C++ container.
+        if (symbolDispatch && TryParseSpanLike(text, out var spanElement, out var spanKind))
+        {
+            var spanElementText = spanElement.Trim();
+            if (spanElementText.StartsWith("gsl::not_null<", StringComparison.Ordinal)
+                && spanElementText.EndsWith(">", StringComparison.Ordinal))
+            {
+                var inner = spanElementText["gsl::not_null<".Length..^1].Trim();
+                if (IsPointerType(inner))
+                {
+                    spanElementText = inner;
+                }
+            }
+
+            if (IsStringViewType(spanElementText) || IsStringType(spanElementText))
+            {
+                parameter = new AbiParameter
+                {
+                    Name = name,
+                    Kind = AbiKind.Vector,
+                    NativeType = text,
+                    IsVector = true,
+                    VectorKind = spanKind,
+                    VectorElementKind = AbiKind.StringView,
+                    VectorElementType = spanElementText,
+                };
+                return true;
+            }
+
+            if (TryMapEnumUnderlying(spanElementText, enumUnderlyingByName, out var spanScalar)
+                || TryMapFundamental(spanElementText, out spanScalar))
+            {
+                parameter = new AbiParameter
+                {
+                    Name = name,
+                    Kind = AbiKind.Vector,
+                    NativeType = text,
+                    IsVector = true,
+                    VectorKind = spanKind,
+                    VectorElementKind = spanScalar,
+                    VectorElementType = spanElementText,
+                };
+                return true;
+            }
+
+            if (IsPointerType(spanElementText))
+            {
+                parameter = new AbiParameter
+                {
+                    Name = name,
+                    Kind = AbiKind.Vector,
+                    NativeType = text,
+                    IsVector = true,
+                    VectorKind = spanKind,
+                    VectorElementKind = AbiKind.Opaque,
+                    VectorElementType = spanElementText,
+                    VectorElementOwnership = ArrayElementOwnership.None,
+                };
+                return true;
+            }
+
+            reason = $"span element type '{spanElementText}' is not supported";
+            return false;
         }
 
         if (TryParseVector(text, out var vectorElement))
@@ -6524,8 +6668,11 @@ internal sealed class AbiPlan
             {
                 // A by-value vector parameter is destroyed by the callee under the MSVC ABI;
                 // the shim's local vector would then be destroyed twice. References and
-                // pointers stay owned by the shim for the duration of the call.
-                if (!IsReferenceType(parameter.NativeType) && !IsPointerType(parameter.NativeType))
+                // pointers stay owned by the shim for the duration of the call. A span or an
+                // initializer_list owns nothing, so by-value is exactly what the callee takes.
+                if (parameter.VectorKind == VectorParameterKind.Vector
+                    && !IsReferenceType(parameter.NativeType)
+                    && !IsPointerType(parameter.NativeType))
                 {
                     reason = "by-value vector parameters are not supported by symbol dispatch";
                     return false;
