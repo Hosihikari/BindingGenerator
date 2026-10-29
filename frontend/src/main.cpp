@@ -1411,7 +1411,7 @@ int main(int argc, char** argv) {
     llvm::json::Object Frontend;
     Frontend["name"] = "libtooling";
     Frontend["version"] = "0.4.0";
-    Frontend["llvm"] = "23.1.3";
+    Frontend["llvm"] = "23.1.4";
     Manifest["frontend"] = std::move(Frontend);
 
     llvm::json::Array Sources;
