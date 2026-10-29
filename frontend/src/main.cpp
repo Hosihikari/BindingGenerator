@@ -454,7 +454,8 @@ public:
     }
 
     bool VisitFunctionDecl(FunctionDecl* Decl) {
-        if (Decl->isImplicit() || isa<CXXMethodDecl>(Decl) || Decl->getDescribedFunctionTemplate() != nullptr) {
+        if (Decl->isImplicit() || isa<CXXMethodDecl>(Decl) || Decl->getDescribedFunctionTemplate() != nullptr
+            || Decl->isTemplated() || hasDependentTypes(Decl)) {
             return true;
         }
         if (!Decl->isExternallyVisible() || !isInRoot(Decl->getLocation())) {
@@ -475,6 +476,20 @@ public:
         Records.emplace_back(makeDeclaration(Decl, DeclId, "function"));
         ++Declarations;
         return true;
+    }
+
+    // A friend function injected from a class template keeps the template parameters in
+    // its signature; it is a pattern, not a callable declaration.
+    bool hasDependentTypes(FunctionDecl* Decl) const {
+        if (Decl->getReturnType()->isDependentType()) {
+            return true;
+        }
+        for (auto* Parameter : Decl->parameters()) {
+            if (Parameter->getType()->isDependentType()) {
+                return true;
+            }
+        }
+        return false;
     }
 
     bool VisitEnumDecl(EnumDecl* Decl) {

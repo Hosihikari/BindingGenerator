@@ -1579,48 +1579,37 @@ internal sealed class AbiPlan
             });
         }
 
-        // Namespace-level inline functions are emitted as static C# classes. Link-safe mode
-        // skips them because an inline body may still reference out-of-line carrier symbols.
-        static bool IsFreeFunctionScalar(AbiKind kind) =>
-            kind is AbiKind.Bool or AbiKind.I8 or AbiKind.U8
-                or AbiKind.I16 or AbiKind.U16 or AbiKind.I32 or AbiKind.U32
-                or AbiKind.I64 or AbiKind.U64 or AbiKind.USize or AbiKind.ISize
-                or AbiKind.F32 or AbiKind.F64;
-
+        // Namespace-level functions are emitted as static C# classes. An inline body compiles
+        // into the shim; a carrier export can also be called through the import library, so
+        // out-of-line functions are eligible when link-carrier is on.
         static bool IsFreeFunctionParameterSupported(AbiParameter parameter)
         {
-            if (parameter.IsOptional
-                || parameter.IsOptionalRef
-                || parameter.IsUniquePtrParam
-                || parameter.IsVector
-                || parameter.IsMap)
-            {
-                return false;
-            }
-
             if (parameter.Kind == AbiKind.StringView)
             {
                 return !IsNonConstLValueReference(parameter.NativeType);
             }
 
-            if (parameter.Kind == AbiKind.Opaque)
+            if (parameter.Kind != AbiKind.Opaque)
             {
-                var core = StripTopLevelQualifiers(parameter.NativeType);
-                var isPointer = core.EndsWith("*", StringComparison.Ordinal);
-                var isReference = core.EndsWith("&", StringComparison.Ordinal)
-                    && !core.EndsWith("&&", StringComparison.Ordinal);
-                if (!isPointer && !isReference)
-                {
-                    return false;
-                }
-
-                var pointee = StripTopLevelQualifiers(core[..^1].TrimEnd());
-                return !pointee.EndsWith("*", StringComparison.Ordinal)
-                    && !pointee.EndsWith("&", StringComparison.Ordinal)
-                    && IsValidCppQualifiedName(pointee);
+                // Vectors, optionals, unique pointers, maps, shared handles, callbacks and
+                // scalars project through the same argument builder the member path uses.
+                return true;
             }
 
-            return IsFreeFunctionScalar(parameter.Kind);
+            var core = StripTopLevelQualifiers(parameter.NativeType);
+            var isPointer = core.EndsWith("*", StringComparison.Ordinal);
+            var isReference = core.EndsWith("&", StringComparison.Ordinal)
+                && !core.EndsWith("&&", StringComparison.Ordinal);
+            if (!isPointer && !isReference)
+            {
+                // A by-value record crosses through its copy constructor.
+                return IsValidCppQualifiedName(core);
+            }
+
+            var pointee = StripTopLevelQualifiers(core[..^1].TrimEnd());
+            return !pointee.EndsWith("*", StringComparison.Ordinal)
+                && !pointee.EndsWith("&", StringComparison.Ordinal)
+                && IsValidCppQualifiedName(pointee);
         }
 
         if (linkCarrier || virtualDispatch)
@@ -1635,18 +1624,33 @@ internal sealed class AbiPlan
                          .Where(declaration => declaration.Kind == "function")
                          .OrderBy(declaration => declaration.Id, StringComparer.Ordinal))
             {
+                var callableInline = function.Inline && function.Defined;
+                var callableImported = linkCarrier
+                    && (HasExportAttribute(function.Attributes) || HasExportMacro(function.Macros));
+                // A mapped comparison operator has an identifier name in C#, so validate the
+                // projected name rather than the native spelling.
+                var nameParts = TypeNames.SplitQualifiedName(function.QualifiedName).ToList();
+                var mappedOperatorName = nameParts.Count > 0
+                    && nameParts[^1].StartsWith("operator", StringComparison.Ordinal)
+                        ? OperatorMethodName(nameParts[^1])
+                        : null;
+                var validName = nameParts.Count > 0
+                    && IsValidCppQualifiedName(string.Join(
+                        "::",
+                        nameParts.Take(nameParts.Count - 1).Append(mappedOperatorName ?? nameParts[^1])));
                 if (function.Access != "public"
                     || function.Template is not null
                     || function.Signature is null
                     || function.Signature.Variadic
                     || function.Consteval
-                    || !function.Inline
-                    || !function.Defined
+                    || (!callableInline && !callableImported)
                     || function.Source is null
-                    || !IsValidCppQualifiedName(function.QualifiedName)
+                    || !validName
                     || HasMsvcInternalTypeName(function.QualifiedName)
                     || HasMsvcInternalTypeName(function.Signature!.ReturnType)
-                    || function.Signature.Parameters.Any(parameter => HasMsvcInternalTypeName(parameter.Type))
+                    || HasUnnameableTypeName(function.Signature.ReturnType)
+                    || function.Signature.Parameters.Any(parameter =>
+                        HasMsvcInternalTypeName(parameter.Type) || HasUnnameableTypeName(parameter.Type))
                     || !IsNativeSourceAvailable(nativeRoot, function.Source.File))
                 {
                     continue;
@@ -1658,9 +1662,11 @@ internal sealed class AbiPlan
                     continue;
                 }
 
-                var baseName = TypeNames.Sanitize(parts[^1]);
-                if (baseName.Length == 0
-                    || baseName.Contains("operator", StringComparison.Ordinal))
+                var nativeName = parts[^1];
+                var baseName = nativeName.StartsWith("operator", StringComparison.Ordinal)
+                    ? OperatorMethodName(nativeName)
+                    : TypeNames.Sanitize(nativeName);
+                if (string.IsNullOrEmpty(baseName))
                 {
                     continue;
                 }
@@ -1716,71 +1722,32 @@ internal sealed class AbiPlan
                             out var returnUniquePtr,
                             out var returnOptional,
                             out var returnArray,
-                            out _,
-                            out _,
-                            out _,
-                            out _,
-                            out _,
-                            out _,
-                            out _,
+                            out var returnSpan,
+                            out var arrayElementKind,
+                            out var arrayElementType,
+                            out var arrayElementSharedWrapper,
+                            out var arrayElementOwnership,
+                            out var arrayElementWrapperType,
+                            out var arrayElementNativeType,
                             out var sharedWrapper,
                             out var timeConversion,
-                            out _,
-                            out _,
+                            out var timeClockType,
+                            out var timeDurationType,
                             out var specialValue,
-                            out _,
+                            out var specialValueType,
                             out var mapKeyKind,
                             out var mapValueKind,
-                            out _,
-                            out _,
-                            out _,
+                            out var mapValueWrapperType,
+                            out var mapValueOwnership,
+                            out var mapValueNativeType,
                             out var returnNullable,
                             out var returnExpected,
-                            out _,
+                            out var expectedErrorType,
                             out var returnVariant,
                             out var returnCallable,
                             out _))
                     {
                         continue;
-                    }
-
-                    if (!(returnKind == AbiKind.Void
-                            || returnKind == AbiKind.StringView
-                            || returnKind == AbiKind.Opaque
-                            || IsFreeFunctionScalar(returnKind))
-                        || returnOwned
-                        || returnUniquePtr
-                        || returnOptional
-                        || returnArray
-                        || returnExpected
-                        || sharedWrapper != SharedWrapperKind.None
-                        || timeConversion != TimeConversion.None
-                        || specialValue != SpecialValueKind.None
-                        || mapKeyKind != AbiKind.Void
-                        || mapValueKind != AbiKind.Void
-                        || returnVariant is not null
-                        || returnCallable is not null)
-                    {
-                        continue;
-                    }
-
-                    if (returnKind == AbiKind.Opaque)
-                    {
-                        var returnCore = StripTopLevelQualifiers(nativeReturnType);
-                        var returnIsPointer = returnCore.EndsWith("*", StringComparison.Ordinal);
-                        var returnIsReference = returnCore.EndsWith("&", StringComparison.Ordinal)
-                            && !returnCore.EndsWith("&&", StringComparison.Ordinal);
-                        var returnPointee = returnIsPointer || returnIsReference
-                            ? StripTopLevelQualifiers(returnCore[..^1].TrimEnd())
-                            : "";
-                        if ((!returnIsPointer && !returnIsReference)
-                            || returnPointee.Length == 0
-                            || returnPointee.EndsWith("*", StringComparison.Ordinal)
-                            || returnPointee.EndsWith("&", StringComparison.Ordinal)
-                            || !IsValidCppQualifiedName(returnPointee))
-                        {
-                            continue;
-                        }
                     }
 
                     var parameters = new List<AbiParameter>();
@@ -1813,6 +1780,13 @@ internal sealed class AbiPlan
                         continue;
                     }
 
+                    var nativeLeaf = TypeNames.SplitQualifiedName(candidate.Function.QualifiedName);
+                    var operatorLeaf = nativeLeaf.Count > 0
+                        && nativeLeaf[^1].StartsWith("operator", StringComparison.Ordinal)
+                        && OperatorMethodName(nativeLeaf[^1]) is not null
+                            ? nativeLeaf[^1]
+                            : null;
+
                     functions.Add(new AbiFunction
                     {
                         CppName = "hs_function_" + CSharpNaming.ShortHash(candidate.Function.Id),
@@ -1822,15 +1796,42 @@ internal sealed class AbiPlan
                         MemberId = candidate.Function.Id,
                         ClassCppName = candidate.Function.QualifiedName,
                         ClassName = candidate.ClassName,
-                        NativeMemberName = candidate.Function.QualifiedName,
+                        // A comparison operator may be a hidden friend of a class template;
+                        // the unqualified name lets ADL find it.
+                        NativeMemberName = operatorLeaf ?? candidate.Function.QualifiedName,
                         CSharpMemberName = duplicate
                             ? candidate.BaseName + "_" + CSharpNaming.ShortHash(candidate.Function.Id)
                             : candidate.BaseName,
                         ReturnKind = returnKind,
                         NativeReturnType = nativeReturnType,
                         ReturnWrapperType = returnWrapperType,
-                        ReturnOwned = false,
+                        ReturnOwned = returnOwned,
+                        ReturnUniquePtr = returnUniquePtr,
+                        ReturnOptional = returnOptional,
+                        ReturnArray = returnArray,
+                        ReturnSpan = returnSpan,
+                        ArrayElementKind = arrayElementKind,
+                        ArrayElementType = arrayElementType,
+                        ArrayElementSharedWrapper = arrayElementSharedWrapper,
+                        ArrayElementOwnership = arrayElementOwnership,
+                        ArrayElementWrapperType = arrayElementWrapperType,
+                        ArrayElementNativeType = arrayElementNativeType,
+                        SharedWrapper = sharedWrapper,
+                        TimeConversion = timeConversion,
+                        TimeClockType = timeClockType,
+                        TimeDurationType = timeDurationType,
+                        SpecialValue = specialValue,
+                        SpecialValueType = specialValueType,
+                        MapKeyKind = mapKeyKind,
+                        MapValueKind = mapValueKind,
+                        MapValueWrapperType = mapValueWrapperType,
+                        MapValueOwnership = mapValueOwnership,
+                        MapValueNativeType = mapValueNativeType,
                         ReturnNullable = returnNullable,
+                        ReturnExpected = returnExpected,
+                        ExpectedErrorType = expectedErrorType,
+                        VariantInfo = returnVariant,
+                        CallableInfo = returnCallable,
                         Parameters = parameters,
                         Static = true,
                     });
@@ -2445,6 +2446,26 @@ internal sealed class AbiPlan
 
     private static bool HasMsvcInternalTypeName(string text) =>
         text.Contains("std::_", StringComparison.Ordinal);
+
+    private static bool HasUnnameableTypeName(string text) =>
+        text.Contains("(lambda at ", StringComparison.Ordinal)
+        || text.Contains("<lambda", StringComparison.Ordinal)
+        || text.Contains("type-parameter-", StringComparison.Ordinal);
+
+    /// <summary>
+    /// Namespace-level comparison operators have no C# operator form, so they surface as
+    /// static methods. Other operators stay unprojected.
+    /// </summary>
+    private static string? OperatorMethodName(string name) => name switch
+    {
+        "operator==" => "operator_equal",
+        "operator!=" => "operator_not_equal",
+        "operator<" => "operator_less",
+        "operator<=" => "operator_less_equal",
+        "operator>" => "operator_greater",
+        "operator>=" => "operator_greater_equal",
+        _ => null,
+    };
 
     private static bool IsValidCppQualifiedName(string qualifiedName)
     {

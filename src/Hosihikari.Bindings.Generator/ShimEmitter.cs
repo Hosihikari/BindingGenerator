@@ -754,6 +754,271 @@ internal static class ShimEmitter
         return $"{returnType} (*{function.TableField})({parameterList})";
     }
 
+    // The call expression has already been evaluated; this emits the return handling
+    // shared by methods and namespace-level functions.
+    private static IEnumerable<string> EmitCallResult(AbiFunction function, string call)
+    {
+        var returnType = AbiPlan.CppType(function.ReturnKind);
+        var expectedVoid = function.ReturnExpected && function.ReturnKind == AbiKind.Void;
+        if (function.ReturnExpected)
+        {
+            yield return $"    auto hs_expected = {call};";
+            yield return "    if (!hs_expected)";
+            yield return "    {";
+            yield return $"        setLastError({ExpectedErrorText(function)});";
+            yield return "        *hs_hasValue = false;";
+            yield return $"        {DefaultReturn(function.ReturnKind)}";
+            yield return "    }";
+            yield return "    *hs_hasValue = true;";
+            if (!expectedVoid)
+            {
+                call = "std::move(*hs_expected)";
+            }
+        }
+
+        if (function.ReturnKind == AbiKind.Void)
+        {
+            if (!expectedVoid)
+            {
+                yield return $"    {call};";
+            }
+        }
+        else if (function.ReturnKind == AbiKind.StringView)
+        {
+            yield return $"    auto result = {call};";
+            if (function.SpecialValue == SpecialValueKind.Path)
+            {
+                if (function.ReturnOptional)
+                {
+                    yield return "    *hs_hasValue = result.has_value();";
+                    yield return "    g_stringResult.assign(result ? result->string() : \"\");";
+                }
+                else
+                {
+                    yield return "    g_stringResult.assign(result.string());";
+                }
+
+                yield return "    return HosihikariStringView{g_stringResult.data(), g_stringResult.size()};";
+            }
+            else if (function.ReturnOptional)
+            {
+                yield return "    *hs_hasValue = result.has_value();";
+                yield return "    g_stringResult.assign(result ? result->data() : \"\", result ? result->size() : 0);";
+            }
+            else
+            {
+                yield return "    g_stringResult.assign(result.data(), result.size());";
+            }
+
+            if (function.SpecialValue != SpecialValueKind.Path)
+            {
+                yield return "    return HosihikariStringView{g_stringResult.data(), g_stringResult.size()};";
+            }
+        }
+        else if (function.ReturnKind == AbiKind.MapView)
+        {
+            yield return "    thread_local std::vector<HosihikariMapEntry> hs_mapEntries;";
+            yield return "    thread_local std::vector<std::string> hs_mapStrings;";
+            yield return $"    auto result = {call};";
+            yield return "    hs_mapEntries.clear();";
+            yield return "    hs_mapEntries.reserve(result.size());";
+            yield return "    hs_mapStrings.clear();";
+            yield return "    hs_mapStrings.reserve(result.size() * 2);";
+            yield return "    for (auto const& item : result)";
+            yield return "    {";
+            yield return "        HosihikariMapEntry entry{};";
+            foreach (var line in EmitMapEncode(
+                function.MapKeyKind,
+                ArrayElementOwnership.None,
+                null,
+                "entry.key",
+                "entry.keySize",
+                "item.first"))
+            {
+                yield return "        " + line;
+            }
+
+            foreach (var line in EmitMapEncode(
+                function.MapValueKind,
+                function.MapValueOwnership,
+                function.MapValueNativeType,
+                "entry.value",
+                "entry.valueSize",
+                "item.second"))
+            {
+                yield return "        " + line;
+            }
+
+            yield return "        hs_mapEntries.push_back(entry);";
+            yield return "    }";
+            yield return "    return HosihikariArrayView{hs_mapEntries.data(), hs_mapEntries.size()};";
+        }
+        else if (function.ReturnKind == AbiKind.ArrayView)
+        {
+            if (function.ArrayElementKind == AbiKind.StringView)
+            {
+                yield return "    thread_local std::vector<std::string> hs_arrayStrings;";
+                yield return "    thread_local std::vector<HosihikariStringView> hs_arrayViews;";
+                yield return $"    auto result = {call};";
+                yield return "    hs_arrayStrings.clear();";
+                yield return "    hs_arrayViews.clear();";
+                yield return "    hs_arrayStrings.reserve(result.size());";
+                yield return "    for (auto const& item : result) { hs_arrayStrings.emplace_back(item.data(), item.size()); }";
+                yield return "    hs_arrayViews.reserve(hs_arrayStrings.size());";
+                yield return "    for (auto const& item : hs_arrayStrings) { hs_arrayViews.push_back(HosihikariStringView{item.data(), item.size()}); }";
+                yield return "    return HosihikariArrayView{hs_arrayViews.data(), hs_arrayViews.size()};";
+            }
+            else if (function.ArrayElementKind == AbiKind.Shared)
+            {
+                yield return "    thread_local std::vector<HosihikariSharedHandle> hs_arrayShared;";
+                yield return $"    auto result = {call};";
+                yield return "    hs_arrayShared.clear();";
+                yield return "    hs_arrayShared.reserve(result.size());";
+                var sharedExpression = function.ArrayElementSharedWrapper is SharedWrapperKind.NotNull or SharedWrapperKind.Nullable
+                    ? "item.get()"
+                    : "item";
+                yield return $"    for (auto const& item : result) {{ hs_arrayShared.push_back(hs_make_shared_handle({sharedExpression})); }}";
+                yield return "    return HosihikariArrayView{hs_arrayShared.data(), hs_arrayShared.size()};";
+            }
+            else
+            {
+                var elementType = AbiPlan.CppType(function.ArrayElementKind);
+                yield return $"    thread_local std::vector<{elementType}> hs_arrayResult;";
+                yield return $"    auto result = {call};";
+                yield return "    hs_arrayResult.clear();";
+                yield return "    hs_arrayResult.reserve(result.size());";
+                if (function.ArrayElementKind == AbiKind.Opaque
+                    && function.ArrayElementOwnership == ArrayElementOwnership.None)
+                {
+                    yield return "    for (auto const& item : result) { hs_arrayResult.push_back(const_cast<void*>(static_cast<void const*>(item))); }";
+                }
+                else if (function.ArrayElementOwnership == ArrayElementOwnership.UniquePtr)
+                {
+                    yield return "    for (auto& item : result) { hs_arrayResult.push_back(static_cast<void*>(item.release())); }";
+                }
+                else if (function.ArrayElementOwnership == ArrayElementOwnership.RecordCopy)
+                {
+                    var recordType = function.ArrayElementNativeType ?? "void";
+                    yield return $"    for (auto const& item : result) {{ hs_arrayResult.push_back(static_cast<void*>(new {recordType}(item))); }}";
+                }
+                else if (function.ArrayElementOwnership == ArrayElementOwnership.OptionalRecordCopy)
+                {
+                    var recordType = function.ArrayElementNativeType ?? "void";
+                    yield return $"    for (auto const& item : result) {{ hs_arrayResult.push_back(item ? static_cast<void*>(new {recordType}(*item)) : nullptr); }}";
+                }
+                else if (function.ArrayElementOwnership == ArrayElementOwnership.VariantCopy)
+                {
+                    var variantType = function.ArrayElementNativeType ?? "void";
+                    yield return $"    for (auto const& item : result) {{ hs_arrayResult.push_back(static_cast<void*>(new {variantType}(item))); }}";
+                }
+                else
+                {
+                    yield return $"    for (auto const& item : result) {{ hs_arrayResult.push_back(static_cast<{elementType}>(item)); }}";
+                }
+
+                yield return "    return HosihikariArrayView{hs_arrayResult.data(), hs_arrayResult.size()};";
+            }
+        }
+        else if (function.ReturnKind == AbiKind.Shared)
+        {
+            if (function.SharedWrapper == SharedWrapperKind.WeakPtr)
+            {
+                yield return $"    auto hs_locked = ({call}).lock();";
+                yield return "    return hs_make_shared_handle(std::move(hs_locked));";
+            }
+            else
+            {
+                var sharedExpression = function.SharedWrapper is SharedWrapperKind.NotNull or SharedWrapperKind.Nullable
+                    ? $"({call}).get()"
+                    : call;
+                yield return $"    return hs_make_shared_handle({sharedExpression});";
+            }
+        }
+        else if (function.SpecialValue is SpecialValueKind.TypeId or SpecialValueKind.StrongOrdering)
+        {
+            var fallback = AbiPlan.CppType(function.ReturnKind) + "{0}";
+            if (function.ReturnOptional)
+            {
+                yield return $"    auto result = {call};";
+                yield return "    *hs_hasValue = result.has_value();";
+                yield return $"    return result ? {SpecialReturnExpression(function, "*result")} : {fallback};";
+            }
+            else
+            {
+                yield return $"    return {SpecialReturnExpression(function, call)};";
+            }
+        }
+        else if (function.TimeConversion != TimeConversion.None)
+        {
+            if (function.ReturnOptional)
+            {
+                yield return $"    auto result = {call};";
+                yield return "    *hs_hasValue = result.has_value();";
+                yield return $"    return result ? {TimeReturnExpression(function, "*result")} : std::int64_t{{0}};";
+            }
+            else
+            {
+                yield return $"    return {TimeReturnExpression(function, call)};";
+            }
+        }
+        else if (function.ReturnKind == AbiKind.Opaque)
+        {
+            if (function.ReturnOptional && function.ReturnOwned)
+            {
+                yield return $"    auto result = {call};";
+                yield return "    *hs_hasValue = result.has_value();";
+                yield return "    if (!result) { return nullptr; }";
+                yield return $"    return static_cast<void*>(new {function.NativeReturnType}(std::move(*result)));";
+            }
+            else if (function.ReturnOptional)
+            {
+                // A returned optional_ref borrows an existing object; the presence flag
+                // distinguishes an empty reference from a null pointer value.
+                yield return $"    auto result = {call};";
+                yield return "    *hs_hasValue = static_cast<bool>(result);";
+                yield return "    return result ? const_cast<void*>(static_cast<void const*>(&*result)) : nullptr;";
+            }
+            else if (function.ReturnUniquePtr)
+            {
+                yield return $"    auto hs_result = {call};";
+                yield return "    return static_cast<void*>(hs_result.release());";
+            }
+            else if (function.ReturnOwned)
+            {
+                yield return $"    return static_cast<void*>(new {function.NativeReturnType}({call}));";
+            }
+            else
+            {
+                var nativeReturn = function.NativeReturnType.TrimEnd();
+                if (nativeReturn.EndsWith("&&", StringComparison.Ordinal))
+                {
+                    // An rvalue reference has no addressable object of its own; bind it
+                    // to a reference first and hand out the address of what it names.
+                    yield return $"    auto&& hs_reference = {call};";
+                    yield return "    return const_cast<void*>(static_cast<void const*>(&hs_reference));";
+                }
+                else
+                {
+                    var address = nativeReturn.EndsWith("&", StringComparison.Ordinal)
+                        ? "&" + call
+                        : call;
+                    yield return $"    return const_cast<void*>(static_cast<void const*>({address}));";
+                }
+            }
+        }
+        else if (function.ReturnOptional)
+        {
+            yield return $"    auto result = {call};";
+            yield return "    *hs_hasValue = result.has_value();";
+            yield return $"    return result ? static_cast<{returnType}>(*result) : {returnType}{{}};";
+        }
+        else
+        {
+            yield return $"    return static_cast<{returnType}>({call});";
+        }
+
+    }
+
     private static IEnumerable<string> EmitFunction(AbiFunction function, bool llAllocator)
     {
         var returnType = AbiPlan.CppType(function.ReturnKind);
@@ -1008,26 +1273,9 @@ internal static class ShimEmitter
             case AbiFunctionKind.FreeFunction:
             {
                 var call = $"{function.NativeMemberName}({string.Join(", ", BuildNativeArguments(function))})";
-                if (function.ReturnKind == AbiKind.Void)
+                foreach (var line in EmitCallResult(function, call))
                 {
-                    yield return $"    {call};";
-                }
-                else if (function.ReturnKind == AbiKind.StringView)
-                {
-                    yield return $"    auto result = {call};";
-                    yield return "    g_stringResult.assign(result.data(), result.size());";
-                    yield return "    return HosihikariStringView{g_stringResult.data(), g_stringResult.size()};";
-                }
-                else if (function.ReturnKind == AbiKind.Opaque)
-                {
-                    var address = function.NativeReturnType.TrimEnd().EndsWith("&", StringComparison.Ordinal)
-                        ? "&" + call
-                        : call;
-                    yield return $"    return const_cast<void*>(static_cast<void const*>({address}));";
-                }
-                else
-                {
-                    yield return $"    return static_cast<{AbiPlan.CppType(function.ReturnKind)}>({call});";
+                    yield return line;
                 }
 
                 break;
@@ -1085,262 +1333,9 @@ internal static class ShimEmitter
                         ? $"std::move(*static_cast<{function.ClassCppName}*>({SelfParameter})).{memberName}"
                         : $"static_cast<{function.ClassCppName}*>({SelfParameter})->{memberName}";
                 var call = $"{target}({string.Join(", ", BuildNativeArguments(function))})";
-                var expectedVoid = function.ReturnExpected && function.ReturnKind == AbiKind.Void;
-                if (function.ReturnExpected)
+                foreach (var line in EmitCallResult(function, call))
                 {
-                    yield return $"    auto hs_expected = {call};";
-                    yield return "    if (!hs_expected)";
-                    yield return "    {";
-                    yield return $"        setLastError({ExpectedErrorText(function)});";
-                    yield return "        *hs_hasValue = false;";
-                    yield return $"        {DefaultReturn(function.ReturnKind)}";
-                    yield return "    }";
-                    yield return "    *hs_hasValue = true;";
-                    if (!expectedVoid)
-                    {
-                        call = "std::move(*hs_expected)";
-                    }
-                }
-
-                if (function.ReturnKind == AbiKind.Void)
-                {
-                    if (!expectedVoid)
-                    {
-                        yield return $"    {call};";
-                    }
-                }
-                else if (function.ReturnKind == AbiKind.StringView)
-                {
-                    yield return $"    auto result = {call};";
-                    if (function.SpecialValue == SpecialValueKind.Path)
-                    {
-                        if (function.ReturnOptional)
-                        {
-                            yield return "    *hs_hasValue = result.has_value();";
-                            yield return "    g_stringResult.assign(result ? result->string() : \"\");";
-                        }
-                        else
-                        {
-                            yield return "    g_stringResult.assign(result.string());";
-                        }
-
-                        yield return "    return HosihikariStringView{g_stringResult.data(), g_stringResult.size()};";
-                    }
-                    else if (function.ReturnOptional)
-                    {
-                        yield return "    *hs_hasValue = result.has_value();";
-                        yield return "    g_stringResult.assign(result ? result->data() : \"\", result ? result->size() : 0);";
-                    }
-                    else
-                    {
-                        yield return "    g_stringResult.assign(result.data(), result.size());";
-                    }
-
-                    if (function.SpecialValue != SpecialValueKind.Path)
-                    {
-                        yield return "    return HosihikariStringView{g_stringResult.data(), g_stringResult.size()};";
-                    }
-                }
-                else if (function.ReturnKind == AbiKind.MapView)
-                {
-                    yield return "    thread_local std::vector<HosihikariMapEntry> hs_mapEntries;";
-                    yield return "    thread_local std::vector<std::string> hs_mapStrings;";
-                    yield return $"    auto result = {call};";
-                    yield return "    hs_mapEntries.clear();";
-                    yield return "    hs_mapEntries.reserve(result.size());";
-                    yield return "    hs_mapStrings.clear();";
-                    yield return "    hs_mapStrings.reserve(result.size() * 2);";
-                    yield return "    for (auto const& item : result)";
-                    yield return "    {";
-                    yield return "        HosihikariMapEntry entry{};";
-                    foreach (var line in EmitMapEncode(
-                        function.MapKeyKind,
-                        ArrayElementOwnership.None,
-                        null,
-                        "entry.key",
-                        "entry.keySize",
-                        "item.first"))
-                    {
-                        yield return "        " + line;
-                    }
-
-                    foreach (var line in EmitMapEncode(
-                        function.MapValueKind,
-                        function.MapValueOwnership,
-                        function.MapValueNativeType,
-                        "entry.value",
-                        "entry.valueSize",
-                        "item.second"))
-                    {
-                        yield return "        " + line;
-                    }
-
-                    yield return "        hs_mapEntries.push_back(entry);";
-                    yield return "    }";
-                    yield return "    return HosihikariArrayView{hs_mapEntries.data(), hs_mapEntries.size()};";
-                }
-                else if (function.ReturnKind == AbiKind.ArrayView)
-                {
-                    if (function.ArrayElementKind == AbiKind.StringView)
-                    {
-                        yield return "    thread_local std::vector<std::string> hs_arrayStrings;";
-                        yield return "    thread_local std::vector<HosihikariStringView> hs_arrayViews;";
-                        yield return $"    auto result = {call};";
-                        yield return "    hs_arrayStrings.clear();";
-                        yield return "    hs_arrayViews.clear();";
-                        yield return "    hs_arrayStrings.reserve(result.size());";
-                        yield return "    for (auto const& item : result) { hs_arrayStrings.emplace_back(item.data(), item.size()); }";
-                        yield return "    hs_arrayViews.reserve(hs_arrayStrings.size());";
-                        yield return "    for (auto const& item : hs_arrayStrings) { hs_arrayViews.push_back(HosihikariStringView{item.data(), item.size()}); }";
-                        yield return "    return HosihikariArrayView{hs_arrayViews.data(), hs_arrayViews.size()};";
-                    }
-                    else if (function.ArrayElementKind == AbiKind.Shared)
-                    {
-                        yield return "    thread_local std::vector<HosihikariSharedHandle> hs_arrayShared;";
-                        yield return $"    auto result = {call};";
-                        yield return "    hs_arrayShared.clear();";
-                        yield return "    hs_arrayShared.reserve(result.size());";
-                        var sharedExpression = function.ArrayElementSharedWrapper is SharedWrapperKind.NotNull or SharedWrapperKind.Nullable
-                            ? "item.get()"
-                            : "item";
-                        yield return $"    for (auto const& item : result) {{ hs_arrayShared.push_back(hs_make_shared_handle({sharedExpression})); }}";
-                        yield return "    return HosihikariArrayView{hs_arrayShared.data(), hs_arrayShared.size()};";
-                    }
-                    else
-                    {
-                        var elementType = AbiPlan.CppType(function.ArrayElementKind);
-                        yield return $"    thread_local std::vector<{elementType}> hs_arrayResult;";
-                        yield return $"    auto result = {call};";
-                        yield return "    hs_arrayResult.clear();";
-                        yield return "    hs_arrayResult.reserve(result.size());";
-                        if (function.ArrayElementKind == AbiKind.Opaque
-                            && function.ArrayElementOwnership == ArrayElementOwnership.None)
-                        {
-                            yield return "    for (auto const& item : result) { hs_arrayResult.push_back(const_cast<void*>(static_cast<void const*>(item))); }";
-                        }
-                        else if (function.ArrayElementOwnership == ArrayElementOwnership.UniquePtr)
-                        {
-                            yield return "    for (auto& item : result) { hs_arrayResult.push_back(static_cast<void*>(item.release())); }";
-                        }
-                        else if (function.ArrayElementOwnership == ArrayElementOwnership.RecordCopy)
-                        {
-                            var recordType = function.ArrayElementNativeType ?? "void";
-                            yield return $"    for (auto const& item : result) {{ hs_arrayResult.push_back(static_cast<void*>(new {recordType}(item))); }}";
-                        }
-                        else if (function.ArrayElementOwnership == ArrayElementOwnership.OptionalRecordCopy)
-                        {
-                            var recordType = function.ArrayElementNativeType ?? "void";
-                            yield return $"    for (auto const& item : result) {{ hs_arrayResult.push_back(item ? static_cast<void*>(new {recordType}(*item)) : nullptr); }}";
-                        }
-                        else if (function.ArrayElementOwnership == ArrayElementOwnership.VariantCopy)
-                        {
-                            var variantType = function.ArrayElementNativeType ?? "void";
-                            yield return $"    for (auto const& item : result) {{ hs_arrayResult.push_back(static_cast<void*>(new {variantType}(item))); }}";
-                        }
-                        else
-                        {
-                            yield return $"    for (auto const& item : result) {{ hs_arrayResult.push_back(static_cast<{elementType}>(item)); }}";
-                        }
-
-                        yield return "    return HosihikariArrayView{hs_arrayResult.data(), hs_arrayResult.size()};";
-                    }
-                }
-                else if (function.ReturnKind == AbiKind.Shared)
-                {
-                    if (function.SharedWrapper == SharedWrapperKind.WeakPtr)
-                    {
-                        yield return $"    auto hs_locked = ({call}).lock();";
-                        yield return "    return hs_make_shared_handle(std::move(hs_locked));";
-                    }
-                    else
-                    {
-                        var sharedExpression = function.SharedWrapper is SharedWrapperKind.NotNull or SharedWrapperKind.Nullable
-                            ? $"({call}).get()"
-                            : call;
-                        yield return $"    return hs_make_shared_handle({sharedExpression});";
-                    }
-                }
-                else if (function.SpecialValue is SpecialValueKind.TypeId or SpecialValueKind.StrongOrdering)
-                {
-                    var fallback = AbiPlan.CppType(function.ReturnKind) + "{0}";
-                    if (function.ReturnOptional)
-                    {
-                        yield return $"    auto result = {call};";
-                        yield return "    *hs_hasValue = result.has_value();";
-                        yield return $"    return result ? {SpecialReturnExpression(function, "*result")} : {fallback};";
-                    }
-                    else
-                    {
-                        yield return $"    return {SpecialReturnExpression(function, call)};";
-                    }
-                }
-                else if (function.TimeConversion != TimeConversion.None)
-                {
-                    if (function.ReturnOptional)
-                    {
-                        yield return $"    auto result = {call};";
-                        yield return "    *hs_hasValue = result.has_value();";
-                        yield return $"    return result ? {TimeReturnExpression(function, "*result")} : std::int64_t{{0}};";
-                    }
-                    else
-                    {
-                        yield return $"    return {TimeReturnExpression(function, call)};";
-                    }
-                }
-                else if (function.ReturnKind == AbiKind.Opaque)
-                {
-                    if (function.ReturnOptional && function.ReturnOwned)
-                    {
-                        yield return $"    auto result = {call};";
-                        yield return "    *hs_hasValue = result.has_value();";
-                        yield return "    if (!result) { return nullptr; }";
-                        yield return $"    return static_cast<void*>(new {function.NativeReturnType}(std::move(*result)));";
-                    }
-                    else if (function.ReturnOptional)
-                    {
-                        // A returned optional_ref borrows an existing object; the presence flag
-                        // distinguishes an empty reference from a null pointer value.
-                        yield return $"    auto result = {call};";
-                        yield return "    *hs_hasValue = static_cast<bool>(result);";
-                        yield return "    return result ? const_cast<void*>(static_cast<void const*>(&*result)) : nullptr;";
-                    }
-                    else if (function.ReturnUniquePtr)
-                    {
-                        yield return $"    auto hs_result = {call};";
-                        yield return "    return static_cast<void*>(hs_result.release());";
-                    }
-                    else if (function.ReturnOwned)
-                    {
-                        yield return $"    return static_cast<void*>(new {function.NativeReturnType}({call}));";
-                    }
-                    else
-                    {
-                        var nativeReturn = function.NativeReturnType.TrimEnd();
-                        if (nativeReturn.EndsWith("&&", StringComparison.Ordinal))
-                        {
-                            // An rvalue reference has no addressable object of its own; bind it
-                            // to a reference first and hand out the address of what it names.
-                            yield return $"    auto&& hs_reference = {call};";
-                            yield return "    return const_cast<void*>(static_cast<void const*>(&hs_reference));";
-                        }
-                        else
-                        {
-                            var address = nativeReturn.EndsWith("&", StringComparison.Ordinal)
-                                ? "&" + call
-                                : call;
-                            yield return $"    return const_cast<void*>(static_cast<void const*>({address}));";
-                        }
-                    }
-                }
-                else if (function.ReturnOptional)
-                {
-                    yield return $"    auto result = {call};";
-                    yield return "    *hs_hasValue = result.has_value();";
-                    yield return $"    return result ? static_cast<{returnType}>(*result) : {returnType}{{}};";
-                }
-                else
-                {
-                    yield return $"    return static_cast<{returnType}>({call});";
+                    yield return line;
                 }
 
                 break;
