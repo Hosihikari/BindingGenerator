@@ -2817,7 +2817,9 @@ internal static class ShimEmitter
                 yield break;
             }
 
-            if (parameterLayout.Size <= 8 && parameter.ByValueTriviallyCopyable)
+            if (parameterLayout.Size <= 8
+                && parameter.ByValueTriviallyCopyable
+                && parameter.ByValueTriviallyDestructible)
             {
                 // Small trivial records are passed in a register; the call argument reads
                 // the handle's bytes directly.
@@ -2827,7 +2829,55 @@ internal static class ShimEmitter
             var align = parameterLayout.Align > 0 ? parameterLayout.Align : 8;
             var name = CppParameterName(parameter, index);
             yield return $"    alignas({align.ToString(CultureInfo.InvariantCulture)}) unsigned char hs_arg{index}Storage[{parameterLayout.Size.ToString(CultureInfo.InvariantCulture)}];";
-            yield return $"    std::memcpy(hs_arg{index}Storage, {name}, static_cast<std::size_t>({parameterLayout.Size.ToString(CultureInfo.InvariantCulture)}));";
+
+            if (parameter.ByValueTriviallyCopyable)
+            {
+                yield return $"    std::memcpy(hs_arg{index}Storage, {name}, static_cast<std::size_t>({parameterLayout.Size.ToString(CultureInfo.InvariantCulture)}));";
+                continue;
+            }
+
+            // A record that is not trivially copyable is non-trivial for calls even when its
+            // destructor is trivial, so the copy must run the user-provided copy constructor
+            // instead of reproducing its bytes.
+            MemberRecord? copyConstructor = null;
+            if (parameter.ByValueDeclarationId is not null)
+            {
+                copyConstructor = members.Values.FirstOrDefault(member =>
+                    string.Equals(member.DeclarationId, parameter.ByValueDeclarationId, StringComparison.Ordinal)
+                    && member.Kind == "constructor"
+                    && member.Access == "public"
+                    && IsCopyConstructorRecord(member, parameter.NativePointee ?? parameter.NativeType)
+                    && HasDispatchSymbol(member));
+            }
+
+            if (copyConstructor is null)
+            {
+                if (parameter.ByValueTriviallyDestructible)
+                {
+                    // No copy constructor record was emitted for a trivially destructible
+                    // record; its implicit copy constructor is trivial, so the bytes move.
+                    yield return $"    std::memcpy(hs_arg{index}Storage, {name}, static_cast<std::size_t>({parameterLayout.Size.ToString(CultureInfo.InvariantCulture)}));";
+                    continue;
+                }
+
+                yield return $"    setLastError(\"the copy constructor of {EscapeCpp(parameter.NativeType)} was not found\");";
+                yield return "    " + DefaultReturn(function.ReturnKind);
+                foreach (var line in SymbolCatchTail(function.ReturnKind))
+                {
+                    yield return line;
+                }
+
+                yield break;
+            }
+
+            var (copyOffset, copySymbol) = SymbolFacts(copyConstructor, configuration.Os);
+            yield return $"    static auto const hs_arg{index}Copy = hs_resolve({copyOffset}, {CppLiteral(copySymbol)});";
+            yield return $"    if (hs_arg{index}Copy == nullptr)";
+            yield return "    {";
+            yield return $"        setLastError(\"the copy constructor of {EscapeCpp(parameter.NativeType)} was not resolved\");";
+            yield return "        " + DefaultReturn(function.ReturnKind);
+            yield return "    }";
+            yield return $"    reinterpret_cast<void (*)(void*, void const*)>(const_cast<void*>(hs_arg{index}Copy))(hs_arg{index}Storage, {name});";
         }
 
         if (function.FieldBitOffset is { } fieldBits
@@ -3590,9 +3640,10 @@ internal static class ShimEmitter
     private static string? ByValueRegisterType(
         AbiParameter parameter,
         IReadOnlyDictionary<string, LayoutInfo> layouts) =>
-        // A user-provided copy constructor makes the record non-trivial for calls, so the
-        // MSVC and Itanium ABIs pass it by hidden reference even when it is small.
-        parameter.ByValueTriviallyCopyable
+        // A user-provided copy constructor or destructor makes the record non-trivial for
+        // calls, so the MSVC and Itanium ABIs pass it by hidden reference even when it is
+        // small.
+        parameter.ByValueTriviallyCopyable && parameter.ByValueTriviallyDestructible
             ? ByValueLayout(parameter, layouts)?.Size switch
             {
                 1 => "std::uint8_t",
@@ -3629,6 +3680,12 @@ internal static class ShimEmitter
         }
 
         var type = member.Signature.Parameters[0].Type.Trim();
+        // A move constructor takes the same record by rvalue reference and must not be
+        // mistaken for the copy constructor: moving from the caller's object would empty it.
+        if (type.EndsWith("&&", StringComparison.Ordinal))
+        {
+            return false;
+        }
         while (type.EndsWith("&", StringComparison.Ordinal))
         {
             type = type[..^1].TrimEnd();

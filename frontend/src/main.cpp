@@ -464,7 +464,7 @@ public:
                 }
             }
         }
-        emitImplicitDestructorIfNeeded(Definition, DeclId);
+        emitImplicitSpecialMembers(Definition, DeclId);
 
         return true;
     }
@@ -698,7 +698,7 @@ public:
                     }
                 }
             }
-            emitImplicitDestructorIfNeeded(Decl, It->first);
+            emitImplicitSpecialMembers(Decl, It->first);
         }
     }
 
@@ -1298,22 +1298,38 @@ private:
         return std::string(Buffer.str());
     }
 
-    // An implicit destructor is not necessarily listed in decls(); it is declared lazily when
-    // something asks for it. A header-only surface has to ask explicitly, because that
-    // destructor is the only way to release a by-value result.
-    void emitImplicitDestructorIfNeeded(CXXRecordDecl* Definition, const std::string& DeclId) {
-        if (!Opt.EmitImplicitDestructors
-            || Definition->hasUserDeclaredDestructor()
-            || Definition->hasTrivialDestructor()) {
+    // Implicit special members are not necessarily listed in decls(); they are declared
+    // lazily when something asks for them. A header-only surface has to ask explicitly: the
+    // non-trivial destructor releases by-value results, and the implicit copy constructor
+    // builds by-value arguments.
+    void emitImplicitSpecialMembers(CXXRecordDecl* Definition, const std::string& DeclId) {
+        if (!Opt.EmitImplicitDestructors) {
             return;
         }
-        auto* Destructor = Definition->getDestructor();
-        if (Destructor == nullptr || Destructor->isDeleted()) {
-            return;
+        if (!Definition->hasUserDeclaredDestructor() && !Definition->hasTrivialDestructor()) {
+            auto* Destructor = Definition->getDestructor();
+            if (Destructor != nullptr && !Destructor->isDeleted()) {
+                collectDependencyEnums(Destructor);
+                collectDependencyRecords(Destructor);
+                emitMember(Definition, DeclId, Destructor, "destructor", false);
+            }
         }
-        collectDependencyEnums(Destructor);
-        collectDependencyRecords(Destructor);
-        emitMember(Definition, DeclId, Destructor, "destructor", false);
+        // A by-value argument is built with the record's copy constructor, and the callee
+        // destroys it. Clang declares non-trivial implicit constructors lazily, so emit the
+        // implicit copy constructor of a non-trivially-copyable record.
+        if (!Definition->isTriviallyCopyable()) {
+            for (auto* Member : Definition->decls()) {
+                auto* Constructor = dyn_cast<CXXConstructorDecl>(Member);
+                if (Constructor == nullptr || !Constructor->isImplicit() || Constructor->isDeleted()
+                    || !Constructor->isCopyConstructor()) {
+                    continue;
+                }
+                collectDependencyEnums(Constructor);
+                collectDependencyRecords(Constructor);
+                emitMember(Definition, DeclId, Constructor, "constructor", false);
+                break;
+            }
+        }
     }
 
     // Implicit special members are skipped by default. A header-only surface can still ask

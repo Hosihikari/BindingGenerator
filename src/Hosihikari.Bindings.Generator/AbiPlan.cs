@@ -60,6 +60,14 @@ internal sealed class AbiParameter
     /// trivially destructible use the memory convention even when they are small.
     /// </summary>
     public bool ByValueTriviallyCopyable { get; init; }
+
+    /// <summary>
+    /// True when the record's destructor is trivial. A non-trivial destructor means the
+    /// callee destroys the by-value argument; a byte copy is only a valid stand-in when the
+    /// copy constructor is trivial as well.
+    /// </summary>
+    public bool ByValueTriviallyDestructible { get; init; }
+
     public bool IsPointer => AbiPlan.IsPointerType(NativeType);
     public bool IsReference { get; init; }
     public bool IsRValueReference { get; init; }
@@ -5855,6 +5863,7 @@ internal sealed class AbiPlan
                 ByValueDeclarationId = byValueDeclaration.Id,
                 IsByValueRecord = true,
                 ByValueTriviallyCopyable = byValueDeclaration.TriviallyCopyable,
+                ByValueTriviallyDestructible = byValueDeclaration.TriviallyDestructible,
                 IsReference = true,
                 IsConst = true,
                 WrapperType = LookupWrapperType(text, declarationsByQualifiedName, declarationNames),
@@ -6747,10 +6756,11 @@ internal sealed class AbiPlan
                         }
 
                         // The callee destroys non-trivial by-value parameters. A byte copy of
-                        // an owning record would then release the same resources as the source.
-                        if (!byValueRecord.TriviallyDestructible)
+                        // an owning record would then release the same resources as the source,
+                        // so those parameters are copied through the record's copy constructor.
+                        if (!byValueRecord.TriviallyDestructible && !byValueRecord.CopyConstructible)
                         {
-                            reason = "by-value record parameters must be trivially destructible";
+                            reason = "by-value record parameter is not copy-constructible";
                             return false;
                         }
 
