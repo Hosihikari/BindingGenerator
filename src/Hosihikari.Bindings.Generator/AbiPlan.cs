@@ -568,6 +568,20 @@ internal sealed class AbiPlan
                 symbolByValueCopyRequired[candidate.QualifiedName] = !candidate.TriviallyDestructible;
             }
 
+            // Clang prints a template type without its defaulted trailing arguments, so a
+            // signature says Bedrock::Result<void> while the dependency record is
+            // Bedrock::Result<void, std::error_code>. Bind the short spelling to the same
+            // record so by-value returns and parameters reach its layout and destructor.
+            foreach (var (qualifiedName, declaration) in symbolByValueReturns.ToList())
+            {
+                var shortName = ShortDefaultedResultSpelling(qualifiedName);
+                if (shortName is not null)
+                {
+                    symbolByValueReturns.TryAdd(shortName, declaration);
+                    symbolByValueCopyRequired.TryAdd(shortName, symbolByValueCopyRequired[qualifiedName]);
+                }
+            }
+
             // Vector elements are copied as bytes and released without running a destructor.
             // A user-provided copy constructor such as AABB's is compatible with that rule as
             // long as the record's storage is trivially destructible.
@@ -616,12 +630,24 @@ internal sealed class AbiPlan
 
         var skipReasons = new Dictionary<string, string>(StringComparer.Ordinal);
         var declarations = new List<DeclarationRecord>();
+        var byValueReturnNames = records
+            .OfType<MemberRecord>()
+            .Where(member => member.Signature is not null)
+            .Select(member => NormalizeTypeName(member.Signature!.ReturnType))
+            .ToHashSet(StringComparer.Ordinal);
         foreach (var declaration in allClassDeclarations.Where(declaration => declaration.Access == "public"))
         {
             string? declarationReason = null;
             if (symbolDispatch)
             {
-                if (declaration.Template is not null)
+                // A defaulted-argument template specialization that is returned by value keeps
+                // the declaration so the shim can emit its destroy entry; its members still go
+                // through the ordinary member rules.
+                var resultReturn = declaration.Template is not null
+                    ? ShortDefaultedResultSpelling(declaration.QualifiedName)
+                    : null;
+                var byValueReturnTemplate = resultReturn is not null && byValueReturnNames.Contains(resultReturn);
+                if (declaration.Template is not null && !byValueReturnTemplate)
                 {
                     declarationReason = "template classes are not supported by symbol dispatch";
                 }
@@ -2549,6 +2575,50 @@ internal sealed class AbiPlan
         }
 
         return true;
+    }
+
+    // Bedrock::Result<T, std::error_code> is printed as Bedrock::Result<T> in signatures
+    // because clang suppresses defaulted template arguments. The short spelling reaches the
+    // full dependency record, which carries the layout and the destructor symbol.
+    private static string? ShortDefaultedResultSpelling(string qualifiedName)
+    {
+        const string prefix = "Bedrock::Result<";
+        if (!qualifiedName.StartsWith(prefix, StringComparison.Ordinal)
+            || !qualifiedName.EndsWith(">", StringComparison.Ordinal))
+        {
+            return null;
+        }
+
+        var arguments = SplitTopLevelTemplateArguments(qualifiedName[prefix.Length..^1]);
+        return arguments.Count == 2 && arguments[1] == "std::error_code"
+            ? prefix + arguments[0] + ">"
+            : null;
+    }
+
+    private static List<string> SplitTopLevelTemplateArguments(string text)
+    {
+        var arguments = new List<string>();
+        var depth = 0;
+        var start = 0;
+        for (var index = 0; index < text.Length; index++)
+        {
+            switch (text[index])
+            {
+                case '<':
+                    depth++;
+                    break;
+                case '>':
+                    depth--;
+                    break;
+                case ',' when depth == 0:
+                    arguments.Add(text[start..index].Trim());
+                    start = index + 1;
+                    break;
+            }
+        }
+
+        arguments.Add(text[start..].Trim());
+        return arguments;
     }
 
     private static bool IsValidCppNamePart(string part)
