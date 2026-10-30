@@ -2552,7 +2552,7 @@ internal static class ShimEmitter
             var (staticOffset, staticSymbol) = SymbolFacts(staticField, configuration.Os);
             yield return $"static {returnType} {function.CppName}() try";
             yield return "{";
-            yield return $"    auto const hs_target = hs_resolve({staticOffset}, {CppLiteral(staticSymbol)});";
+            yield return $"    static auto const hs_target = hs_resolve({staticOffset}, {CppLiteral(staticSymbol)});";
             yield return "    if (hs_target == nullptr)";
             yield return "    {";
             yield return "        setLastError(\"symbol was not resolved\");";
@@ -2940,11 +2940,11 @@ internal static class ShimEmitter
             var (offset, symbol) = SymbolFacts(entry, configuration.Os);
             if (function.Kind == AbiFunctionKind.Destroy)
             {
-                yield return $"    auto const hs_dtor = hs_resolve({offset}, {CppLiteral(symbol)});";
+                yield return $"    static auto const hs_dtor = hs_resolve({offset}, {CppLiteral(symbol)});";
             }
             else
             {
-                yield return $"    auto const hs_target = hs_resolve({offset}, {CppLiteral(symbol)});";
+                yield return $"    static auto const hs_target = hs_resolve({offset}, {CppLiteral(symbol)});";
             }
         }
         else if (function.Kind == AbiFunctionKind.Destroy)
@@ -3236,8 +3236,8 @@ internal static class ShimEmitter
             {
                 var (copyOffset, copySymbol) = SymbolFacts(returnCopyConstructor!, configuration.Os);
                 var (dtorOffset, dtorSymbol) = SymbolFacts(returnDestructor!, configuration.Os);
-                yield return $"    auto const hs_returnCopy = hs_resolve({copyOffset}, {CppLiteral(copySymbol)});";
-                yield return $"    auto const hs_returnDtor = hs_resolve({dtorOffset}, {CppLiteral(dtorSymbol)});";
+                yield return $"    static auto const hs_returnCopy = hs_resolve({copyOffset}, {CppLiteral(copySymbol)});";
+                yield return $"    static auto const hs_returnDtor = hs_resolve({dtorOffset}, {CppLiteral(dtorSymbol)});";
                 yield return "    if (hs_returnCopy == nullptr || hs_returnDtor == nullptr)";
                 yield return "    {";
                 yield return "        setLastError(\"the returned record copy or destructor symbol was not resolved\");";
