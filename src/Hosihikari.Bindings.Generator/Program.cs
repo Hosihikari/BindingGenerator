@@ -39,7 +39,7 @@ switch (args[0])
         if (args.Length < 4)
         {
             Console.Error.WriteLine(
-                "usage: emit <ir-manifest.json> <shard-directory> <output-directory> --abi-header <path> [--native-root <path>] [--link-carrier] [--ll-allocator] [--virtual-dispatch] [--symbol-dispatch] [--target-module <name>]");
+                "usage: emit <ir-manifest.json> <shard-directory> <output-directory> --abi-header <path> [--native-root <path>] [--link-carrier] [--ll-allocator] [--virtual-dispatch] [--symbol-dispatch] [--target-module <name>] [--allow-ir-errors]");
             return 2;
         }
 
@@ -49,6 +49,7 @@ switch (args[0])
         var llAllocator = false;
         var virtualDispatch = false;
         var symbolDispatch = false;
+        var allowIrErrors = false;
         var targetModule = "bedrock_server";
         for (var index = 4; index < args.Length; index++)
         {
@@ -71,6 +72,11 @@ switch (args[0])
                     break;
                 case "--symbol-dispatch":
                     symbolDispatch = true;
+                    break;
+                // An experimental surface may parse most of its headers while a few
+                // declarations fail; the emitted surface is then partial but usable.
+                case "--allow-ir-errors":
+                    allowIrErrors = true;
                     break;
                 case "--target-module" when index + 1 < args.Length:
                     targetModule = args[++index];
@@ -112,6 +118,14 @@ switch (args[0])
         }
 
         var manifest = ReadManifest(args[1]);
+        if (allowIrErrors)
+        {
+            Console.Error.WriteLine(
+                $"warning: {manifest.Diagnostics.Errors} parse error(s) ignored by --allow-ir-errors");
+            manifest.Diagnostics.Errors = 0;
+            manifest.Diagnostics.ShardsWithErrors = [];
+        }
+
         var records = ReadRecords(args[2]);
         var validation = IrValidator.Validate(manifest, records);
         if (!validation.IsValid)
