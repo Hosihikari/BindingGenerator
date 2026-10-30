@@ -7,6 +7,7 @@ param(
     [string]$HeaderList = "",
     [switch]$UseCompileCommands,
     [switch]$EmitMangledNames,
+    [switch]$EmitImplicitDestructors,
     [switch]$SkipBuild
 )
 if ([string]::IsNullOrWhiteSpace($LeviLaminaRoot)) {
@@ -235,6 +236,9 @@ $FrontendArgs = @(
 )
 if ($EmitMangledNames) {
     $FrontendArgs += "--emit-mangled-names"
+}
+if ($EmitImplicitDestructors) {
+    $FrontendArgs += "--emit-implicit-destructors"
 }
 & $Frontend @FrontendArgs -- @CompilerArgs
 

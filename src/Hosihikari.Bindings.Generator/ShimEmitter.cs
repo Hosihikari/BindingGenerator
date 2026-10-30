@@ -2404,12 +2404,28 @@ internal static class ShimEmitter
         if (resolveByName)
         {
             // The carrier resolves a mangled name to an address at run time; there is no
-            // address in the IR to prefer.
-            source.Add("extern \"C\" void* pl_resolve_symbol(char const* symbolName);");
+            // address in the IR to prefer. The lookup function is found dynamically so the
+            // shim has no link-time dependency on the preloader.
+            source.Add("using HsResolveSymbol = void* (*)(char const* symbolName);");
+            source.Add("");
+            source.Add("inline HsResolveSymbol hs_preloaderResolve()");
+            source.Add("{");
+            source.Add("#ifdef _WIN32");
+            source.Add("    static HsResolveSymbol const resolve = []() -> HsResolveSymbol");
+            source.Add("    {");
+            source.Add("        HMODULE const module = ::GetModuleHandleW(L\"PreLoader.dll\");");
+            source.Add("        return module == nullptr ? nullptr : reinterpret_cast<HsResolveSymbol>(::GetProcAddress(module, \"pl_resolve_symbol\"));");
+            source.Add("    }();");
+            source.Add("#else");
+            source.Add("    static HsResolveSymbol const resolve = reinterpret_cast<HsResolveSymbol>(::dlsym(RTLD_DEFAULT, \"pl_resolve_symbol\"));");
+            source.Add("#endif");
+            source.Add("    return resolve;");
+            source.Add("}");
             source.Add("");
             source.Add("inline void* hs_resolve(std::uintptr_t, char const* symbol)");
             source.Add("{");
-            source.Add("    return (symbol != nullptr && *symbol != '\\0') ? ::pl_resolve_symbol(symbol) : nullptr;");
+            source.Add("    HsResolveSymbol const resolve = hs_preloaderResolve();");
+            source.Add("    return (resolve != nullptr && symbol != nullptr && *symbol != '\\0') ? resolve(symbol) : nullptr;");
             source.Add("}");
             source.Add("");
             return;

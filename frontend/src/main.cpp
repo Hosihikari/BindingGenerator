@@ -1,6 +1,8 @@
 #include "clang/AST/APValue.h"
 #include "clang/AST/GlobalDecl.h"
 #include "clang/AST/Mangle.h"
+#include "clang/AST/RecursiveASTVisitor.h"
+#include "clang/Sema/Sema.h"
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/DeclCXX.h"
 #include "clang/AST/DeclTemplate.h"
@@ -47,6 +49,9 @@ struct Options {
     // Some surfaces resolve a member by its mangled name at run time instead of by
     // address, so the IR has to carry it.
     bool EmitMangledNames = false;
+    // A surface planned from headers alone releases by-value results through the record's
+    // destructor, and the header never spells an implicit one out.
+    bool EmitImplicitDestructors = false;
     std::vector<std::string> CompilerArgs;
 };
 
@@ -359,6 +364,8 @@ bool parseOptions(int argc, char** argv, Options& Opt) {
             Opt.FlattenAnonymousFields = true;
         } else if (Arg == "--emit-mangled-names") {
             Opt.EmitMangledNames = true;
+        } else if (Arg == "--emit-implicit-destructors") {
+            Opt.EmitImplicitDestructors = true;
         } else {
             llvm::errs() << "unknown option: " << Arg << "\n";
             return false;
@@ -441,7 +448,7 @@ public:
                     emitMember(Definition, DeclId, Variable, "static_field", true);
                 }
             } else if (auto* Method = dyn_cast<CXXMethodDecl>(Member)) {
-                if (Method->isImplicit() || Method->isDeleted()) {
+                if (!shouldEmitMember(Definition, Method)) {
                     continue;
                 }
                 collectDependencyEnums(Method);
@@ -457,6 +464,7 @@ public:
                 }
             }
         }
+        emitImplicitDestructorIfNeeded(Definition, DeclId);
 
         return true;
     }
@@ -678,7 +686,7 @@ public:
                     collectDependencyRecords(Variable);
                     emitMember(Decl, It->first, Variable, "static_field", true);
                 } else if (auto* Method = dyn_cast<CXXMethodDecl>(Member)) {
-                    if (Method->isImplicit() || Method->isDeleted() || Method->getAccess() != AS_public) {
+                    if (!shouldEmitMember(Decl, Method) || Method->getAccess() != AS_public) {
                         continue;
                     }
                     collectDependencyEnums(Method);
@@ -690,6 +698,7 @@ public:
                     }
                 }
             }
+            emitImplicitDestructorIfNeeded(Decl, It->first);
         }
     }
 
@@ -1276,11 +1285,51 @@ private:
         if (auto* Constructor = dyn_cast<CXXConstructorDecl>(Decl)) {
             Context->mangleName(GlobalDecl(Constructor, CXXCtorType::Ctor_Complete), Stream);
         } else if (auto* Destructor = dyn_cast<CXXDestructorDecl>(Decl)) {
-            Context->mangleName(GlobalDecl(Destructor, CXXDtorType::Dtor_Complete), Stream);
+            // MSVC emits a separate vbase destructor (??_D) only for classes with virtual
+            // bases; every other class's destructor is ??1. Clang's Dtor_Complete mangles
+            // to ??_D, so a class without virtual bases has to use Dtor_Base.
+            auto DtorType = Destructor->getParent()->getNumVBases() > 0
+                ? CXXDtorType::Dtor_Complete
+                : CXXDtorType::Dtor_Base;
+            Context->mangleName(GlobalDecl(Destructor, DtorType), Stream);
         } else {
             Context->mangleName(GlobalDecl(Decl), Stream);
         }
         return std::string(Buffer.str());
+    }
+
+    // An implicit destructor is not necessarily listed in decls(); it is declared lazily when
+    // something asks for it. A header-only surface has to ask explicitly, because that
+    // destructor is the only way to release a by-value result.
+    void emitImplicitDestructorIfNeeded(CXXRecordDecl* Definition, const std::string& DeclId) {
+        if (!Opt.EmitImplicitDestructors
+            || Definition->hasUserDeclaredDestructor()
+            || Definition->hasTrivialDestructor()) {
+            return;
+        }
+        auto* Destructor = Definition->getDestructor();
+        if (Destructor == nullptr || Destructor->isDeleted()) {
+            return;
+        }
+        collectDependencyEnums(Destructor);
+        collectDependencyRecords(Destructor);
+        emitMember(Definition, DeclId, Destructor, "destructor", false);
+    }
+
+    // Implicit special members are skipped by default. A header-only surface can still ask
+    // for the implicit destructor of a non-trivial record: it is the only way to release a
+    // by-value result, and clang can mangle it even without a body.
+    bool shouldEmitMember(CXXRecordDecl* Owner, CXXMethodDecl* Method) const {
+        if (Method->isDeleted()) {
+            return false;
+        }
+        if (!Method->isImplicit()) {
+            return true;
+        }
+        if (!Opt.EmitImplicitDestructors || !isa<CXXDestructorDecl>(Method)) {
+            return false;
+        }
+        return Owner->hasTrivialDestructor() == false;
     }
 
     void emitMember(CXXRecordDecl* Owner, const std::string& DeclId, NamedDecl* Member, const std::string& Kind, bool Static) {
@@ -1424,6 +1473,22 @@ int main(int argc, char** argv) {
     auto& Diagnostics = AST->getDiagnostics();
     unsigned Errors = Diagnostics.getNumErrors();
     unsigned Warnings = Diagnostics.getNumWarnings();
+
+    // An implicit destructor is only declared when something uses it. A header-only surface
+    // needs every non-trivial destructor, so force the declaration before emitting.
+    if (Opt.EmitImplicitDestructors && AST->hasSema()) {
+        struct ImplicitDestructorForcer : clang::RecursiveASTVisitor<ImplicitDestructorForcer> {
+            clang::Sema& Sema;
+            explicit ImplicitDestructorForcer(clang::Sema& S) : Sema(S) {}
+            bool VisitCXXRecordDecl(clang::CXXRecordDecl* Decl) {
+                if (Decl->isCompleteDefinition() && !Decl->hasTrivialDestructor()) {
+                    Sema.ForceDeclarationOfImplicitMembers(Decl);
+                }
+                return true;
+            }
+        } Forcer(AST->getSema());
+        Forcer.TraverseDecl(AST->getASTContext().getTranslationUnitDecl());
+    }
 
     IrVisitor Visitor(AST->getASTContext(), Opt);
     Visitor.TraverseDecl(AST->getASTContext().getTranslationUnitDecl());
