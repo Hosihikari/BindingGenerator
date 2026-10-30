@@ -594,10 +594,13 @@ internal sealed class AbiPlan
             }
         }
 
+        // A member that carries only a mangled name is still reachable: the carrier
+        // resolves it by name at run time.
         static bool HasSymbolAddress(MemberRecord member) =>
             !string.IsNullOrWhiteSpace(member.Symbol)
             || member.Address is not null
-            || member.Rva is not null;
+            || member.Rva is not null
+            || !string.IsNullOrWhiteSpace(member.MangledName);
 
         static bool HasDispatchEntry(MemberRecord member) =>
             HasSymbolAddress(member)

@@ -1,4 +1,6 @@
 #include "clang/AST/APValue.h"
+#include "clang/AST/GlobalDecl.h"
+#include "clang/AST/Mangle.h"
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/DeclCXX.h"
 #include "clang/AST/DeclTemplate.h"
@@ -42,6 +44,9 @@ struct Options {
     std::vector<std::string> Filters;
     std::string Module = "ll/api/event";
     bool FlattenAnonymousFields = false;
+    // Some surfaces resolve a member by its mangled name at run time instead of by
+    // address, so the IR has to carry it.
+    bool EmitMangledNames = false;
     std::vector<std::string> CompilerArgs;
 };
 
@@ -352,6 +357,8 @@ bool parseOptions(int argc, char** argv, Options& Opt) {
             }
         } else if (Arg == "--flatten-anonymous-fields") {
             Opt.FlattenAnonymousFields = true;
+        } else if (Arg == "--emit-mangled-names") {
+            Opt.EmitMangledNames = true;
         } else {
             llvm::errs() << "unknown option: " << Arg << "\n";
             return false;
@@ -1114,6 +1121,12 @@ private:
             Object["inline"] = Function->isInlined();
             Object["defined"] = Function->isThisDeclarationADefinition();
             Object["consteval"] = Function->isConsteval();
+            if (Opt.EmitMangledNames) {
+                std::string Mangled = mangleDecl(Function);
+                if (!Mangled.empty()) {
+                    Object["mangledName"] = Mangled;
+                }
+            }
         }
 
         if (auto* Enum = dyn_cast<EnumDecl>(Decl)) {
@@ -1254,6 +1267,22 @@ private:
         ++Members;
     }
 
+    // Decorate a function or method the way the carrier spells it, so a surface that
+    // resolves members by name at run time can ask for it.
+    std::string mangleDecl(const NamedDecl* Decl) const {
+        std::unique_ptr<MangleContext> Context(Ctx.createMangleContext());
+        llvm::SmallString<256> Buffer;
+        llvm::raw_svector_ostream Stream(Buffer);
+        if (auto* Constructor = dyn_cast<CXXConstructorDecl>(Decl)) {
+            Context->mangleName(GlobalDecl(Constructor, CXXCtorType::Ctor_Complete), Stream);
+        } else if (auto* Destructor = dyn_cast<CXXDestructorDecl>(Decl)) {
+            Context->mangleName(GlobalDecl(Destructor, CXXDtorType::Dtor_Complete), Stream);
+        } else {
+            Context->mangleName(GlobalDecl(Decl), Stream);
+        }
+        return std::string(Buffer.str());
+    }
+
     void emitMember(CXXRecordDecl* Owner, const std::string& DeclId, NamedDecl* Member, const std::string& Kind, bool Static) {
         std::string MemberId = idFor(Member, DeclId);
         if (!Emitted.insert(MemberId).second) {
@@ -1332,6 +1361,12 @@ private:
             Object["defined"] = Method->hasBody();
             Object["consteval"] = Method->isConsteval();
             Object["signature"] = makeSignature(Method);
+            if (Opt.EmitMangledNames) {
+                std::string Mangled = mangleDecl(Method);
+                if (!Mangled.empty()) {
+                    Object["mangledName"] = Mangled;
+                }
+            }
             if (Method->begin_overridden_methods() != Method->end_overridden_methods()) {
                 Object["overrideOf"] = normalizePlatformTypeText(
                     (*Method->begin_overridden_methods())->getQualifiedNameAsString());

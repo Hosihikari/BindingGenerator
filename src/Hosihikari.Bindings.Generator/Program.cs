@@ -39,7 +39,7 @@ switch (args[0])
         if (args.Length < 4)
         {
             Console.Error.WriteLine(
-                "usage: emit <ir-manifest.json> <shard-directory> <output-directory> --abi-header <path> [--native-root <path>] [--link-carrier] [--ll-allocator] [--virtual-dispatch] [--symbol-dispatch] [--target-module <name>] [--allow-ir-errors]");
+                "usage: emit <ir-manifest.json> <shard-directory> <output-directory> --abi-header <path> [--native-root <path>] [--link-carrier] [--ll-allocator] [--virtual-dispatch] [--symbol-dispatch] [--target-module <name>] [--allow-ir-errors] [--resolve-by-name]");
             return 2;
         }
 
@@ -50,6 +50,7 @@ switch (args[0])
         var virtualDispatch = false;
         var symbolDispatch = false;
         var allowIrErrors = false;
+        var resolveByName = false;
         var targetModule = "bedrock_server";
         for (var index = 4; index < args.Length; index++)
         {
@@ -77,6 +78,11 @@ switch (args[0])
                 // declarations fail; the emitted surface is then partial but usable.
                 case "--allow-ir-errors":
                     allowIrErrors = true;
+                    break;
+                // Resolve each member through the carrier's name lookup instead of an
+                // address recorded in the IR.
+                case "--resolve-by-name":
+                    resolveByName = true;
                     break;
                 case "--target-module" when index + 1 < args.Length:
                     targetModule = args[++index];
@@ -150,7 +156,7 @@ switch (args[0])
 
         Directory.CreateDirectory(output);
         InteropEmitter.Emit(records, output, plan);
-        ShimEmitter.Emit(manifest, records, output, manifestHash, plan, abiHeader, targetModule);
+        ShimEmitter.Emit(manifest, records, output, manifestHash, plan, abiHeader, targetModule, resolveByName);
         CoverageEmitter.Emit(manifest, records, output, manifestHash, plan);
         Console.WriteLine(
             $"emitted {records.Count} records to {output} ({plan.Functions.Count} BindingShim functions)");

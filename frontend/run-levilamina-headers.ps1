@@ -6,6 +6,7 @@ param(
     [string[]]$AdditionalIncludePath = @(),
     [string]$HeaderList = "",
     [switch]$UseCompileCommands,
+    [switch]$EmitMangledNames,
     [switch]$SkipBuild
 )
 if ([string]::IsNullOrWhiteSpace($LeviLaminaRoot)) {
@@ -222,16 +223,20 @@ else {
     )
 }
 
-& $Frontend `
-    --surface bedrock `
-    --output $Output `
-    --root $SourceRoot `
-    --filter (Join-Path $SourceRoot "mc") `
-    --configuration win-x64-server `
-    --module mc `
-    --source $Umbrella `
-    --flatten-anonymous-fields `
-    -- @CompilerArgs
+$FrontendArgs = @(
+    "--surface", "bedrock",
+    "--output", $Output,
+    "--root", $SourceRoot,
+    "--filter", (Join-Path $SourceRoot "mc"),
+    "--configuration", "win-x64-server",
+    "--module", "mc",
+    "--source", $Umbrella,
+    "--flatten-anonymous-fields"
+)
+if ($EmitMangledNames) {
+    $FrontendArgs += "--emit-mangled-names"
+}
+& $Frontend @FrontendArgs -- @CompilerArgs
 
 if ($LASTEXITCODE -ne 0) {
     throw "IR frontend exited with $LASTEXITCODE"

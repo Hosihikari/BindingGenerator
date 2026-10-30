@@ -7,6 +7,12 @@ namespace Hosihikari.Bindings.Generator;
 
 internal static class InteropEmitter
 {
+    // Keep every generated struct below the CLR field limit of 65535.
+    private const int TableChunkSize = 30000;
+
+    private static string TableFieldAccess(AbiFunction function) =>
+        $"TablePtr->C{function.Index / TableChunkSize}.{function.TableField}";
+
     private const string DefaultStubReason = "BindingShim does not expose this member.";
 
     // A shell type has no usable member at all. It still carries the native type identity in
@@ -85,24 +91,24 @@ internal static class InteropEmitter
             [
                 $"public sealed {classModifier}partial class {name.ClassName}{interfaceClause}",
                 "{",
-                "    private nint _handle;",
+                "    private nint __hosihikari_shim_handle;",
                 "    private readonly bool _ownsHandle;",
                 "",
                 $"    public {name.ClassName}(nint handle) : this(handle, true) {{ }}",
                 "",
                 $"    internal {name.ClassName}(nint handle, bool ownsHandle)",
                 "    {",
-                "        _handle = handle;",
+                "        __hosihikari_shim_handle = handle;",
                 "        _ownsHandle = ownsHandle;",
                 "    }",
                 "",
                 $"    public static {name.ClassName} Borrow(nint handle) => new {name.ClassName}(handle, false);",
                 "",
-                "    public nint Handle => _handle;",
+                "    public nint Handle => __hosihikari_shim_handle;",
                 "",
                 "    internal nint ReleaseHandle()",
                 "    {",
-                "        if (_handle == 0)",
+                "        if (__hosihikari_shim_handle == 0)",
                 "        {",
                 "            throw new global::System.ObjectDisposedException(\"handle\");",
                 "        }",
@@ -112,8 +118,8 @@ internal static class InteropEmitter
                 "            throw new global::System.InvalidOperationException(\"A borrowed handle cannot be released.\");",
                 "        }",
                 "",
-                "        var __hs_handle = _handle;",
-                "        _handle = 0;",
+                "        var __hs_handle = __hosihikari_shim_handle;",
+                "        __hosihikari_shim_handle = 0;",
                 "        return __hs_handle;",
                 "    }",
             ]);
@@ -401,16 +407,33 @@ internal static class InteropEmitter
                 "",
                 "public static unsafe class NativeMethods",
                 "{",
-                "    [global::System.Runtime.InteropServices.StructLayout(global::System.Runtime.InteropServices.LayoutKind.Sequential)]",
-                "    internal struct Table",
-                "    {",
-                "        public uint Version;",
-                "        public uint Size;",
             };
 
-            foreach (var function in functions)
+            // The CLR rejects a type with more than 65535 fields, so a large surface is
+            // partitioned into chunk structs that keep the native table layout.
+            var chunkCount = (functions.Count + TableChunkSize - 1) / TableChunkSize;
+            for (var chunk = 0; chunk < chunkCount; chunk++)
             {
-                lines.Add($"        public {CSharpFunctionPointerType(function)} {function.TableField};");
+                lines.Add("    [global::System.Runtime.InteropServices.StructLayout(global::System.Runtime.InteropServices.LayoutKind.Sequential)]");
+                lines.Add($"    internal struct TableChunk{chunk}");
+                lines.Add("    {");
+                foreach (var function in functions.Skip(chunk * TableChunkSize).Take(TableChunkSize))
+                {
+                    lines.Add($"        public {CSharpFunctionPointerType(function)} {function.TableField};");
+                }
+
+                lines.Add("    }");
+                lines.Add("");
+            }
+
+            lines.Add("    [global::System.Runtime.InteropServices.StructLayout(global::System.Runtime.InteropServices.LayoutKind.Sequential)]");
+            lines.Add("    internal struct Table");
+            lines.Add("    {");
+            lines.Add("        public uint Version;");
+            lines.Add("        public uint Size;");
+            for (var chunk = 0; chunk < chunkCount; chunk++)
+            {
+                lines.Add($"        public TableChunk{chunk} C{chunk};");
             }
 
             lines.AddRange(
@@ -542,11 +565,11 @@ internal static class InteropEmitter
                 "",
                 $"public sealed unsafe class {callable.ClassName} : global::System.IDisposable",
                 "{",
-                "    private nint _handle;",
+                "    private nint __hosihikari_shim_handle;",
                 "",
-                $"    public {callable.ClassName}(nint handle) => _handle = handle;",
+                $"    public {callable.ClassName}(nint handle) => __hosihikari_shim_handle = handle;",
                 "",
-                "    public nint Handle => _handle;",
+                "    public nint Handle => __hosihikari_shim_handle;",
                 "",
             };
             EmitMethod(lines, "Invoke", callable.InvokeFunction!);
@@ -574,11 +597,11 @@ internal static class InteropEmitter
                 "",
                 $"public sealed unsafe class {variant.ClassName} : global::System.IDisposable",
                 "{",
-                "    private nint _handle;",
+                "    private nint __hosihikari_shim_handle;",
                 "",
-                $"    public {variant.ClassName}(nint handle) => _handle = handle;",
+                $"    public {variant.ClassName}(nint handle) => __hosihikari_shim_handle = handle;",
                 "",
-                "    public nint Handle => _handle;",
+                "    public nint Handle => __hosihikari_shim_handle;",
             };
 
             for (var index = 0; index < variant.Alternatives.Count; index++)
@@ -588,7 +611,7 @@ internal static class InteropEmitter
             }
 
             lines.Add("");
-            lines.Add($"    public int Index => NativeMethods.TablePtr->{variant.IndexFunction!.TableField}((void*)_handle);");
+            lines.Add($"    public int Index => NativeMethods.{TableFieldAccess(variant.IndexFunction!)}((void*)__hosihikari_shim_handle);");
             foreach (var alternative in variant.Alternatives)
             {
                 lines.Add("");
@@ -604,10 +627,10 @@ internal static class InteropEmitter
             lines.Add("");
             lines.Add("    public void Dispose()");
             lines.Add("    {");
-            lines.Add("        if (_handle != 0)");
+            lines.Add("        if (__hosihikari_shim_handle != 0)");
             lines.Add("        {");
-            lines.Add($"            NativeMethods.TablePtr->{variant.DestroyFunction!.TableField}((void*)_handle);");
-            lines.Add("            _handle = 0;");
+            lines.Add($"            NativeMethods.{TableFieldAccess(variant.DestroyFunction!)}((void*)__hosihikari_shim_handle);");
+            lines.Add("            __hosihikari_shim_handle = 0;");
             lines.Add("        }");
             lines.Add("    }");
             lines.Add("}");
@@ -638,7 +661,7 @@ internal static class InteropEmitter
             lines.Add("        var __hs_stringBytes = global::System.Text.Encoding.UTF8.GetBytes(value);");
             lines.Add("        fixed (byte* __hs_stringData = __hs_stringBytes)");
             lines.Add("        {");
-            lines.Add($"            var handle = NativeMethods.TablePtr->{create.TableField}(__hs_stringData, (nuint)__hs_stringBytes.Length);");
+            lines.Add($"            var handle = NativeMethods.{TableFieldAccess(create)}(__hs_stringData, (nuint)__hs_stringBytes.Length);");
             EmitVariantHandleCheck(lines, variant.ClassName, "            ");
             lines.Add("        }");
         }
@@ -650,7 +673,7 @@ internal static class InteropEmitter
                 VariantAlternativeKind.Pointer => "(void*)value",
                 _ => "value",
             };
-            lines.Add($"        var handle = NativeMethods.TablePtr->{create.TableField}({argument});");
+            lines.Add($"        var handle = NativeMethods.{TableFieldAccess(create)}({argument});");
             EmitVariantHandleCheck(lines, variant.ClassName, "        ");
         }
 
@@ -685,21 +708,21 @@ internal static class InteropEmitter
         switch (alternative.Kind)
         {
             case VariantAlternativeKind.String:
-                lines.Add($"        var __hs_view = NativeMethods.TablePtr->{getter.TableField}((void*)_handle);");
+                lines.Add($"        var __hs_view = NativeMethods.{TableFieldAccess(getter)}((void*)__hosihikari_shim_handle);");
                 lines.Add("        return __hs_view.Data == null ? string.Empty : global::System.Text.Encoding.UTF8.GetString(__hs_view.Data, checked((int)__hs_view.Size));");
                 break;
             case VariantAlternativeKind.Record:
-                lines.Add($"        var __hs_handle = NativeMethods.TablePtr->{getter.TableField}((void*)_handle);");
+                lines.Add($"        var __hs_handle = NativeMethods.{TableFieldAccess(getter)}((void*)__hosihikari_shim_handle);");
                 lines.Add($"        return __hs_handle == null ? null : new {alternative.WrapperType}((nint)__hs_handle);");
                 break;
             case VariantAlternativeKind.Pointer:
-                lines.Add($"        var __hs_pointer = NativeMethods.TablePtr->{getter.TableField}((void*)_handle);");
+                lines.Add($"        var __hs_pointer = NativeMethods.{TableFieldAccess(getter)}((void*)__hosihikari_shim_handle);");
                 lines.Add("        return __hs_pointer == null ? null : (nint)__hs_pointer;");
                 break;
             default:
                 lines.Add(alternative.ScalarKind == AbiKind.Bool
-                    ? $"        return NativeMethods.TablePtr->{getter.TableField}((void*)_handle) != 0;"
-                    : $"        return NativeMethods.TablePtr->{getter.TableField}((void*)_handle);");
+                    ? $"        return NativeMethods.{TableFieldAccess(getter)}((void*)__hosihikari_shim_handle) != 0;"
+                    : $"        return NativeMethods.{TableFieldAccess(getter)}((void*)__hosihikari_shim_handle);");
                 break;
         }
 
@@ -1006,8 +1029,8 @@ internal static class InteropEmitter
         lines.Add("    {");
         if (hasGetter)
         {
-            var self = getter!.Static ? "" : "(void*)_handle";
-            var call = $"NativeMethods.TablePtr->{getter.TableField}({self})";
+            var self = getter!.Static ? "" : "(void*)__hosihikari_shim_handle";
+            var call = $"NativeMethods.{TableFieldAccess(getter)}({self})";
             switch (getter.ReturnKind)
             {
                 case AbiKind.StringView:
@@ -1034,13 +1057,13 @@ internal static class InteropEmitter
 
         if (hasSetter)
         {
-            var arguments = setter!.Static ? "value" : "(void*)_handle, value";
+            var arguments = setter!.Static ? "value" : "(void*)__hosihikari_shim_handle, value";
             if (setter.Parameters.Count > 0 && setter.Parameters[0].Kind == AbiKind.Opaque)
             {
-                arguments = setter.Static ? "(void*)value" : "(void*)_handle, (void*)value";
+                arguments = setter.Static ? "(void*)value" : "(void*)__hosihikari_shim_handle, (void*)value";
             }
 
-            lines.Add($"        set => NativeMethods.TablePtr->{setter.TableField}({arguments});");
+            lines.Add($"        set => NativeMethods.{TableFieldAccess(setter)}({arguments});");
         }
 
         lines.Add("    }");
@@ -1061,7 +1084,7 @@ internal static class InteropEmitter
             "        ",
             bodyIndent =>
             {
-                lines.Add(bodyIndent + $"var handle = NativeMethods.TablePtr->{create.TableField}({arguments});");
+                lines.Add(bodyIndent + $"var handle = NativeMethods.{TableFieldAccess(create)}({arguments});");
                 EmitHandleCheck(lines, bodyIndent);
                 lines.Add(bodyIndent + $"return new {className}((nint)handle);");
             });
@@ -1085,7 +1108,7 @@ internal static class InteropEmitter
         var callArguments = new List<string>();
         if (!method.Static)
         {
-            callArguments.Add("(void*)_handle");
+            callArguments.Add("(void*)__hosihikari_shim_handle");
         }
 
         callArguments.AddRange(BuildCallArgumentList(method.Parameters));
@@ -1094,7 +1117,7 @@ internal static class InteropEmitter
             callArguments.Add("&__hs_hasValue");
         }
 
-        var call = $"NativeMethods.TablePtr->{method.TableField}({string.Join(", ", callArguments)})";
+        var call = $"NativeMethods.{TableFieldAccess(method)}({string.Join(", ", callArguments)})";
         var returnType = method.ReturnKind switch
         {
             AbiKind.Void => "void",
@@ -1330,7 +1353,7 @@ internal static class InteropEmitter
             var parameter = parameters[index];
             if (parameter.Kind == AbiKind.Callback)
             {
-                var (invoke, userData, release) = CallbackNames(parameter, index);
+                var (invoke, userData, release) = CallbackNames(parameters, index);
                 declarations.Add($"nint {invoke}");
                 declarations.Add($"nint {userData}");
                 declarations.Add($"nint {release}");
@@ -1338,7 +1361,7 @@ internal static class InteropEmitter
             }
 
             var type = CSharpDeclarationType(parameter);
-            declarations.Add($"{type} {CSharpParameterName(parameter, index)}");
+            declarations.Add($"{type} {CSharpParameterName(parameters, index)}");
         }
 
         return string.Join(", ", declarations);
@@ -1370,10 +1393,10 @@ internal static class InteropEmitter
                     : AbiPlan.CSharpParameterType(parameter);
 
     private static (string Invoke, string UserData, string Release) CallbackNames(
-        AbiParameter parameter,
+        IReadOnlyList<AbiParameter> parameters,
         int index)
     {
-        var name = CSharpParameterName(parameter, index);
+        var name = CSharpParameterName(parameters, index);
         return (name + "Invoke", name + "UserData", name + "Release");
     }
 
@@ -1400,7 +1423,7 @@ internal static class InteropEmitter
         for (var index = 0; index < parameters.Count; index++)
         {
             var parameter = parameters[index];
-            var name = CSharpParameterName(parameter, index);
+            var name = CSharpParameterName(parameters, index);
             if (parameter.IsOptional)
             {
                 optionalPresence.Add(parameter.Kind switch
@@ -1455,7 +1478,7 @@ internal static class InteropEmitter
                     break;
                 case AbiKind.Callback:
                 {
-                    var (invoke, userData, release) = CallbackNames(parameter, index);
+                    var (invoke, userData, release) = CallbackNames(parameters, index);
                     yield return $"(void*){invoke}";
                     yield return $"(void*){userData}";
                     yield return $"(void*){release}";
@@ -1556,7 +1579,7 @@ internal static class InteropEmitter
 
         var index = mapIndices[position];
         var parameter = parameters[index];
-        var name = CSharpParameterName(parameter, index);
+        var name = CSharpParameterName(parameters, index);
         var suffix = index.ToString(System.Globalization.CultureInfo.InvariantCulture);
         var keyHasStrings = parameter.MapKeyKind == AbiKind.StringView;
         var valueHasStrings = parameter.MapValueKind == AbiKind.StringView;
@@ -1763,7 +1786,7 @@ internal static class InteropEmitter
 
         var index = vectorIndices[position];
         var vector = parameters[index];
-        var vectorName = CSharpParameterName(vector, index);
+        var vectorName = CSharpParameterName(parameters, index);
         var suffix = index.ToString(System.Globalization.CultureInfo.InvariantCulture);
         if (vector.VectorElementOwnership == ArrayElementOwnership.PairCopy)
         {
@@ -1933,7 +1956,7 @@ internal static class InteropEmitter
     {
         foreach (var index in stringIndices)
         {
-            var name = CSharpParameterName(parameters[index], index);
+            var name = CSharpParameterName(parameters, index);
             var expression = parameters[index].IsOptional
                 ? $"{name} ?? string.Empty"
                 : name;
@@ -1972,45 +1995,85 @@ internal static class InteropEmitter
         lines.Add(indent + "}");
     }
 
-    private static string CSharpParameterName(AbiParameter parameter, int index)
+    private static string CSharpParameterName(IReadOnlyList<AbiParameter> parameters, int index)
     {
-        return TypeNames.Sanitize(
-            string.IsNullOrWhiteSpace(parameter.Name)
-                ? "arg" + index.ToString(System.Globalization.CultureInfo.InvariantCulture)
-                : parameter.Name);
+        var used = new HashSet<string>(StringComparer.Ordinal);
+        string? result = null;
+        for (var position = 0; position <= index; position++)
+        {
+            var parameter = parameters[position];
+            var candidate = TypeNames.Sanitize(
+                string.IsNullOrWhiteSpace(parameter.Name)
+                    ? "arg" + position.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                    : parameter.Name);
+            var name = candidate;
+            var counter = position;
+            while (!used.Add(name))
+            {
+                name = candidate + counter.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                counter++;
+            }
+
+            if (position == index)
+            {
+                result = name;
+            }
+        }
+
+        return result!;
     }
 
     private static void EmitDispose(List<string> lines, AbiFunction destroy, bool ownershipAware = true)
     {
         lines.Add("    public void Dispose()");
         lines.Add("    {");
-        lines.Add("        if (_handle != 0)");
+        lines.Add("        if (__hosihikari_shim_handle != 0)");
         lines.Add("        {");
         if (ownershipAware)
         {
             lines.Add("            if (_ownsHandle)");
             lines.Add("            {");
-            lines.Add($"                NativeMethods.TablePtr->{destroy.TableField}((void*)_handle);");
+            lines.Add($"                NativeMethods.{TableFieldAccess(destroy)}((void*)__hosihikari_shim_handle);");
             lines.Add("            }");
             lines.Add("");
         }
         else
         {
-            lines.Add($"            NativeMethods.TablePtr->{destroy.TableField}((void*)_handle);");
+            lines.Add($"            NativeMethods.{TableFieldAccess(destroy)}((void*)__hosihikari_shim_handle);");
         }
 
-        lines.Add("            _handle = 0;");
+        lines.Add("            __hosihikari_shim_handle = 0;");
         lines.Add("        }");
         lines.Add("    }");
     }
 
     private static string CSharpParameters(MemberRecord member)
     {
-        return member.Signature is null
-            ? ""
-            : string.Join(
-                ", ",
-                member.Signature.Parameters.Select((parameter, index) =>
-                    $"{TypeNames.ToCSharpType(new TypeRef { Kind = "fundamental", Canonical = parameter.Type })} {TypeNames.Sanitize(string.IsNullOrWhiteSpace(parameter.Name) ? $"arg{index}" : parameter.Name)}"));
+        if (member.Signature is null)
+        {
+            return "";
+        }
+
+        var used = new HashSet<string>(StringComparer.Ordinal);
+        var declarations = new List<string>();
+        for (var index = 0; index < member.Signature.Parameters.Count; index++)
+        {
+            var parameter = member.Signature.Parameters[index];
+            var candidate = TypeNames.Sanitize(
+                string.IsNullOrWhiteSpace(parameter.Name)
+                    ? "arg" + index.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                    : parameter.Name);
+            var name = candidate;
+            var counter = index;
+            while (!used.Add(name))
+            {
+                name = candidate + counter.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                counter++;
+            }
+
+            declarations.Add($"{TypeNames.ToCSharpType(new TypeRef { Kind = "fundamental", Canonical = parameter.Type })} {name}");
+        }
+
+        return string.Join(", ", declarations);
     }
 }

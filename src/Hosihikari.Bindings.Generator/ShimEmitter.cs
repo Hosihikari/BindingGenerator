@@ -15,7 +15,8 @@ internal static class ShimEmitter
         string manifestHash,
         AbiPlan plan,
         string abiHeader,
-        string targetModule = "bedrock_server")
+        string targetModule = "bedrock_server",
+        bool resolveByName = false)
     {
         foreach (var configuration in manifest.Configurations.OrderBy(configuration => configuration.Id, StringComparer.Ordinal))
         {
@@ -55,7 +56,8 @@ internal static class ShimEmitter
                     plan.SymbolDispatch,
                     targetModule,
                     manifest,
-                    abiHeader);
+                    abiHeader,
+                    resolveByName);
             }
         }
     }
@@ -119,7 +121,8 @@ internal static class ShimEmitter
         bool symbolDispatch,
         string targetModule,
         IrManifest manifest,
-        string abiHeader)
+        string abiHeader,
+        bool resolveByName = false)
     {
         var directory = Path.Combine(outputDirectory, "shim", configuration.Id, surface);
         Directory.CreateDirectory(directory);
@@ -177,7 +180,8 @@ internal static class ShimEmitter
                 functions,
                 records,
                 targetModule,
-                manifest);
+                manifest,
+                resolveByName);
             return;
         }
 
@@ -2140,7 +2144,8 @@ internal static class ShimEmitter
         IReadOnlyList<AbiFunction> functions,
         IReadOnlyList<IrRecord> records,
         string targetModule,
-        IrManifest manifest)
+        IrManifest manifest,
+        bool resolveByName = false)
     {
         var members = records.OfType<MemberRecord>()
             .Where(member => string.Equals(member.Configuration, configuration.Id, StringComparison.Ordinal))
@@ -2185,7 +2190,7 @@ internal static class ShimEmitter
             "",
         };
 
-        AppendSymbolResolution(source, configuration.Os, targetModule);
+        AppendSymbolResolution(source, configuration.Os, targetModule, resolveByName);
 
         source.Add("");
         // A std::initializer_list and a buffer_span are both {begin, end}; the shim builds
@@ -2390,8 +2395,26 @@ internal static class ShimEmitter
         Write(directory, header, source);
     }
 
-    private static void AppendSymbolResolution(List<string> source, string os, string targetModule)
+    private static void AppendSymbolResolution(
+        List<string> source,
+        string os,
+        string targetModule,
+        bool resolveByName)
     {
+        if (resolveByName)
+        {
+            // The carrier resolves a mangled name to an address at run time; there is no
+            // address in the IR to prefer.
+            source.Add("extern \"C\" void* pl_resolve_symbol(char const* symbolName);");
+            source.Add("");
+            source.Add("inline void* hs_resolve(std::uintptr_t, char const* symbol)");
+            source.Add("{");
+            source.Add("    return (symbol != nullptr && *symbol != '\\0') ? ::pl_resolve_symbol(symbol) : nullptr;");
+            source.Add("}");
+            source.Add("");
+            return;
+        }
+
         source.Add("void* hs_resolve(std::uintptr_t offset, const char* symbol);");
         source.Add("");
 
@@ -2867,7 +2890,8 @@ internal static class ShimEmitter
             && entry is { Virtual: true, VTableIndex: not null }
             && string.IsNullOrWhiteSpace(entry.Symbol)
             && entry.Rva is null
-            && entry.Address is null;
+            && entry.Address is null
+            && string.IsNullOrWhiteSpace(entry.MangledName);
         LayoutInfo? layout = null;
         if (function.Kind is AbiFunctionKind.Create or AbiFunctionKind.Destroy)
         {
@@ -2875,7 +2899,7 @@ internal static class ShimEmitter
         }
 
         var hasTarget = virtualCall
-            || entry is not null && (!string.IsNullOrWhiteSpace(entry.Symbol) || entry.Rva is not null || entry.Address is not null);
+            || entry is not null && HasDispatchSymbol(entry);
         if (!hasTarget && function.Kind != AbiFunctionKind.Destroy)
         {
             yield return $"    setLastError(\"symbol dispatch has no entry for {EscapeCpp(function.DeclarationId)} in {EscapeCpp(configuration.Id)}\");";
@@ -3578,7 +3602,8 @@ internal static class ShimEmitter
     private static bool HasDispatchSymbol(MemberRecord member) =>
         !string.IsNullOrWhiteSpace(member.Symbol)
         || member.Address is not null
-        || member.Rva is not null;
+        || member.Rva is not null
+        || !string.IsNullOrWhiteSpace(member.MangledName);
 
     private static bool IsCopyConstructorRecord(MemberRecord member, string typeName)
     {
@@ -3623,6 +3648,15 @@ internal static class ShimEmitter
 
     private static (string Offset, string Symbol) SymbolFacts(MemberRecord member, string os)
     {
+        // A member that carries only a mangled name is resolved by name at run time.
+        if (member.Symbol is null
+            && member.Rva is null
+            && member.Address is null
+            && member.MangledName is not null)
+        {
+            return ("std::uintptr_t{0}", member.MangledName);
+        }
+
         ulong? offset = string.Equals(os, "windows", StringComparison.Ordinal)
             ? member.Rva
             : member.Address;
