@@ -531,6 +531,18 @@ internal sealed class AbiPlan
                 }
 
                 var candidateMembers = membersByDeclaration.TryGetValue(candidate.Id, out var value) ? value : [];
+
+                // The generated headers carry some templates as empty shells whose real
+                // layout only exists in the game binary. A by-value result sized from such
+                // a shell would be too small, so a template may only carry one when its
+                // header proves the layout with a data member or a base record.
+                if (candidate.Template is not null
+                    && !candidateMembers.Any(member => member.Kind == "field")
+                    && layout.Bases.Count == 0)
+                {
+                    continue;
+                }
+
                 var hasVirtual = candidateMembers.Any(member => member.Virtual);
                 if (candidate.TriviallyDestructible)
                 {
@@ -640,13 +652,22 @@ internal sealed class AbiPlan
             string? declarationReason = null;
             if (symbolDispatch)
             {
-                // A defaulted-argument template specialization that is returned by value keeps
-                // the declaration so the shim can emit its destroy entry; its members still go
-                // through the ordinary member rules.
-                var resultReturn = declaration.Template is not null
-                    ? ShortDefaultedResultSpelling(declaration.QualifiedName)
-                    : null;
-                var byValueReturnTemplate = resultReturn is not null && byValueReturnNames.Contains(resultReturn);
+                // A template specialization that is returned by value keeps the declaration so
+                // the shim can size its result buffer and emit the destroy entry; its members
+                // still go through the ordinary member rules. The signature may print the
+                // short Bedrock::Result<T> spelling while the declaration carries the
+                // defaulted error argument, so both spellings are accepted. The header must
+                // prove the layout; a reconstructed shell would size the buffer wrongly.
+                var templateLayoutProven = declaration.Template is null
+                    || (layoutByDeclarationId.TryGetValue(declaration.Id, out var templateLayout)
+                        && (templateLayout.Bases.Count > 0
+                            || (membersByDeclaration.TryGetValue(declaration.Id, out var templateMembers)
+                                && templateMembers.Any(member => member.Kind == "field"))));
+                var byValueReturnTemplate = declaration.Template is not null
+                    && templateLayoutProven
+                    && (byValueReturnNames.Contains(declaration.QualifiedName)
+                        || (ShortDefaultedResultSpelling(declaration.QualifiedName) is { } shortResultName
+                            && byValueReturnNames.Contains(shortResultName)));
                 if (declaration.Template is not null && !byValueReturnTemplate)
                 {
                     declarationReason = "template classes are not supported by symbol dispatch";

@@ -4,6 +4,7 @@ param(
     [string]$Output = "artifacts/levi-1.21.3-header-ir",
     [string]$LlvmRoot = "$env:LOCALAPPDATA\Temp\hosihikari-llvm\clang+llvm-23.1.4-x86_64-pc-windows-msvc",
     [string[]]$AdditionalIncludePath = @(),
+    [string[]]$ExternalRoot = @(),
     [string]$HeaderList = "",
     [string]$AppendSource = "",
     [switch]$UseCompileCommands,
@@ -251,6 +252,9 @@ if ($EmitImplicitDestructors) {
 }
 if ($EmitVTableIndices) {
     $FrontendArgs += "--emit-vtable-indices"
+}
+foreach ($Root in $ExternalRoot) {
+    $FrontendArgs += @("--external-root", (Resolve-Path $Root).Path)
 }
 & $Frontend @FrontendArgs -- @CompilerArgs
 

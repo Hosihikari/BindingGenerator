@@ -56,6 +56,10 @@ struct Options {
     // Virtual members are dispatched through the object's vftable; the slot index is
     // computed with clang's MicrosoftVTableContext and kept relative to the address point.
     bool EmitVTableIndices = false;
+    // Declarations from these paths are emitted even though they sit outside the service
+    // root. A carrier can refer by value to a third-party type (leveldb::Status) whose
+    // definition lives in an included package; the ABI needs that layout.
+    std::vector<std::string> ExternalRoots;
     std::vector<std::string> CompilerArgs;
 };
 
@@ -360,6 +364,12 @@ bool parseOptions(int argc, char** argv, Options& Opt) {
                 return false;
             }
             Opt.Filters.push_back(std::move(Filter));
+        } else if (Arg == "--external-root") {
+            std::string ExternalRoot;
+            if (!next(ExternalRoot)) {
+                return false;
+            }
+            Opt.ExternalRoots.push_back(std::move(ExternalRoot));
         } else if (Arg == "--module") {
             if (!next(Opt.Module)) {
                 return false;
@@ -767,6 +777,14 @@ private:
         std::string Path = normalizePath(Absolute.str().str());
         std::string Root = normalizePath(Opt.Root);
         if (Path.rfind(Root, 0) != 0) {
+            // External roots are explicit opt-ins, so the service filters do not apply to
+            // them: they name the exact files or directories the surface needs.
+            for (const auto& ExternalRoot : Opt.ExternalRoots) {
+                if (Path.rfind(normalizePath(ExternalRoot), 0) == 0) {
+                    return true;
+                }
+            }
+
             return false;
         }
 
@@ -1463,7 +1481,8 @@ int main(int argc, char** argv) {
     if (!parseOptions(argc, argv, Opt)) {
         llvm::errs() << "usage: hosihikari-ir-frontend --surface <surface> --output <dir> --root <include-root> "
                         "--configuration <id> [--header <header>] [--source <file>] [--filter <path>] "
-                        "[--module <module>] [--flatten-anonymous-fields] -- <clang args>\n";
+                        "[--external-root <path>] [--module <module>] [--flatten-anonymous-fields] "
+                        "-- <clang args>\n";
         return 2;
     }
 
