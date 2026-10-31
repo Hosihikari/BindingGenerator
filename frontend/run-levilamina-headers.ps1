@@ -5,6 +5,7 @@ param(
     [string]$LlvmRoot = "$env:LOCALAPPDATA\Temp\hosihikari-llvm\clang+llvm-23.1.4-x86_64-pc-windows-msvc",
     [string[]]$AdditionalIncludePath = @(),
     [string]$HeaderList = "",
+    [string]$AppendSource = "",
     [switch]$UseCompileCommands,
     [switch]$EmitMangledNames,
     [switch]$EmitImplicitDestructors,
@@ -144,6 +145,9 @@ New-Item -ItemType Directory -Force -Path $Output | Out-Null
 # supplies it through its precompiled header, so provide it from the umbrella instead.
 $UmbrellaPrelude = @("#include <fmt/format.h>", "#include <fmt/args.h>")
 $UmbrellaText = ($UmbrellaPrelude + ($Headers | ForEach-Object { "#include `"$_`"" })) -join "`n"
+if (-not [string]::IsNullOrWhiteSpace($AppendSource)) {
+    $UmbrellaText += "`n" + [System.IO.File]::ReadAllText((Resolve-Path $AppendSource).Path)
+}
 [System.IO.File]::WriteAllText($Umbrella, "$UmbrellaText`n", (New-Object System.Text.UTF8Encoding($false)))
 
 $VsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
@@ -223,6 +227,10 @@ else {
         "-isystem", (Join-Path $SdkRoot "$($Sdk.Name)\um")
     )
 }
+
+# A prelude may instantiate header templates with arguments the tree only forward-declares;
+# keep parsing past clang's default error limit so the remaining declarations survive.
+$CompilerArgs += "-ferror-limit=0"
 
 $FrontendArgs = @(
     "--surface", "bedrock",
