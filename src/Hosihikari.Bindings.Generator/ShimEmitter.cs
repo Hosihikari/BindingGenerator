@@ -3218,6 +3218,7 @@ internal static class ShimEmitter
         var memberStringReturn = function.Kind == AbiFunctionKind.Method
             && function.ReturnKind == AbiKind.StringView
             && !function.ReturnOptional
+            && !function.MutableStringOut
             && !function.NativeReturnType.TrimEnd().EndsWith("&", StringComparison.Ordinal)
             && AbiPlan.IsStringType(function.NativeReturnType);
         var memberSretReturn = memberStringReturn || largeRecordReturn;
@@ -3236,6 +3237,13 @@ internal static class ShimEmitter
         else if (smallRecordReturn)
         {
             callReturn = RegisterType(returnLayout!);
+        }
+
+        // The native function returns void; the string result comes from the rewritten
+        // argument, so the call itself has no return value.
+        if (function.MutableStringOut)
+        {
+            callReturn = "void";
         }
 
         if (spanReturn)
@@ -3391,14 +3399,25 @@ internal static class ShimEmitter
 
                 callArguments.Add(parameter.Kind switch
                 {
-                    AbiKind.StringView => $"hs_str{index}",
+                    // An rvalue reference parameter has to receive an rvalue; the shim's
+                    // local string is movable and is destroyed by the shim afterwards.
+                    AbiKind.StringView => parameter.IsRValueReference
+                        ? $"std::move(hs_str{index})"
+                        : $"hs_str{index}",
                     AbiKind.Opaque when parameter.IsByValueRecord => ByValueArgument(parameter, index, layouts),
                     _ => name,
                 });
             }
 
             var call = $"hs_fn({string.Join(", ", callArguments)})";
-            if (function.Kind == AbiFunctionKind.Create)
+            if (function.MutableStringOut)
+            {
+                var mutableIndex = function.Parameters.FindIndex(parameter => parameter.IsMutableString);
+                yield return $"    {call};";
+                yield return $"    g_stringResult.assign(hs_str{mutableIndex});";
+                yield return "    return HosihikariStringView{g_stringResult.data(), g_stringResult.size()};";
+            }
+            else if (function.Kind == AbiFunctionKind.Create)
             {
                 yield return $"    {call};";
                 yield return "    return hs_memory;";

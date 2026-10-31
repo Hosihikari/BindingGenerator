@@ -72,6 +72,13 @@ internal sealed class AbiParameter
     public bool IsReference { get; init; }
     public bool IsRValueReference { get; init; }
     public bool IsConst { get; init; }
+
+    /// <summary>
+    /// True for a non-const std::string lvalue reference. The callee rewrites the text in
+    /// place, so the shim hands it a real string and reports the rewritten value back as
+    /// the call result.
+    /// </summary>
+    public bool IsMutableString { get; init; }
     public bool IsOptional { get; init; }
     public string? OptionalInnerType { get; init; }
 
@@ -291,6 +298,12 @@ internal sealed class AbiFunction
     public string? ExpectedErrorType { get; init; }
     public bool NeedsPresenceFlag => ReturnOptional || ReturnExpected;
     public List<AbiParameter> Parameters { get; init; } = [];
+
+    /// <summary>
+    /// True when the native call returns void but rewrites a std::string argument in place;
+    /// the shim reports that text as the call result instead.
+    /// </summary>
+    public bool MutableStringOut => Parameters.Any(parameter => parameter.IsMutableString);
     public bool Static { get; init; }
 
     /// <summary>
@@ -3119,14 +3132,35 @@ internal sealed class AbiPlan
                 return false;
             }
 
-            if (abiParameter.Kind == AbiKind.StringView
-                && IsNonConstLValueReference(parameter.Type))
+            parameters.Add(abiParameter);
+        }
+
+        // A mutable std::string argument is rewritten by the callee. The shim owns the
+        // string and can report the rewritten text, but only one value fits the result
+        // channel; the native return must be void so nothing else needs it.
+        var mutableStrings = parameters.Where(parameter => parameter.IsMutableString).ToList();
+        if (mutableStrings.Count > 0)
+        {
+            if (!symbolDispatch)
             {
-                reason = "methods do not accept mutable string references";
+                reason = "mutable string references require symbol dispatch";
                 return false;
             }
 
-            parameters.Add(abiParameter);
+            if (mutableStrings.Count > 1)
+            {
+                reason = "multiple mutable string references are not supported";
+                return false;
+            }
+
+            if (returnKind != AbiKind.Void)
+            {
+                reason = "a mutable string reference requires a void return";
+                return false;
+            }
+
+            returnKind = AbiKind.StringView;
+            nativeReturnType = "std::basic_string<char>";
         }
 
         function = new AbiFunction
@@ -5761,11 +5795,20 @@ internal sealed class AbiPlan
 
         if (IsStringViewType(text) || IsStringType(text))
         {
+            var mutableString = IsNonConstLValueReference(text) && IsStringType(text);
+            if (IsNonConstLValueReference(text) && !mutableString)
+            {
+                reason = "mutable string_view references are not supported";
+                return false;
+            }
+
             parameter = new AbiParameter
             {
                 Name = name,
                 Kind = AbiKind.StringView,
                 NativeType = text,
+                IsRValueReference = IsRValueReference(text),
+                IsMutableString = mutableString,
             };
             return true;
         }
@@ -6814,18 +6857,6 @@ internal sealed class AbiPlan
                 case AbiKind.Shared:
                     break;
                 case AbiKind.StringView:
-                    if (IsRValueReference(parameter.NativeType))
-                    {
-                        reason = "rvalue string references are not supported by symbol dispatch";
-                        return false;
-                    }
-
-                    if (IsNonConstLValueReference(parameter.NativeType))
-                    {
-                        reason = "mutable string references are not supported by symbol dispatch";
-                        return false;
-                    }
-
                     if (!IsStringType(parameter.NativeType) && !IsStringViewType(parameter.NativeType))
                     {
                         reason = "only std::string and std::string_view parameters are supported";
