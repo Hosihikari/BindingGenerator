@@ -2960,6 +2960,13 @@ internal static class ShimEmitter
                 && entry.Rva is null
                 && entry.Address is null
                 && string.IsNullOrWhiteSpace(entry.MangledName));
+        // A virtual method carries both a symbol and a slot. The symbol is preferred, but
+        // an implementation whose symbol is not exported (the leveldb::Env overrides, the
+        // WebRTC classes) is still reachable through the object's vtable; fall back to the
+        // slot when the lookup is empty.
+        var virtualFallback = function.Kind == AbiFunctionKind.Method
+            && !virtualCall
+            && entry is { Virtual: true, VTableIndex: not null };
         LayoutInfo? layout = null;
         if (function.Kind is AbiFunctionKind.Create or AbiFunctionKind.Destroy)
         {
@@ -3009,6 +3016,17 @@ internal static class ShimEmitter
             if (function.Kind == AbiFunctionKind.Destroy)
             {
                 yield return $"    static auto const hs_dtor = hs_resolve({offset}, {CppLiteral(symbol)});";
+            }
+            else if (virtualFallback)
+            {
+                var index = entry.VTableIndex!.Value;
+                yield return $"    static auto const hs_symbol = hs_resolve({offset}, {CppLiteral(symbol)});";
+                yield return "    void const* hs_target = hs_symbol;";
+                yield return "    if (hs_target == nullptr)";
+                yield return "    {";
+                yield return "        auto* const hs_vtable = *reinterpret_cast<void***>(hs_self);";
+                yield return $"        hs_target = hs_vtable[{index.ToString(CultureInfo.InvariantCulture)}];";
+                yield return "    }";
             }
             else
             {
