@@ -9,6 +9,7 @@ param(
     [switch]$UseCompileCommands,
     [switch]$EmitMangledNames,
     [switch]$EmitImplicitDestructors,
+    [switch]$EmitVTableIndices,
     [switch]$SkipBuild
 )
 if ([string]::IsNullOrWhiteSpace($LeviLaminaRoot)) {
@@ -247,6 +248,9 @@ if ($EmitMangledNames) {
 }
 if ($EmitImplicitDestructors) {
     $FrontendArgs += "--emit-implicit-destructors"
+}
+if ($EmitVTableIndices) {
+    $FrontendArgs += "--emit-vtable-indices"
 }
 & $Frontend @FrontendArgs -- @CompilerArgs
 

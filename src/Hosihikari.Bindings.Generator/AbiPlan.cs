@@ -1218,8 +1218,10 @@ internal sealed class AbiPlan
                     {
                         reason = "the member has no symbol or vtable slot in the IR";
                     }
-                    else if (method.Pure)
+                    else if (method.Pure && !(method.Virtual && method.VTableIndex is not null))
                     {
+                        // A pure declaration has no implementation symbol, but a vtable slot
+                        // dispatches through the object's override.
                         reason = "the member is pure virtual";
                     }
                 }

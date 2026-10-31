@@ -7,6 +7,7 @@
 #include "clang/AST/DeclCXX.h"
 #include "clang/AST/DeclTemplate.h"
 #include "clang/AST/RecordLayout.h"
+#include "clang/AST/VTableBuilder.h"
 #include "clang/AST/RecursiveASTVisitor.h"
 #include "clang/Basic/Diagnostic.h"
 #include "clang/Basic/SourceManager.h"
@@ -52,6 +53,9 @@ struct Options {
     // A surface planned from headers alone releases by-value results through the record's
     // destructor, and the header never spells an implicit one out.
     bool EmitImplicitDestructors = false;
+    // Virtual members are dispatched through the object's vftable; the slot index is
+    // computed with clang's MicrosoftVTableContext and kept relative to the address point.
+    bool EmitVTableIndices = false;
     std::vector<std::string> CompilerArgs;
 };
 
@@ -366,6 +370,8 @@ bool parseOptions(int argc, char** argv, Options& Opt) {
             Opt.EmitMangledNames = true;
         } else if (Arg == "--emit-implicit-destructors") {
             Opt.EmitImplicitDestructors = true;
+        } else if (Arg == "--emit-vtable-indices") {
+            Opt.EmitVTableIndices = true;
         } else {
             llvm::errs() << "unknown option: " << Arg << "\n";
             return false;
@@ -1430,6 +1436,13 @@ private:
                 std::string Mangled = mangleDecl(Method);
                 if (!Mangled.empty()) {
                     Object["mangledName"] = Mangled;
+                }
+            }
+            if (Opt.EmitVTableIndices && Method->isVirtual()
+                && !isa<CXXDestructorDecl>(Method) && Method->getParent()->isCompleteDefinition()) {
+                if (auto* MSVT = dyn_cast<clang::MicrosoftVTableContext>(Ctx.getVTableContext())) {
+                    auto Location = MSVT->getMethodVFTableLocation(GlobalDecl(Method));
+                    Object["vtableIndex"] = static_cast<int64_t>(Location.Index);
                 }
             }
             if (Method->begin_overridden_methods() != Method->end_overridden_methods()) {

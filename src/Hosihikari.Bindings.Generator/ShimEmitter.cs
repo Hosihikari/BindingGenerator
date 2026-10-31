@@ -2950,14 +2950,16 @@ internal static class ShimEmitter
 
         // A direct symbol or RVA is preferred: it addresses the implementation the
         // IR recorded, while a vtable slot can point at an ICF-folded or adjacent
-        // entry when the original layout is ambiguous.
+        // entry when the original layout is ambiguous. A pure virtual method has no
+        // implementation symbol, so its call always goes through the object's vtable.
         var virtualCall = function.Kind == AbiFunctionKind.Method
             && !function.Static
             && entry is { Virtual: true, VTableIndex: not null }
-            && string.IsNullOrWhiteSpace(entry.Symbol)
-            && entry.Rva is null
-            && entry.Address is null
-            && string.IsNullOrWhiteSpace(entry.MangledName);
+            && (entry.Pure
+                || string.IsNullOrWhiteSpace(entry.Symbol)
+                && entry.Rva is null
+                && entry.Address is null
+                && string.IsNullOrWhiteSpace(entry.MangledName));
         LayoutInfo? layout = null;
         if (function.Kind is AbiFunctionKind.Create or AbiFunctionKind.Destroy)
         {
